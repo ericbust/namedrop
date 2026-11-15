@@ -110,7 +110,7 @@ pub use integration::{
     DeliveryControlDraft, DeliveryEnvelope, INTEGRATION_PROTOCOL_VERSION, InputTransport,
     IntegrationChallenge, IntegrationPackage, IntegrationRegistration, IntegrationToolInvocation,
     OperationCatalog, REPLY_BODY_PLACEHOLDER, ResultSetCompletion, ResultSetOutcome,
-    ResultSetStatus, complete_capability_profile, describe_operations,
+    ResultSetStatus, complete_capability_profile, describe_operations, describe_operations_for,
     execute_integration_operation, integration_package, issue_registration_challenge,
     operation_catalog, trusted_delivery_instruction,
 };

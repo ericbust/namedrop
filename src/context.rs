@@ -295,9 +295,10 @@ where
         "context.revoke" if invocation == ContextInvocation::Human => {
             revoke_human_grant(input, runtime)
         }
-        "context.grant" | "context.revoke" => {
-            Err(format!("{operation} requires a Herdr-managed human action"))
-        }
+        "context.grant" | "context.revoke" => Err(format!(
+            "{operation} requires a {}-managed human action",
+            runtime.mux.endpoint().kind.title()
+        )),
         "snapshot.publish" if invocation == ContextInvocation::AgentSession => {
             publish_snapshot(input, runtime)
         }
@@ -432,9 +433,17 @@ where
             return Err(error);
         }
     };
-    let pane_id = runtime
-        .current_pane_id
-        .ok_or_else(|| "the current Herdr pane is required for snapshot publication".to_owned())?;
+    let pane_id = runtime.current_pane_id.ok_or_else(|| {
+        runtime
+            .mux
+            .endpoint()
+            .kind
+            .text(
+                "the current Herdr pane is required for snapshot publication",
+                "the current Rex pane is required for snapshot publication",
+            )
+            .to_owned()
+    })?;
     let attribution = MutationAttribution::new(
         ActorKind::AgentSession,
         "current-agent-session",
@@ -729,9 +738,10 @@ where
         .transaction(|transaction| {
             let reader = if invocation == ContextInvocation::AgentSession {
                 let pane_id = runtime.current_pane_id.ok_or_else(|| {
-                    StoreError::invalid_input(
+                    StoreError::invalid_input(runtime.mux.endpoint().kind.text(
                         "the current Herdr pane is required for context inspection",
-                    )
+                        "the current Rex pane is required for context inspection",
+                    ))
                 })?;
                 Some(registered_current_address(
                     transaction,
@@ -880,9 +890,10 @@ where
         .transaction(|transaction| {
             let reader = if invocation == ContextInvocation::AgentSession {
                 let pane_id = runtime.current_pane_id.ok_or_else(|| {
-                    StoreError::invalid_input(
+                    StoreError::invalid_input(runtime.mux.endpoint().kind.text(
                         "the current Herdr pane is required for Agent Session context reads",
-                    )
+                        "the current Rex pane is required for Agent Session context reads",
+                    ))
                 })?;
                 Some(registered_current_address(
                     transaction,

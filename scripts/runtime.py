@@ -1033,7 +1033,7 @@ def stage(root, runtime, incoming):
 
 def activate(root, args, *, verify='activate'):
     state = Path(os.environ['HERDR_PLUGIN_STATE_DIR'])
-    require(state.is_absolute() and state.is_dir(), 'Activation needs an absolute, existing state directory.')
+    require(state.is_absolute() and state.is_dir(), ('Installation' if verify == 'install' else 'Activation') + ' needs an absolute, existing state directory.')
     installation = None
     if verify == 'install':
         from runtime_install import Install
@@ -1192,6 +1192,7 @@ def activate(root, args, *, verify='activate'):
 
 
 if __name__ == '__main__':
+    verify = 'activate'
     try:
         # No argparse: macOS's system Python caches each newly imported module
         # under HOME, and Herdr's activation writes nothing new there.
@@ -1213,5 +1214,6 @@ if __name__ == '__main__':
         # only when the new run.sh is byte for byte the installed one.
         sys.exit(activate(Path(root).resolve(), arguments, verify=verify))
     except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError, subprocess.SubprocessError) as error:
-        print(f'Namedrop runtime activation stopped: {error}', file=sys.stderr)
+        action = 'installation' if verify == 'install' else 'activation'
+        print(f'Namedrop runtime {action} stopped: {error}', file=sys.stderr)
         sys.exit(2)

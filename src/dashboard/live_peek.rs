@@ -570,7 +570,7 @@ impl Observer {
         if Endpoint::parse(&binding.namespace.session_socket_id).kind != MuxKind::Herdr {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "live peek works only in Herdr panes",
+                "live peek is not available in Rex panes",
             ));
         }
         let mut command = Command::new(std::env::current_exe()?);
@@ -1526,7 +1526,10 @@ mod tests {
             .err()
             .expect("a Rex binding has no observer");
         assert_eq!(refused.kind(), io::ErrorKind::Unsupported);
-        assert_eq!(refused.to_string(), "live peek works only in Herdr panes");
+        assert_eq!(
+            refused.to_string(),
+            "live peek is not available in Rex panes"
+        );
     }
 
     #[test]

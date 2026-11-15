@@ -1,0 +1,37 @@
+[
+  {
+    "file": "src/mux/rex/popup.rs",
+    "line": 40,
+    "source": "This pane is running Herdr. Use Herdr's own {title}.",
+    "text": "This pane is running Herdr. Use Herdr's own Name this pane.",
+    "reason": "U5 pins the refusal when the Rex pane runs Herdr in its foreground."
+  },
+  {
+    "file": "src/mux/rex/popup.rs",
+    "line": 40,
+    "source": "This pane is running Herdr. Use Herdr's own {title}.",
+    "text": "This pane is running Herdr. Use Herdr's own Manage Namedrop names and agents.",
+    "reason": "U5 pins the refusal when the Rex pane runs Herdr in its foreground."
+  },
+  {
+    "file": "src/mux/rex/popup.rs",
+    "line": 40,
+    "source": "This pane is running Herdr. Use Herdr's own {title}.",
+    "text": "This pane is running Herdr. Use Herdr's own Namedrop Doctor.",
+    "reason": "U5 pins the refusal when the Rex pane runs Herdr in its foreground."
+  },
+  {
+    "file": "src/mux/rex/popup.rs",
+    "line": 40,
+    "source": "This pane is running Herdr. Use Herdr's own {title}.",
+    "text": "This pane is running Herdr. Use Herdr's own Agent status.",
+    "reason": "U5 pins the refusal when the Rex pane runs Herdr in its foreground."
+  },
+  {
+    "file": "src/mux/rex/popup.rs",
+    "line": 40,
+    "source": "This pane is running Herdr. Use Herdr's own {title}.",
+    "text": "This pane is running Herdr. Use Herdr's own Namedrop tour.",
+    "reason": "U5 pins the refusal when the Rex pane runs Herdr in its foreground."
+  }
+]

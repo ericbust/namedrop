@@ -1227,7 +1227,11 @@ impl Hub<'_> {
             .position(|entry| entry.space == target.namespace.space_id)
             .ok_or(Reason::Unavailable)?;
         let here = others.swap_remove(index);
-        let directory = SpaceDirectory::new(here, others);
+        let directory = SpaceDirectory::new(
+            crate::mux::Endpoint::parse(&target.namespace.session_socket_id).kind,
+            here,
+            others,
+        );
         names_in_scope(&crate::SpaceScope::Named(vec![token.clone()]), &directory).map_err(
             |refusal| match refusal {
                 crate::spaces::RouteRefusal::DuplicateLabel { .. } => collision_reason,

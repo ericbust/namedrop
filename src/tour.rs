@@ -244,6 +244,44 @@ pub fn all() -> Result<Vec<Presentation>, String> {
     Ok(presentations)
 }
 
+pub fn all_for(kind: crate::mux::MuxKind) -> Result<Vec<Presentation>, String> {
+    let mut presentations = all()?;
+    if kind == crate::mux::MuxKind::Rex {
+        for presentation in &mut presentations {
+            for page in &mut presentation.pages {
+                for line in &mut page.body {
+                    *line = line
+                        .replace("this Herdr workspace", "this Rex session")
+                        .replace(
+                            "Press Prefix, then Shift-S",
+                            "Run Agent status from Rex's palette",
+                        )
+                        .replace(
+                            "Press Prefix, then Shift-H",
+                            "Run Namedrop Doctor from Rex's palette",
+                        )
+                        .replace(
+                            "Press Prefix, then Shift-M",
+                            "Run Manage names from Rex's palette",
+                        )
+                        .replace(
+                            "Press Prefix, then Shift-O",
+                            "Run Namedrop tour from Rex's palette",
+                        );
+                }
+            }
+        }
+    }
+    Ok(presentations)
+}
+
+pub fn current_for(kind: crate::mux::MuxKind) -> Result<Presentation, String> {
+    all_for(kind)?
+        .into_iter()
+        .find(|presentation| presentation.id == CURRENT_ID)
+        .ok_or_else(|| format!("no embedded presentation has id {CURRENT_ID}"))
+}
+
 pub fn current() -> Result<Presentation, String> {
     all()?
         .into_iter()
@@ -385,7 +423,10 @@ where
 {
     crate::open_popup(runtime, PopupScreen::Tour, target.facts()).map_err(|error| match error {
         MuxError::Protocol(error) => {
-            format!("Herdr returned an unreadable popup result: {error}")
+            format!(
+                "{} returned an unreadable popup result: {error}",
+                runtime.mux.endpoint().kind.title()
+            )
         }
         error => error.to_string(),
     })
@@ -460,7 +501,10 @@ where
         })
         .map_err(|error| match error {
             MuxError::Protocol(error) => {
-                format!("Herdr returned an unreadable popup result: {error}")
+                format!(
+                    "{} returned an unreadable popup result: {error}",
+                    runtime.mux.endpoint().kind.title()
+                )
             }
             error => error.to_string(),
         }) {

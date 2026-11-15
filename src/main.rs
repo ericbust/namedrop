@@ -1,4 +1,4 @@
-use clap::{Parser, error::ErrorKind};
+use clap::error::ErrorKind;
 mod agent_status_ui;
 mod naming_ui;
 mod popup_input;
@@ -8,11 +8,11 @@ use namedrop::{
     Clock, CommandResult, LifecycleRuntime, ProcessIds, SystemClock, agent_result_view,
     cli::{Cli, ResultFormat, RuntimeOptions},
     daemon::Starter,
-    describe_operations, diagnose_collaboration, execute_context_operation,
-    execute_control_operation, execute_group_operation, execute_handoff_operation,
-    execute_integration_operation, execute_lifecycle_operation, execute_message_operation,
-    execute_session_start_hook, execute_user_prompt_submit_hook, is_context_operation,
-    is_control_operation, is_integration_operation, is_lifecycle_operation, is_message_operation,
+    diagnose_collaboration, execute_context_operation, execute_control_operation,
+    execute_group_operation, execute_handoff_operation, execute_integration_operation,
+    execute_lifecycle_operation, execute_message_operation, execute_session_start_hook,
+    execute_user_prompt_submit_hook, is_context_operation, is_control_operation,
+    is_integration_operation, is_lifecycle_operation, is_message_operation,
     locator::{self, Locator, Name},
     mux::{
         Budget, Mux,
@@ -195,7 +195,7 @@ fn main() -> ExitCode {
             }
         };
     }
-    let cli = match Cli::try_parse() {
+    let cli = match Cli::try_parse_at(inherited) {
         Ok(cli) => cli,
         Err(error)
             if matches!(
@@ -648,7 +648,12 @@ fn main() -> ExitCode {
                 64,
             );
         }
-        return finish(operation, describe_operations(cli.described_operation()));
+        let kind = home::resolve(&cli.runtime.flags(), inherited)
+            .map_or(namedrop::mux::MuxKind::Herdr, |home| home.kind());
+        return finish(
+            operation,
+            namedrop::describe_operations_for(cli.described_operation(), kind),
+        );
     }
 
     if operation == "doctor" {

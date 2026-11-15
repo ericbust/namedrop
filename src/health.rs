@@ -559,20 +559,23 @@ where
             && !refused.contains(&pane.pane_id.as_str())
         {
             let agent_runtime = pane_agent_runtime(pane).expect("supported panes were filtered");
-            let setup = crate::install::native_session_setup(agent_runtime);
+            let setup =
+                crate::install::native_session_setup(agent_runtime, runtime.mux.endpoint().kind);
             let mut native = issue(
                 "ND-SESSION-002",
                 HealthSeverity::Blocked,
-                &format!("Herdr has no session identity for pane {}.", pane.pane_id),
+                &format!("{} has no session identity for pane {}.", runtime.mux.endpoint().kind.title(), pane.pane_id),
                 setup["explanation"]
                     .as_str()
                     .expect("static setup explanation"),
                 HealthRepairKind::ProductAction,
-                "Install the Herdr native integration if needed, then restart this agent.",
+                runtime.mux.endpoint().kind.text("Install the Herdr native integration if needed, then restart this agent.", "Run Activate Namedrop again, then restart this agent to load the Namedrop hooks."),
             );
             native.diagnostic = serde_json::json!({"pane_id":pane.pane_id,"runtime":agent_runtime,"workspace_id":space_id});
-            native.repair.operation = Some("herdr.integration.install".to_owned());
-            native.repair.input = Some(serde_json::json!({"runtime":setup["command"][3]}));
+            if !rex {
+                native.repair.operation = Some("herdr.integration.install".to_owned());
+                native.repair.input = Some(serde_json::json!({"runtime":setup["command"][3]}));
+            }
             native.repair.command = serde_json::from_value(setup["command"].clone()).ok();
             issues.push(native);
         }
@@ -697,7 +700,10 @@ where
             "ND-SETUP-003",
             HealthSeverity::Blocked,
             "No supported agents are open in this space.",
-            "Start Codex or Claude Code in a Herdr pane, then check again.",
+            runtime.mux.endpoint().kind.text(
+                "Start Codex or Claude Code in a Herdr pane, then check again.",
+                "Start Codex or Claude Code in a Rex pane, then check again.",
+            ),
             HealthRepairKind::ProductAction,
             "Start an agent in this space?",
         ));
@@ -896,7 +902,7 @@ where
             ));
         }
         return Err(
-            "Submit the first prompt in this pane, then open Doctor again: Namedrop has no session identity for it yet. If it is still missing after a turn, check or reinstall the Herdr native integration and restart the agent."
+            runtime.mux.endpoint().kind.text("Submit the first prompt in this pane, then open Doctor again: Namedrop has no session identity for it yet. If it is still missing after a turn, check or reinstall the Herdr native integration and restart the agent.", "Submit the first prompt in this Rex pane, then open Doctor again. If its session identity is still missing after a turn, run Activate Namedrop again and restart the agent.")
                 .to_owned(),
         );
     }
@@ -996,7 +1002,17 @@ where
     pane.agent
         .zip(session)
         .map(|(agent, session)| (session, agent))
-        .ok_or_else(|| "No Herdr session identity for this pane now.".to_owned())
+        .ok_or_else(|| {
+            runtime
+                .mux
+                .endpoint()
+                .kind
+                .text(
+                    "No Herdr session identity for this pane now.",
+                    "No Namedrop session identity for this Rex pane now.",
+                )
+                .to_owned()
+        })
 }
 
 fn doctor_assistance_prompt(
@@ -1073,22 +1089,27 @@ where
             AgentWait::Status(Some(AgentState::Blocked)) => (
                 HealthSeverity::Notice,
                 format!(
-                    "Herdr reports @{alias} waiting on a question or permission prompt. The message goes in once it is answered."
+                    "{} reports @{alias} waiting on a question or permission prompt. The message goes in once it is answered.",
+                    runtime.mux.endpoint().kind.title()
                 ),
                 HealthRepairKind::HumanDecision,
                 format!("Answer @{alias}'s prompt."),
             ),
             AgentWait::Status(Some(AgentState::Working)) => (
                 HealthSeverity::Info,
-                format!("Herdr reports @{alias} working. The message goes in when its turn ends."),
+                format!(
+                    "{} reports @{alias} working. The message goes in when its turn ends.",
+                    runtime.mux.endpoint().kind.title()
+                ),
                 HealthRepairKind::ProductAction,
                 format!("Wait for @{alias}'s turn to end."),
             ),
             AgentWait::Status(status) => (
                 HealthSeverity::Info,
                 format!(
-                    "Herdr reports @{alias} {}. The message goes in once Herdr reports it idle.",
-                    status.as_ref().map_or("with no status", AgentState::as_str)
+                    "{host} reports @{alias} {}. The message goes in once {host} reports it idle.",
+                    status.as_ref().map_or("with no status", AgentState::as_str),
+                    host = runtime.mux.endpoint().kind.title()
                 ),
                 HealthRepairKind::ProductAction,
                 format!("Wait for @{alias} to be ready."),
@@ -1122,7 +1143,8 @@ where
             AgentWait::PromptBoxUnseen => (
                 HealthSeverity::Info,
                 format!(
-                    "@{alias} finished its turn while its background agents run on, but Namedrop could not find its prompt box to check that it is empty, so the message waits until Herdr reports @{alias} idle."
+                    "@{alias} finished its turn while its background agents run on, but Namedrop could not find its prompt box to check that it is empty, so the message waits until {} reports @{alias} idle.",
+                    runtime.mux.endpoint().kind.title()
                 ),
                 HealthRepairKind::ProductAction,
                 format!("Wait for @{alias} to be ready."),

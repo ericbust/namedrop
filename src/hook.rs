@@ -299,15 +299,16 @@ where
         RosterRead::Read(roster) => (!roster.parts.is_empty()).then(|| roster.parts.led()),
         RosterRead::Gone => reader
             .is_some_and(|reader| crate::shown_roster::forget(runtime.state_directory, reader))
-            .then(no_named_agents),
+            .then(|| no_named_agents(runtime.mux.endpoint().kind)),
         RosterRead::Unread => None,
     }
 }
 
-fn no_named_agents() -> String {
+fn no_named_agents(kind: crate::mux::MuxKind) -> String {
     format!(
-        "{} No named agents in this Herdr space.",
-        crate::persona::ROSTER_MARKER
+        "{} No named agents in this {} space.",
+        crate::persona::ROSTER_MARKER,
+        kind.title()
     )
 }
 
@@ -354,7 +355,7 @@ where
             if let Some(reader) = reader {
                 crate::shown_roster::forget(runtime.state_directory, reader);
             }
-            no_named_agents()
+            no_named_agents(runtime.mux.endpoint().kind)
         }
         RosterRead::Unread => format!(
             "{} It could not be read this turn.",

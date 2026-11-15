@@ -273,9 +273,17 @@ where
                 .to_owned();
             validate_alias(&alias)?;
             let persona = input.persona.as_deref().map(normalize_persona);
-            let pane_id = runtime
-                .current_pane_id
-                .ok_or_else(|| "name must run from the Herdr pane being named".to_owned())?;
+            let pane_id = runtime.current_pane_id.ok_or_else(|| {
+                runtime
+                    .mux
+                    .endpoint()
+                    .kind
+                    .text(
+                        "name must run from the Herdr pane being named",
+                        "name must run from the Rex pane being named",
+                    )
+                    .to_owned()
+            })?;
             let pane = discovered
                 .panes
                 .iter()
@@ -477,7 +485,7 @@ where
                 "type_override": "name <alias> --type terminal|agent",
                 "pane_id": pane_id,
                 "agent_session_id": agent_session_id,
-                "native_session_setup": agent_runtime.filter(|_| agent_session_id.is_none() && served.is_none()).map(crate::install::native_session_setup),
+                "native_session_setup": agent_runtime.filter(|_| agent_session_id.is_none() && served.is_none()).map(|agent| crate::install::native_session_setup(agent, runtime.mux.endpoint().kind)),
                 "codex_app_server": served.as_ref().map(crate::codex_app_server::ServedPanes::advice),
                 "runtime": agent_runtime,
                 "activated": true,
@@ -590,6 +598,9 @@ where
                 "drain": reconciliation.drain,
                 "tour": tour
             });
+            if runtime.mux.endpoint().kind == crate::mux::MuxKind::Rex {
+                report["host"] = json!("rex");
+            }
             if !handoff.is_empty() {
                 report["handoff"] = json!(handoff);
             }
@@ -673,7 +684,17 @@ where
                 .pane_id
                 .clone()
                 .or_else(|| runtime.current_pane_id.map(str::to_owned))
-                .ok_or_else(|| "pane_id is required outside a Herdr pane action".to_owned())?;
+                .ok_or_else(|| {
+                    runtime
+                        .mux
+                        .endpoint()
+                        .kind
+                        .text(
+                            "pane_id is required outside a Herdr pane action",
+                            "pane_id is required outside a Rex pane action",
+                        )
+                        .to_owned()
+                })?;
             let pane = discovered
                 .panes
                 .iter()

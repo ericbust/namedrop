@@ -321,6 +321,43 @@ pub fn complete_capability_profile() -> &'static [String] {
     &packaged_catalog().capability_profile
 }
 
+pub(crate) fn rex_catalog_prose(text: &str) -> String {
+    text.replace("this Herdr session", "this Rex server")
+        .replace(
+            "the pin writes one ref under refs/herdr-context/",
+            "the pin retains one git ref",
+        )
+}
+
+fn rex_catalog_value(value: &mut Value) {
+    match value {
+        Value::Object(fields) => {
+            for (key, value) in fields {
+                if key == "description" {
+                    if let Some(text) = value.as_str() {
+                        *value = Value::String(rex_catalog_prose(text));
+                    }
+                } else {
+                    rex_catalog_value(value);
+                }
+            }
+        }
+        Value::Array(values) => values.iter_mut().for_each(rex_catalog_value),
+        _ => {}
+    }
+}
+
+pub fn describe_operations_for(
+    token: Option<&str>,
+    kind: crate::mux::MuxKind,
+) -> Result<Value, String> {
+    let mut value = describe_operations(token)?;
+    if kind == crate::mux::MuxKind::Rex {
+        rex_catalog_value(&mut value);
+    }
+    Ok(value)
+}
+
 /// Self-description: the packaged catalog, or the single entry one operation
 /// token names, in the same shape either way. It reports only descriptor data
 /// compiled into this executable, so it reads no collaboration state and needs
@@ -1135,9 +1172,17 @@ where
     }
     let discovered = integration_discovery(runtime)?;
     let namespace = discovered.namespace(runtime.session_socket_id);
-    let pane_id = runtime
-        .current_pane_id
-        .ok_or_else(|| "the current Herdr pane is required for registration".to_owned())?;
+    let pane_id = runtime.current_pane_id.ok_or_else(|| {
+        runtime
+            .mux
+            .endpoint()
+            .kind
+            .text(
+                "the current Herdr pane is required for registration",
+                "the current Rex pane is required for registration",
+            )
+            .to_owned()
+    })?;
     let executable = collaboration_executable()?;
     let mut store = StateStore::open(runtime.state_directory).map_err(|error| error.to_string())?;
     let registration = match store.transaction(|transaction| {
@@ -1252,9 +1297,12 @@ where
     let attempt_id = DeliveryAttemptId::new(input.attempt_id);
     let discovered = integration_discovery(runtime)?;
     let namespace = discovered.namespace(runtime.session_socket_id);
-    let pane_id = runtime
-        .current_pane_id
-        .ok_or_else(|| format!("the current Herdr pane is required for {operation}"))?;
+    let pane_id = runtime.current_pane_id.ok_or_else(|| {
+        format!(
+            "the current {} pane is required for {operation}",
+            runtime.mux.endpoint().kind.title()
+        )
+    })?;
     let mut store = StateStore::open(runtime.state_directory).map_err(|error| error.to_string())?;
     store
         .transaction(|transaction| {
@@ -1519,9 +1567,17 @@ where
 {
     let discovered = integration_discovery(runtime)?;
     let namespace = discovered.namespace(runtime.session_socket_id);
-    let pane_id = runtime
-        .current_pane_id
-        .ok_or_else(|| "the current Herdr pane is required for delivery.inbox".to_owned())?;
+    let pane_id = runtime.current_pane_id.ok_or_else(|| {
+        runtime
+            .mux
+            .endpoint()
+            .kind
+            .text(
+                "the current Herdr pane is required for delivery.inbox",
+                "the current Rex pane is required for delivery.inbox",
+            )
+            .to_owned()
+    })?;
     let tool = IntegrationToolInvocation::new(
         collaboration_executable()?,
         tool_environment(
@@ -2211,11 +2267,26 @@ impl IntegrationToolInvocation {
     /// The full generic catalog, so a registered Agent Session can run any
     /// advertised operation before its first delivery.
     pub fn new(executable: impl Into<String>, environment: BTreeMap<String, String>) -> Self {
+        let mut operations = operation_catalog().operations.clone();
+        if environment
+            .get(Locator::Endpoint.var(Name::Neutral))
+            .is_some_and(|endpoint| {
+                crate::mux::Endpoint::parse(endpoint).kind == crate::mux::MuxKind::Rex
+            })
+        {
+            for operation in &mut operations {
+                operation.description = rex_catalog_prose(&operation.description);
+                rex_catalog_value(&mut operation.input_schema);
+                for example in &mut operation.examples {
+                    example.description = rex_catalog_prose(&example.description);
+                }
+            }
+        }
         Self {
             executable: executable.into(),
             environment,
             input_flag: operation_catalog().input_transport.flag.as_str(),
-            operations: operation_catalog().operations.clone(),
+            operations,
         }
     }
 

@@ -953,10 +953,15 @@ where
 }
 
 fn pane_author<'a, M, C, I>(runtime: &LifecycleRuntime<'a, M, C, I>) -> Result<Author<'a>, String> {
-    runtime
-        .current_pane_id
-        .map(Author::Pane)
-        .ok_or_else(|| "the current Herdr pane is required to resolve the sender".to_owned())
+    runtime.current_pane_id.map(Author::Pane).ok_or_else(|| {
+        crate::mux::Endpoint::parse(runtime.session_socket_id)
+            .kind
+            .text(
+                "the current Herdr pane is required to resolve the sender",
+                "the current Rex pane is required to resolve the sender",
+            )
+            .to_owned()
+    })
 }
 
 /// The dashboard answers inside `observe_commit`, so these drains run after

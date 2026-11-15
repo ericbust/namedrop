@@ -310,7 +310,14 @@ pub(crate) fn user_hook_activation_guidance(
     guidance
 }
 
-pub(crate) fn native_session_setup(runtime: AgentRuntime) -> Value {
+pub(crate) fn native_session_setup(runtime: AgentRuntime, kind: crate::mux::MuxKind) -> Value {
+    if kind == crate::mux::MuxKind::Rex {
+        return json!({
+            "status": "session_identity_missing",
+            "command": ["namedrop", "activate"],
+            "explanation": "Namedrop has no session identity for this Rex pane. Submit the first prompt, then check registration. If identity is still missing after a turn, run Activate Namedrop again and restart the agent so it loads the Namedrop hooks."
+        });
+    }
     let host_runtime = match runtime {
         AgentRuntime::Codex => "codex",
         AgentRuntime::ClaudeCode => "claude",
@@ -567,8 +574,20 @@ fn prepare_integration_package(
     }
     let directory = verified_package_directory(root, runtime)?;
     let package = integration_package(runtime);
-    let instructions =
-        installed_instructions(package.instructions, runtime, executable, state_directory)?;
+    let rex = fs::read_to_string(state_directory.join("runtime/owner"))
+        .is_ok_and(|owner| owner.trim() == "standalone");
+    let instructions = installed_instructions(
+        package.instructions,
+        runtime,
+        executable,
+        state_directory,
+        rex,
+    )?;
+    let descriptor = if rex {
+        crate::integration::rex_catalog_prose(package.tool_descriptor)
+    } else {
+        package.tool_descriptor.to_owned()
+    };
     let hooks = hooks_manifest(&directory)?;
     let scripts = HOOK_SCRIPTS
         .into_iter()
@@ -583,7 +602,7 @@ fn prepare_integration_package(
     let mut files = vec![
         (OWNERSHIP_MARKER_FILE, ownership_marker(), None),
         (INSTRUCTIONS_FILE, instructions, None),
-        (DESCRIPTOR_FILE, package.tool_descriptor.to_owned(), None),
+        (DESCRIPTOR_FILE, descriptor, None),
         (CODEX_MANIFEST_FILE, codex_manifest(REVISION_SLOT), None),
         (CLAUDE_MANIFEST_FILE, claude_manifest(REVISION_SLOT), None),
         (HOOKS_FILE, hooks, None),
@@ -831,7 +850,18 @@ fn installed_instructions(
     runtime: AgentRuntime,
     executable: &Path,
     state_directory: &Path,
+    rex: bool,
 ) -> Result<String, String> {
+    let instructions = if rex {
+        instructions
+            .replace("agents or terminals in Herdr", "agents or terminals in Rex")
+            .replace(
+                "Registration uses that prefix with Herdr flags.",
+                "Registration uses that prefix with the location flags shown in the request.",
+            )
+    } else {
+        instructions.to_owned()
+    };
     let (frontmatter, body) = instructions.split_once("\n---\n").ok_or_else(|| {
         format!(
             "the {} instructions have no frontmatter boundary",
@@ -855,12 +885,18 @@ fn installed_instructions(
             "Use this exact installed command prefix whenever these instructions name `namedrop`: `{command_prefix}`."
         ),
     );
+    let invocation = if rex {
+        "Use the installed executable directly with `--plugin-state` and `NAMEDROP_STATE_DIR` before the bound operation. Append `--endpoint`, `--space`, and `--pane` with the exact `NAMEDROP_ENDPOINT`, `NAMEDROP_SPACE_ID`, and `NAMEDROP_PANE_ID` values the delivery's lines or `control.tool.environment` show."
+    } else {
+        "Use the installed executable directly with `--plugin-state` and the state directory (`HERDR_PLUGIN_STATE_DIR` or `NAMEDROP_STATE_DIR`) before the bound operation. Append the location flags with the exact values the delivery's lines or `control.tool.environment` show: `--herdr-socket`, `--herdr-workspace`, and `--herdr-pane` for `HERDR_SOCKET_PATH`, `HERDR_WORKSPACE_ID`, and `HERDR_PANE_ID`, or `--endpoint`, `--space`, and `--pane` for `NAMEDROP_ENDPOINT`, `NAMEDROP_SPACE_ID`, and `NAMEDROP_PANE_ID`."
+    };
     let body = format!(
-        "{body}\n## Invocation\n\nUse the installed executable directly with `--plugin-state` and the state directory (`HERDR_PLUGIN_STATE_DIR` or `NAMEDROP_STATE_DIR`) before the bound operation. Append the location flags with the exact values the delivery's lines or `control.tool.environment` show: `--herdr-socket`, `--herdr-workspace`, and `--herdr-pane` for `HERDR_SOCKET_PATH`, `HERDR_WORKSPACE_ID`, and `HERDR_PANE_ID`, or `--endpoint`, `--space`, and `--pane` for `NAMEDROP_ENDPOINT`, `NAMEDROP_SPACE_ID`, and `NAMEDROP_PANE_ID`. Keep operation tokens and flags as shown; single-quote literal values. For long JSON, write and verify a file in a separate tool call, then use `--input-json-file <absolute-path>` instead of `--input-json`; retain all bound fields. Use no environment prefix, shell substitution, pipes or wrappers. An OS sandbox access error is not an approval decision: request normal host approval for this exact invocation. If approval policy rejects it, report the blocker and keep the reply pending; do not broaden permissions or relay around the denial.\n"
+        "{body}\n## Invocation\n\n{invocation} Keep operation tokens and flags as shown; single-quote literal values. For long JSON, write and verify a file in a separate tool call, then use `--input-json-file <absolute-path>` instead of `--input-json`; retain all bound fields. Use no environment prefix, shell substitution, pipes or wrappers. An OS sandbox access error is not an approval decision: request normal host approval for this exact invocation. If approval policy rejects it, report the blocker and keep the reply pending; do not broaden permissions or relay around the denial.\n"
     );
+    let transport = if rex { "Rex" } else { "Herdr" };
     if runtime != AgentRuntime::ClaudeCode {
         return Ok(format!(
-            "{frontmatter}\n---\n{body}\nCodex: Activation adds only Namedrop's deferred-commands directory to the writable roots; its runtime and database remain outside that grant. Use normal sandbox execution for send, reply, ack, complete, and the current-workspace address list. If the sandbox blocks Herdr, Namedrop queues these commands for its outside worker. A pending result has unknown commit status. Retry the exact command to recover its result. Start a new Codex session after activation to load the grant.\n"
+            "{frontmatter}\n---\n{body}\nCodex: Activation adds only Namedrop's deferred-commands directory to the writable roots; its runtime and database remain outside that grant. Use normal sandbox execution for send, reply, ack, complete, and the current-workspace address list. If the sandbox blocks {transport}, Namedrop queues these commands for its outside worker. A pending result has unknown commit status. Retry the exact command to recover its result. Start a new Codex session after activation to load the grant.\n"
         ));
     }
     Ok(format!(

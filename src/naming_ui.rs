@@ -73,10 +73,16 @@ pub(super) fn launch_in_runtime(
 ) -> Result<serde_json::Value, String> {
     let workspace = runtime
         .workspace_id
-        .ok_or("This popup requires an active Herdr space")?;
+        .ok_or(runtime.mux.endpoint().kind.text(
+            "This popup requires an active Herdr space",
+            "This screen requires an active Rex session",
+        ))?;
     let pane = runtime
         .current_pane_id
-        .ok_or("This popup requires an active Herdr pane")?;
+        .ok_or(runtime.mux.endpoint().kind.text(
+            "This popup requires an active Herdr pane",
+            "This screen requires an active Rex pane",
+        ))?;
     let origin = target_pane(runtime)?;
     if mode == UiMode::Tour {
         return tour::open_popup(runtime, &origin);
@@ -273,10 +279,16 @@ fn doctor_prompt(runtime: &Runtime<'_>, terminal: &str, session: &str) -> Result
                             clear_screen();
                             say(
                                 Tone::Plain,
-                                "Herdr accepted the prompt. That is not the agent acting,\n\
+                                runtime.mux.endpoint().kind.text(
+                                    "Herdr accepted the prompt. That is not the agent acting,\n\
                                  and no issue is fixed yet.\n\n\
                                  Go back to the pane you opened Doctor from for the agent's\n\
                                  report and any steps it needs from you.\n",
+                                    "Rex accepted the prompt. That is not the agent acting,\n\
+                                  and no issue is fixed yet.\n\n\
+                                  Go back to the pane you opened Doctor from for the agent's\n\
+                                  report and any steps it needs from you.\n",
+                                ),
                             );
                             say(Tone::Keys, "Enter or Esc closes");
                             io::stdout().flush().map_err(|e| e.to_string())?;
@@ -479,7 +491,7 @@ fn tour_prompt(runtime: &Runtime<'_>, terminal: &str) -> Result<(), String> {
     let warning = tour::mark_shown(runtime.state_directory, tour::CURRENT_ID)
         .err()
         .map(|error| format!("The tour may open again: {}", error.escape_debug()));
-    let presentation = tour::current()?;
+    let presentation = tour::current_for(runtime.mux.endpoint().kind)?;
     tour_pages(runtime, terminal, &presentation, warning.as_deref())
 }
 
@@ -487,7 +499,7 @@ fn tour_prompt(runtime: &Runtime<'_>, terminal: &str) -> Result<(), String> {
 /// tour that cannot load becomes their notice. Only the tour popup records
 /// the tour as shown, so Doctor stays read-only.
 fn inline_tour(runtime: &Runtime<'_>, terminal: &str, notice: &mut String) -> Result<(), String> {
-    match tour::current() {
+    match tour::current_for(runtime.mux.endpoint().kind) {
         Ok(presentation) => tour_pages(runtime, terminal, &presentation, None),
         Err(error) => {
             *notice = format!("Could not open the tour: {}", error.escape_debug());

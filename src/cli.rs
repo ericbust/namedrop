@@ -1,4 +1,4 @@
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
@@ -82,6 +82,84 @@ impl RuntimeOptions {
 }
 
 impl Cli {
+    pub fn command_for(kind: crate::mux::MuxKind) -> clap::Command {
+        fn rex(command: clap::Command) -> clap::Command {
+            let about = match command.get_about().map(|text| text.to_string()).as_deref() {
+                Some(
+                    "Name and @mention AI agents and terminal panes to collaborate inside Herdr",
+                ) => {
+                    Some("Name and @mention AI agents and terminal panes to collaborate inside Rex")
+                }
+                Some("Activate Namedrop for this Herdr space after confirmation") => {
+                    Some("Activate Namedrop for this Rex space after confirmation.")
+                }
+                Some("Deactivate Namedrop for this Herdr space while preserving its data") => {
+                    Some("Deactivate Namedrop for this Rex space while preserving its data.")
+                }
+                Some("Create and manage agent names in this Herdr space") => {
+                    Some("Create and manage agent names in this Rex space.")
+                }
+                Some("Pause or resume all collaboration in this Herdr space") => {
+                    Some("Pause or resume all collaboration in this Rex space.")
+                }
+                Some("Handle one Herdr lifecycle event") => Some("Handle one Rex lifecycle event."),
+                Some("Bind a name to a live Herdr pane") => Some("Bind a name to a live Rex pane."),
+                _ => None,
+            };
+            let command = if let Some(about) = about {
+                command.about(about)
+            } else {
+                command
+            };
+            command
+                .mut_args(|arg| match arg.get_id().as_str() {
+                    "endpoint" => arg.visible_alias(None).alias("herdr-socket"),
+                    "space" => arg.visible_alias(None).alias("herdr-workspace"),
+                    "pane" => arg.visible_alias(None).alias("herdr-pane"),
+                    _ => arg,
+                })
+                .mut_subcommands(rex)
+        }
+        let command = Self::command();
+        match kind {
+            crate::mux::MuxKind::Herdr => command,
+            crate::mux::MuxKind::Rex => rex(command),
+        }
+    }
+
+    pub fn try_parse_at(inherited: &dyn crate::mux::home::Inherited) -> Result<Self, clap::Error> {
+        let parsed = Self::try_parse();
+        if parsed.is_ok() {
+            return parsed;
+        }
+        let args: Vec<_> = std::env::args_os().collect();
+        let endpoint = args.iter().enumerate().find_map(|(i, arg)| {
+            let text = arg.to_str()?;
+            text.strip_prefix("--endpoint=")
+                .or_else(|| text.strip_prefix("--herdr-socket="))
+                .map(str::to_owned)
+                .or_else(|| {
+                    matches!(text, "--endpoint" | "--herdr-socket")
+                        .then(|| args.get(i + 1)?.to_str().map(str::to_owned))
+                        .flatten()
+                })
+        });
+        let flags = crate::mux::home::Flags {
+            endpoint: endpoint.as_deref(),
+            ..Default::default()
+        };
+        if crate::mux::home::resolve(&flags, inherited)
+            .is_ok_and(|home| home.kind() == crate::mux::MuxKind::Rex)
+        {
+            use clap::FromArgMatches;
+            Self::command_for(crate::mux::MuxKind::Rex)
+                .try_get_matches_from(args)
+                .and_then(|matches| Self::from_arg_matches(&matches))
+        } else {
+            parsed
+        }
+    }
+
     pub fn install_options(&self) -> Option<(bool, bool)> {
         match self.command {
             Command::Install {
