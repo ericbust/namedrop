@@ -69,7 +69,7 @@ Rex has been tested only on macOS on Apple silicon. The testbed's Rex lanes use 
 - **The relay**, with two scratch Rex servers on one Mac standing in for two machines. Claude Code on Haiku 5.5 on A mentioned Codex `--no-daemon` on B, and a four-message conversation went back and forth. A retried send was accepted once. With B's bridge stopped, A kept the message until the bridge started again. A refused to type into B's blocks through a forwarded socket. Later checks without a model, up to commit `7c89d9a`, covered `relay/allow-terminals`, the Automatic Reply Limit pausing a relayed thread and holding its replies until `thread continue`, and B and A on different relay builds.
 - **Rex preview.14 and preview.18, 2026-11-14**, Namedrop at commit `329c278b`, in scratch Rex servers, without agents. On both, Doctor reported `ND-SETUP-001`, `activate` succeeded, and a terminal block was named.
 
-Not tested on Rex: the relay and agents on preview.18, TLS to a real remote Rex server, Linux, two real machines, the Rex app's command palette, and a restart of the Rex app as opposed to the server.
+Not recorded on Rex: the relay and agents on preview.18. The testbed's Rex lanes do not log their Rex version, so their runs do not show which preview they used. Not tested on Rex: TLS to a real remote Rex server, Linux, two real machines, the Rex app's command palette, and a restart of the Rex app as opposed to the server.
 
 ### Herdr inside Rex
 

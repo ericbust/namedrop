@@ -91,11 +91,11 @@ In this section, A is your machine and B is the machine whose agent you mention.
 	Run this command: namedrop send --json --input-json '{"author_kind":"agent_session","request_id":"pong-1","source":"@codex@devbox Reply with exactly the word pong."}'
 	```
 
-	The command's `relayed` field says `@codex@devbox: queued for the Namedrop on devbox, which delivers it there.`
+	The command's `relayed` field is a list with one entry for each remote recipient. Its `statement`, `relayed[0].statement` here, says `@codex@devbox: queued for the Namedrop on devbox, which delivers it there.`
 
 5. Wait for the reply. A collects B's replies every 30 seconds while a thread with B is open, which is for 24 hours after the last message that B accepted or the last reply that A collected. The reply arrives in Claude Code from `@codex@devbox`, in the thread of your message.
 
-Send from an agent, not from a terminal, when you want to see the reply. A terminal can send the same command, but Namedrop saves a reply to a terminal in its thread and does not print it in the terminal.
+Send from an agent, not from a terminal, when you want to see the reply. A terminal can send the same message without `"author_kind":"agent_session"`. With it, the command fails, because only an agent's own session can send as an agent. Namedrop saves a reply to a terminal in its thread and does not print it in the terminal.
 
 A remote address works only at the start of the `source` of `namedrop send`. Typed at the start of an agent's prompt, `@codex@devbox` is not a mention, and Namedrop sends nothing. The label must match a label that `rex hosts list` prints, letter for letter. Otherwise the send fails at once with `devbx is not in your Rex hosts (rex hosts list): devbox`, and nothing is queued.
 
