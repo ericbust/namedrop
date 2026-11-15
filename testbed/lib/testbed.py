@@ -393,7 +393,9 @@ class Profile:
             fcntl.flock(handle, fcntl.LOCK_EX)
             yield
 
-    def prepare(self, agents):
+    def prepare(self, agents, herdr=True):
+        """Links the host's tools into the profile's bin. Without herdr, the profile gets no
+        herdr, and a link an earlier run made is removed."""
         for name in ("home", "home/.claude", "config", "state", "data", "cache", "run", "codex",
                      "bin", "logs", "config-dirs", "data-dirs"):
             directory = self.dir / name
@@ -402,7 +404,10 @@ class Profile:
             directory.mkdir(exist_ok=True, mode=0o700)
         herdr_bin = os.environ.get("HERDR_BIN") or self.state.get("herdr_bin")
         tools = host_tools(herdr_bin)
-        missing = [name for name in REQUIRED_TOOLS + tuple(agents) if name not in tools]
+        if not herdr:
+            tools.pop("herdr", None)
+        required = REQUIRED_TOOLS if herdr else tuple(name for name in REQUIRED_TOOLS if name != "herdr")
+        missing = [name for name in required + tuple(agents) if name not in tools]
         if missing:
             fail("required executables are missing from PATH: " + ", ".join(missing))
         # A profile has Claude Code, and a login for it, only when its run starts Claude Code.
@@ -704,6 +709,13 @@ class Profile:
                  capture=False)
 
     def link_from_clone(self, plan):
+        local = self.clone(plan)
+        if not (local / "bin/namedrop").is_file():
+            self.run(["sh", "scripts/build.sh"], cwd=str(local), capture=False)
+        self.herdr("plugin", "link", str(local))
+
+    def clone(self, plan):
+        """Clones the plan's source into the profile once, and returns the clone."""
         local = self.dir / "namedrop-source"
         if not local.exists():
             # Build the clone aside so a crash never leaves a half-made source behind.
@@ -722,9 +734,7 @@ class Profile:
             partial.rename(local)
         if local.is_symlink():
             fail("refusing a symlinked clone directory: " + str(local))
-        if not (local / "bin/namedrop").is_file():
-            self.run(["sh", "scripts/build.sh"], cwd=str(local), capture=False)
-        self.herdr("plugin", "link", str(local))
+        return local
 
     def install_integrations(self, agents):
         installed = self.state.get("integrations") or []
@@ -922,7 +932,7 @@ class Profile:
                     "often clear it.".format(result.returncode))
 
     def namedrop_version(self):
-        root = self.state.get("plugin_root")
+        root = self.state.get("plugin_root") or self.state.get("archive_root")
         manifest = Path(root) / "herdr-plugin.toml" if root else None
         if not manifest or not manifest.is_file():
             return "not installed"

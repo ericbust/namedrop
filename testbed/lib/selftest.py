@@ -67,7 +67,13 @@ def check_install_table():
     link = {"kind": "link", "path": "/src/namedrop", "commit": "0123456789abcdef"}
     assert sources.install_plan(link) == {"method": "link", "clone": "/src/namedrop",
                                           "fetch": None, "checkout": "0123456789abcdef"}
-    return "install table: ref and in-repo PR install from GitHub; fork PR and link build and link"
+    assert sources.clone_plan(ref) == {"method": "link", "clone": "https://github.com/" + REPO + ".git",
+                                       "fetch": None, "checkout": "fix/token-cost"}
+    assert sources.clone_plan(same)["fetch"] == "pull/27/head:pr-27", sources.clone_plan(same)
+    assert sources.clone_plan(fork) == sources.install_plan(fork)
+    assert sources.clone_plan(link) == sources.install_plan(link)
+    return ("install table: ref and in-repo PR install from GitHub; fork PR and link build and "
+            "link; the Rex lane clones every kind")
 
 
 def check_pull_resolution():
@@ -325,8 +331,25 @@ def check_rex_live_hooks(scratch):
         raise AssertionError("a hook baked to another state directory passed")
     except RuntimeError as error:
         assert "does not pass --state-directory" in str(error), error
-    return ("Rex live lane: blocks get no Herdr names, and a hook counts once its agent ran it "
-            "from a script baked to the profile's state directory")
+    assert state == profile.dir / "state/namedrop", state
+    host = scratch / "rex-live-host"
+    (host / "with").mkdir(parents=True)
+    (host / "without").mkdir()
+    herdr = host / "with/herdr"
+    herdr.write_text("#!/bin/sh\n")
+    herdr.chmod(0o755)
+    own = profile.dir / "bin"
+    own.mkdir(parents=True)
+    path = os.pathsep.join([str(own), str(host / "with"), str(host / "without")])
+    assert rex_live.without_herdr(path, profile.dir) == os.pathsep.join(
+        [str(own), str(host / "without")]), rex_live.without_herdr(path, profile.dir)
+    profile.env["PATH"] = path
+    assert "No herdr on the lane's PATH" in rex_live.require_no_herdr(lane)
+    (own / "herdr").symlink_to(herdr)
+    assert "PATH finds a herdr: " + str(own / "herdr") in refusal(lambda: rex_live.require_no_herdr(lane))
+    return ("Rex live lane: blocks get no Herdr names and no host directory with a herdr, a herdr "
+            "in the profile's own bin is refused, and a hook counts once its agent ran it from a "
+            "script baked to the profile's state directory")
 
 
 def check_rex_events_log(scratch):
@@ -408,7 +431,7 @@ def check_rex_live_up_and_down(scratch):
             assert not lane.socket.exists(), "a failed up left its server: " + str(lane.socket)
             assert not alive(proved[0][1]), "a failed up left its agent running"
             assert "rex_live_session" not in profile.state, profile.state
-            assert herdr_stops, "a failed up left the profile's Herdr"
+            assert not herdr_stops, "the Rex lane stopped a Herdr it never starts"
 
             rex_live.up(profile, None, ["probe"])
             _, session, blocks = rex_live.up(profile, None, ["probe"])
@@ -416,11 +439,11 @@ def check_rex_live_up_and_down(scratch):
             assert proved[2][0] != proved[1][0], "the second up proved the first up's block"
             assert blocks == {"shell": blocks["shell"], "probe": proved[2][0]}, blocks
             assert not alive(proved[1][1]), "the saved block still runs its agent"
-            stops = len(herdr_stops)
+            assert (profile.dir / "logs/shell-herdr.txt").read_text() == "none\n"
             rex_live.down(profile)
             assert not lane.socket.exists(), lane.socket
             assert not alive(proved[2][1])
-            assert len(herdr_stops) > stops, "down left the profile's Herdr"
+            assert not herdr_stops, "down stopped a Herdr the Rex lane never starts"
 
             logs = profile.dir / "logs"
             (logs / "rex-server.log").write_text("kept")
@@ -430,7 +453,8 @@ def check_rex_live_up_and_down(scratch):
             assert len(herdr_stops) > stops, "a failed copy of the logs skipped the stop"
             assert not profile.dir.exists(), profile.dir
     return ("Rex live up and down: a failed up stops what it started, a second up proves a fresh "
-            "block, down stops the profile's Herdr, and a failed log copy still stops it")
+            "block, the shell block finds no herdr, neither starts or stops a Herdr, and a "
+            "failed log copy still stops the profile")
 
 
 def check_syntax(kit):
@@ -1086,23 +1110,8 @@ def check_rex_live_down_after_a_failed_stop(scratch):
             raise AssertionError("a failed stop passed")
         except RuntimeError as error:
             assert str(error) == "the scratch Rex socket remains", error
-    assert stopped == ["herdr", "codex", "leftovers"], stopped
-
-    def failing_herdr_stop():
-        stopped.append("herdr")
-        raise RuntimeError("the profile socket remains")
-
-    stopped.clear()
-    profile.stop_server = failing_herdr_stop
-    with patch.object(rex_live.Lane, "stop", lambda lane: None):
-        try:
-            rex_live.down(profile)
-            raise AssertionError("a failed Herdr stop passed")
-        except RuntimeError as error:
-            assert str(error) == "the profile socket remains", error
-    assert stopped == ["herdr", "codex", "leftovers"], stopped
-    return ("Rex live down: a failed Rex or Herdr stop still stops Codex's daemon and the "
-            "leftovers")
+    assert stopped == ["codex", "leftovers"], stopped
+    return "Rex live down: a failed Rex stop still stops Codex's daemon and the leftovers"
 
 
 STUB_CLAUDE = """#!/bin/sh

@@ -122,7 +122,9 @@ class Lane:
                       str(self.socket))
         (self.dir / "config").mkdir(parents=True, exist_ok=True, mode=0o700)
         config = self.dir / "config/init.lua"
-        config.write_text("")
+        # A Namedrop install edits the config, and a restarted server keeps the edit.
+        if not config.exists():
+            config.write_text("")
         log = self.profile.dir / "logs/rex-server.log"
         command = ["env", "-i"] + ["{}={}".format(*item) for item in sorted(self.environment().items())]
         command += [self.binary(), "server", "run", "--listen", self.server,
