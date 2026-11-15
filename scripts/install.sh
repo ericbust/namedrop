@@ -186,6 +186,8 @@ try:
         print(f'  Runtime: {state}/runtime and the store')
     show_targets(data.get('targets') or plan['targets'])
     if data.get('manual_config'):
+        if data.get('reason'):
+            print(data['reason'])
         print(data['instruction'])
     keys = data.get('keys') or []
     if keys:

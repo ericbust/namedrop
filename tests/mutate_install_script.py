@@ -68,6 +68,8 @@ MUTATIONS = [
      'test_confirmation_is_once_and_read_only'),
     ('m12-manual-config-dropped', 'scripts/install.sh', "if data.get('manual_config'):", 'if False:',
      'test_report_is_validated_and_manual_config_is_printed'),
+    ('u8-manual-reason-dropped', 'scripts/install.sh', "        if data.get('reason'):", '        if False:',
+     'test_report_is_validated_and_manual_config_is_printed'),
     ('f2-confirmation-omits-targets', 'scripts/install.sh',
      "    show_targets(plan['targets'])\n", '',
      'test_confirmation_is_once_and_read_only'),

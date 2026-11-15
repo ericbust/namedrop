@@ -78,7 +78,8 @@ elif 'install' in args:
                 agent_integration_hook_activation=dict(codex=dict(cache_current=True, migration_ready=True,
                     steps=['Approve the Namedrop hooks in Codex.'])))
     if mode == 'manual':
-        data.update(manual_config=True, instruction='Put the line in init.lua yourself.')
+        data.update(manual_config=True, reason='Namedrop could not edit init.lua: denied.',
+                    instruction='Put the line in init.lua yourself.')
     operation = 'activate' if mode == 'bad-report' else 'install'
     print(json.dumps(dict(status='ok', operation=operation, data=data)))
 else:
@@ -322,7 +323,8 @@ class Installer(unittest.TestCase):
         self.assertIn('Namedrop did not return an installation report.', result.stderr)
         self.assertNotIn('In the Rex palette', result.stdout)
         self.env['STUB_MODE'] = 'manual'
-        self.assertIn('\nPut the line in init.lua yourself.\n', self.ok(self.run_install('--yes')))
+        self.assertIn('\nNamedrop could not edit init.lua: denied.\nPut the line in init.lua yourself.\n',
+                      self.ok(self.run_install('--yes')))
 
     def test_retirement_precedes_owner_and_default_target_is_guarded(self):
         state = self.record('invalid')
