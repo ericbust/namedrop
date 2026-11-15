@@ -120,7 +120,7 @@ Rex differs from Herdr in seven ways that shape this step.
 - **Lua has no widgets.** A Rex action can run programs, call the API, and open blocks. It cannot draw text, read a line, or show a list, and the palette's handling of action arguments is undocumented. Every screen with input must be a program in a terminal.
 - **A layer takes no environment.** Herdr's popup passes six values with `--env`. A Rex layer passes only argv and `path_prepend`.
 - **An action runs in the server's environment.** It gets the server's `PATH`, not the person's shell, and a program in a layer gets a login `HOME` unless the layer sets `login = false`.
-- **Nothing installs Namedrop.** No command puts the binary, the agent packages, or the Lua module on a machine without Herdr. The testbed's Rex lane activates inside a profile Herdr and then stops it (PORT.md, "Namedrop has no `integration install`").
+- **Nothing installs Namedrop.** No command puts the binary, the agent packages, or the Lua module on a machine without Herdr. Until U12, the testbed's Rex lane activated inside a profile Herdr and then stopped it (PORT.md, "Namedrop has no `integration install`"). U12 makes it install with the build's own `install.sh` and start no Herdr.
 - **One machine can run both hosts.** The measured machine runs Herdr inside a Rex block. Both hosts write the same agent packages, which bake one launcher and one state directory, and Claude Code and Codex load one set of hooks.
 - **A remote host is a second install.** Each machine that runs agents runs its own Namedrop beside its own Rex server (ADAPTER.md, "Remote hosts").
 
@@ -374,7 +374,7 @@ A Rust port of `runtime.py` would drop the `python3` requirement, which Herdr ha
 
 ### One Namedrop on a machine with both hosts
 
-The agent packages are one slot: `~/.claude/skills/namedrop`, `~/.agents/skills/namedrop`, `~/.local/bin/namedrop`, the install record, the Codex rules, and the Codex plugin name each hold one launcher and one state directory, and Claude Code and Codex load one set of hooks. Two installs cannot each own a copy without firing every hook twice. So one machine has one Namedrop: one state directory, one runtime, one set of packages. Both hosts' spaces live in one store, kept apart by the endpoint kind in `session_socket_id`, and each process resolves its host through `mux::home`. The testbed's Rex lane already runs this way: it activates in a profile Herdr, and its Rex blocks reach Herdr's state directory through the install record (`testbed/README.md:335-339`).
+The agent packages are one slot: `~/.claude/skills/namedrop`, `~/.agents/skills/namedrop`, `~/.local/bin/namedrop`, the install record, the Codex rules, and the Codex plugin name each hold one launcher and one state directory, and Claude Code and Codex load one set of hooks. Two installs cannot each own a copy without firing every hook twice. So one machine has one Namedrop: one state directory, one runtime, one set of packages. Both hosts' spaces live in one store, kept apart by the endpoint kind in `session_socket_id`, and each process resolves its host through `mux::home`. Before U12, the testbed's Rex lane ran this way: it activated in a profile Herdr, and its Rex blocks reached Herdr's state directory through the install record. Since U12 it runs the build's `install.sh` into `PROFILE/state/namedrop` with no Herdr (`testbed/README.md`, "The Rex lane").
 
 **One lease.** `package_guard()` becomes the only way to write the shared packages. It returns a `PackageLease`, and every function that writes a package file takes `&PackageLease`, so a write outside the guard does not compile. The writers are:
 
@@ -623,6 +623,8 @@ U10. **Standalone updates** [H]. `check-update.py` reads `source.json`, the deve
 U11. **Words, by test** [H]. The sweep test of [Words](#words), with its allowlist, and the texts it finds changed. Herdr differential: the base flow, nothing pinned. Done when the sweep passes and the differential is clean.
 
 U12. **The testbed's Rex lane installs without Herdr.** `testbed rex up` runs the build's `install.sh` into the profile instead of activating in a profile Herdr, and checks that no `herdr` is on the profile's `PATH`. Done when the step 4 and step 5 live checks pass on the new lane.
+
+U12 result: done in `5a277299` and its fix round `b64d0f36`, with the step 4 and step 5 live checks passing on preview.18 and preview.19 (PORT.md, "Step 6 commits"). The check covers the lane's `PATH`, the directory of the lane's `rex`, the shell block, a login `zsh`, `bash` and `sh` in the lane's environment, and the tool shells of Codex and Claude Code, each asked to run `command -v herdr`. Login shells are covered because the lane writes a `PATH` filter into the profile `HOME`'s `.zprofile`, `.bash_profile` and `.profile`. Its limits: a `herdr` in `/usr/bin`, `/bin`, `/usr/sbin` or `/sbin` stops the lane, because those directories stay on `PATH`; a program that runs `herdr` by an absolute path is not covered; and no live run restarted the server on an installed profile.
 
 U13. **Install orders, removal, and the relay, live.** On the lanes:
 - Herdr first, then Rex: `install.sh` adopts with one runtime and a module baked to Herdr's launcher, and refuses with a Herdr build from before this step.
