@@ -197,6 +197,10 @@ fn round(run: &mut Run<'_>, reading: &mut Reading) -> Round {
     // sent, since B may have accepted one sent before and still answers
     // for it.
     let mut full = false;
+    // The threads of the items B has not taken yet, each with the message
+    // that waits. A later message of such a thread waits behind it, so B
+    // takes a thread's messages in order.
+    let mut waiting: Vec<(&str, &str)> = Vec::new();
     if !queued.is_empty() && silent() {
         // B's last page said it keeps no more replies for this side, so a
         // collect first tells whether that still holds.
@@ -209,6 +213,13 @@ fn round(run: &mut Run<'_>, reading: &mut Reading) -> Round {
         full = pages.read && silent();
     }
     for item in &queued {
+        if waiting
+            .iter()
+            .any(|(thread, message)| *thread == item.thread && *message != item.message_id)
+        {
+            kept = true;
+            continue;
+        }
         if full && item.host_id.is_none() {
             let reason = format!(
                 "{} keeps no more replies for this machine until this machine collects them",
@@ -241,14 +252,16 @@ fn round(run: &mut Run<'_>, reading: &mut Reading) -> Round {
         match perform(run.label, &request) {
             Call::Answered(answer) => {
                 let more = answer.more;
-                decide(
+                if decide(
                     run.label,
                     &store,
                     item,
                     answer.result.as_ref(),
                     now,
                     &mut kept,
-                );
+                ) {
+                    waiting.push((item.thread.as_str(), item.message_id.as_str()));
+                }
                 let peer = Peer {
                     host_id: &host_id,
                     labels: &labels,
@@ -288,7 +301,8 @@ fn round(run: &mut Run<'_>, reading: &mut Reading) -> Round {
     }
 }
 
-/// Settles `item` by B's outcome for it.
+/// Settles `item` by B's outcome for it, and says whether B has not taken
+/// it yet, so it stays queued.
 fn decide(
     label: &str,
     store: &RelayStore,
@@ -296,10 +310,10 @@ fn decide(
     outcome: Option<&super::wire::Outcome>,
     now: i64,
     kept: &mut bool,
-) {
+) -> bool {
     let Some(outcome) = outcome else {
         *kept = true;
-        return;
+        return true;
     };
     let printable: String = outcome
         .reason
@@ -326,7 +340,7 @@ fn decide(
         }
         Status::Retry => {
             *kept = true;
-            Ok(())
+            return true;
         }
     };
     // The item stays queued, and B keeps each reply to it until a later
@@ -334,6 +348,7 @@ fn decide(
     if settled.is_err() {
         *kept = true;
     }
+    false
 }
 
 /// What a collect found.
@@ -403,12 +418,10 @@ fn collect(
                 answered: false,
             };
         };
-        if answer
-            .result
-            .as_ref()
-            .is_some_and(|result| result.status != Status::Retry)
-        {
-            // B refused the call itself, as for another server's host_id.
+        if answer.result.is_some() || !wire::valid_id(&answer.epoch) {
+            // B refused the call itself, as for another server's host_id,
+            // or could not page, as its answer to a fault of its own says,
+            // so the next try backs off.
             return Pages {
                 read,
                 answered: false,

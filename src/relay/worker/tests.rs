@@ -370,6 +370,88 @@ fn each_transient_row_keeps_the_item_and_sends_it_again_with_the_same_id() {
     }
 }
 
+/// A later message of a thread waits behind one B has not taken, so B
+/// takes them in order. Another recipient of the same message, and another
+/// thread, go on.
+#[test]
+fn a_later_message_of_a_thread_waits_behind_one_b_has_not_taken() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    crate::rex_bridge::remember_host_id(&space.state, &Endpoint::parse(REX), "host-a");
+    let id = |sent: Result<Value, String>| sent.unwrap()["message_id"].as_str().unwrap().to_owned();
+    let first = id(rex.run(|| space.send("request-1", "@bob@devbox @carol@devbox ping")));
+    let follow_up = id(rex.run(|| space.reply("reply-1", &first, "@bob@devbox one more thing")));
+    capture(&space);
+    let other = id(rex.run(|| space.send("request-2", "@bob@devbox another thread")));
+    rex.answer_with(answer("retry", Some("busy"), json!([])));
+    rex.answer_with(answer("accepted", None, json!([])));
+    rex.answer_with(answer("accepted", None, json!([])));
+    let (waits, _) = work_for(&space, &rex, 1);
+    assert_eq!(waits, [BACKOFF[0]]);
+    let sent_items = || -> Vec<(String, String)> {
+        rex.requests()
+            .iter()
+            .map(|request| {
+                (
+                    request["item"]["id"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned(),
+                    request["item"]["to"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned(),
+                )
+            })
+            .collect()
+    };
+    let item = |id: &str, to: &str| (id.to_owned(), to.to_owned());
+    assert_eq!(
+        sent_items(),
+        [
+            item(&first, "bob"),
+            item(&first, "carol"),
+            item(&other, "bob")
+        ],
+        "the follow-up waits behind bob's first message"
+    );
+    rex.answer_with(answer("accepted", None, json!([])));
+    rex.answer_with(answer("accepted", None, json!([])));
+    work_for(&space, &rex, 1);
+    assert_eq!(
+        sent_items()[3..],
+        [item(&first, "bob"), item(&follow_up, "bob")]
+    );
+    assert!(
+        outbound(&space)
+            .iter()
+            .all(|(state, ..)| state == "accepted")
+    );
+}
+
+/// A collect that B answers with a fault of its own, or with any outcome,
+/// is not an answer: the worker backs off before it collects again.
+#[test]
+fn a_collect_b_could_not_answer_backs_off() {
+    for fault in [
+        json!({"host_id": "host-b", "can_reply": true, "outbox": [], "more": false, "relay": 2}),
+        json!({"host_id": "host-b", "can_reply": true, "epoch": "e1", "outbox": [], "more": false,
+            "result": {"id": "", "to": "", "status": "retry", "reason": "busy"}}),
+    ] {
+        let space = Space::new(REX);
+        let rex = rex(&["devbox"]);
+        sent(&space, &rex);
+        rex.answer_with(answer("accepted", None, json!([])));
+        rex.answer_with(fault.clone());
+        rex.answer_with(
+            json!({"host_id": "host-b", "can_reply": true, "epoch": "e1", "outbox": [],
+            "more": false}),
+        );
+        let (waits, _) = work_for(&space, &rex, 3);
+        assert_eq!(waits, [COLLECT_EVERY, BACKOFF[0], COLLECT_EVERY], "{fault}");
+    }
+}
+
 #[test]
 fn a_resolve_that_finds_no_single_bridge_keeps_the_item() {
     for status in ["not_found", "ambiguous"] {
