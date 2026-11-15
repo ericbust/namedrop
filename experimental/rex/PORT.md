@@ -1436,7 +1436,7 @@ Evidence for the second fix round:
 
 ### Queued from the second fix round
 
-- **A purge can make SQLite reuse message rowids.** Fixed in the third fix round below.
+- **A purge can make SQLite reuse message rowids.** The third fix round below fixed it for a purge that leaves a message at or after the relay database's first one. A deeper purge still loses replies, as the queue after the third round says.
 - **Two labels of one server by other addresses.** They are refused as one server answering as another, so a person must list both with the same addresses. A refused label's items already pinned to that `host_id` stay queued until they expire.
 - **An answer to the host notice counts as an expired reply (found live).** Fixed in the third fix round below.
 
@@ -1481,3 +1481,15 @@ These stay unfixed for now.
 ## Next implementation step
 
 Steps 3, 4, and 5 are done (see [Step 3: neutral names](#step-3-neutral-names), [Step 4 commits](#step-4-commits), and [Step 5 commits](#step-5-commits)), and so is the relay of ADAPTER.md's Part 2 (see [Relay commits](#relay-commits), its fix round, its rebase onto step 5's second fix round, its second and third fix rounds, its follow-up round, its mixed-build round, its hardening round, and that round's second and third fix rounds). Next is step 6 of the [plan](PLAN.md): the Lua module, its palette actions and screens, and the installer.
+
+### Queued from the third fix round
+
+Fable's re-review of `41751289..323ed819` (`rvf2_*`) said merge and queued these:
+
+- **A deep purge still loses replies without a word.** A purge that takes every message at or after the relay database's first message, or at or after a cursor migrated from version 2, makes the next replies take rowids below capture's floor. Capture never reads them, so they leave no outbox row and no Doctor count. A cursor with no message id is never checked, so an endpoint that has captured nothing yet has the same gap. `329c278b` lost the same. One possible fix: keep the floor message's id, fill in a migrated mark's id at the first capture, and read below a floor whose message is gone, ordered by creation time.
+- **A real answer given to the host notice's id is dropped.** Capture keeps nothing for an answer to a `relay-notice/v1`. So a reply sent in answer to the notice instead of to the message leaves no row and no count.
+- **The loss notices are capped as a rate, not as a total.** A hostile B gets 4 notices an hour, 96 a day, for each server and endpoint, for as long as A keeps an accepted item (14 days after the last). There is no cap for each message.
+- **Any warning from `rex hosts list` keeps an unlisted label's item.** A complete list whose warning is unrelated keeps it queued for 24 hours, and the item then expires as "unreachable", which is the wrong reason.
+- **Test gaps.** Nothing tests that a rewind stops at the floor or at a migrated mark. Nothing tests the expiry reason of an item behind a paused one of another label or endpoint, or the scope of the loss notice limit by server and endpoint.
+- **Assumptions.** Capture's rewind assumes that a whole-space purge (`delete_namespace_rows`) is the only delete of `collaboration_messages`, and that `VACUUM` keeps rowids, which it does because the table has indexes. A test pins the second with the bundled SQLite.
+- **Databases from earlier builds of this branch** with `41751289`'s version 3 layout are set aside as `relay.sqlite3.unreleased-<ms>` on first open, with their queued items. This is by design.
