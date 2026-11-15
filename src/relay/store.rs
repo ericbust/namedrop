@@ -814,17 +814,18 @@ impl RelayStore {
         Ok(())
     }
 
-    /// Commits a message's relay writes, loss counts, and capture cursor together.
+    /// Commits a message's relay writes, loss counts, and capture cursor
+    /// together, under the write lock from the start, so a capture that
+    /// meets another relay writer waits its turn.
     pub(crate) fn captured(
         &self,
         endpoint: &str,
         rowid: i64,
         capture: impl FnOnce() -> Result<(Vec<String>, Vec<String>), String>,
     ) -> Result<Vec<String>, String> {
-        let transaction = self
-            .connection
-            .unchecked_transaction()
-            .map_err(|error| error.to_string())?;
+        let transaction =
+            rusqlite::Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
+                .map_err(|error| error.to_string())?;
         if self
             .capture_cursor(endpoint)
             .map_err(|error| error.to_string())?

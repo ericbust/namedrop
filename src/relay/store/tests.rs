@@ -486,6 +486,44 @@ fn a_database_stamped_this_version_with_another_layout_is_set_aside() {
     assert_eq!(layout(&store.connection).unwrap(), *current_layout());
 }
 
+/// A capture's transaction takes the relay's write lock from its start, so
+/// a capture that meets another relay writer waits for it rather than
+/// failing.
+#[test]
+fn a_capture_waits_for_another_relay_writer() {
+    let state = State::new();
+    drop(state.open(NOW));
+    let writer = Connection::open(state.0.join("relay.sqlite3")).unwrap();
+    writer.busy_timeout(Duration::from_secs(5)).unwrap();
+    writer
+        .execute_batch(
+            "BEGIN IMMEDIATE;
+             INSERT INTO outbox_expired (sender, count) VALUES ('other', 1);",
+        )
+        .unwrap();
+    let path = state.0.clone();
+    let capture = std::thread::spawn(move || {
+        let store = RelayStore::read(&path).unwrap();
+        store.captured("rex:/tmp/a.sock", 1, || {
+            store
+                .connection
+                .execute(
+                    "INSERT INTO outbox_expired (sender, count) VALUES ('mine', 1)",
+                    [],
+                )
+                .map_err(|error| error.to_string())?;
+            Ok((vec!["devbox".to_owned()], Vec::new()))
+        })
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    writer.execute_batch("COMMIT").unwrap();
+    assert_eq!(capture.join().unwrap(), Ok(vec!["devbox".to_owned()]));
+    assert_eq!(
+        state.open(NOW).capture_cursor("rex:/tmp/a.sock").unwrap(),
+        1
+    );
+}
+
 /// A database of this version opens again as it is, and its rows stay.
 #[test]
 fn a_database_of_this_version_opens_again_with_its_rows() {

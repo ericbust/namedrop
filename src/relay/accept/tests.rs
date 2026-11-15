@@ -905,6 +905,27 @@ fn a_reply_to_a_relayed_message_reaches_its_relay_author_and_settles() {
     );
 }
 
+/// A capture reads all it needs of the main database in one transaction,
+/// before its relay writes, so a relay transaction never waits on the main
+/// database.
+#[test]
+fn a_capture_reads_the_main_database_once_before_its_relay_writes() {
+    let b = B::new();
+    b.call(&deliver("m1", "bob", "t1", "first"));
+    let relayed = b.rows(
+        "namedrop.sqlite3",
+        "SELECT message_id FROM collaboration_messages WHERE grammar_version <> 'relay-notice/v1'",
+    );
+    bob_answers(&b, relayed[0][0].as_str().unwrap(), "@alice@laptop answer");
+    let scope = crate::work_counters::Scope::start();
+    super::super::capture::capture(&b.0, &Endpoint::parse(REX), &mut |_| {}).unwrap();
+    assert_eq!(scope.finish().writes, 1);
+    assert_eq!(
+        b.rows("relay.sqlite3", "SELECT re, text FROM outbox"),
+        [[json!("m1"), json!("answer")]]
+    );
+}
+
 /// An answer that names an earlier relayed message answers that one, not
 /// the latest.
 #[test]
