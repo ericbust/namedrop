@@ -1211,7 +1211,6 @@ def section_runtime():
         f.close()
 
 
-
 def section_updates():
     import sqlite3
     for mode in ('same', 'migrated', 'interrupted'):
@@ -1293,7 +1292,8 @@ def section_updates():
                 publisher.write_text(original)
                 assert (f.state / 'runtime/migration.json').is_file()
                 refused = f.in_block(session, block, 'doctor', ok=False)
-                assert refused.returncode == 69 and 'Namedrop activation was interrupted.' in (refused.stdout + refused.stderr)
+                assert refused.returncode == 69 and ('Namedrop installation was interrupted. Run sh scripts/install.sh again to finish;'
+                                                     in (refused.stdout + refused.stderr)), refused
                 assert store() == before
                 publish(new)
                 assert not (f.state / 'runtime/migration.json').exists()
