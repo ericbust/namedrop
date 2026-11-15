@@ -98,8 +98,15 @@ fn naming_activation_keeps_the_tour_unclaimed_and_naming_continues() {
 }
 
 /// Runs one Rex screen whose start is refused, and checks that it prints
-/// `refusal`, waits for a key even after a second, and closes on one.
-fn waits_for_one_key(mut command: std::process::Command, mode: &str, refusal: &str) {
+/// `refusal`, waits for a key even after a second, and closes on one. With
+/// `gate`, the runtime command lock must be free for an exclusive taker, such
+/// as an update, while it waits.
+fn waits_for_one_key(
+    mut command: std::process::Command,
+    mode: &str,
+    refusal: &str,
+    gate: Option<&std::path::Path>,
+) {
     let mut child = command
         .args(["--endpoint", "rex:/tmp/nd-rex-popup-does-not-exist.sock"])
         .args(["ui", "run", mode])
@@ -134,6 +141,13 @@ fn waits_for_one_key(mut command: std::process::Command, mode: &str, refusal: &s
         child.try_wait().unwrap().is_none(),
         "{mode} closed a slow failure"
     );
+    if let Some(gate) = gate {
+        let lock = fs::File::open(gate).unwrap();
+        assert!(
+            lock.try_lock().is_ok(),
+            "{mode} holds the command gate while it waits"
+        );
+    }
     input.write_all(b"x").unwrap();
     drop(input);
     let output = child.wait_with_output().unwrap();
@@ -160,17 +174,18 @@ fn rex_screen_refusals_wait_for_any_key_even_after_one_second() {
             untargeted(&f),
             mode,
             "This popup is missing its invoking space",
+            None,
         );
         assert!(!f.0.join("home/.config").exists());
     }
 }
 
-/// A runtime command gate that refuses, or a selected runtime that cannot
-/// start, ends the process before any screen runs. A Rex layer still waits
-/// for its key, and Herdr's popup keeps today's exit.
 /// Breaks a state's `runtime` directory one way.
 type Break = fn(&std::path::Path);
 
+/// A runtime command gate that refuses, or a selected runtime that cannot
+/// start, ends the process before any screen runs. A Rex layer still waits
+/// for its key, without the gate, and Herdr's popup keeps today's exit.
 #[test]
 fn refusals_before_a_screen_starts_wait_for_a_key_only_in_rex() {
     let cases: [(&str, Break, &str); 2] = [
@@ -193,7 +208,8 @@ fn refusals_before_a_screen_starts_wait_for_a_key_only_in_rex() {
             break_runtime(&state.join("runtime"));
             let mut rex = untargeted(&f);
             rex.env("NAMEDROP_STATE_DIR", &state);
-            waits_for_one_key(rex, mode, refusal);
+            let gate = state.join("runtime/commands.lock");
+            waits_for_one_key(rex, mode, refusal, (case == "runtime").then_some(&*gate));
             let output = untargeted(&f)
                 .env("HERDR_SOCKET_PATH", f.0.join("herdr.sock"))
                 .env("HERDR_PLUGIN_STATE_DIR", &state)

@@ -271,6 +271,9 @@ fn main() -> ExitCode {
                 use std::os::unix::process::CommandExt;
                 let error = Command::new(launcher).args(env::args_os().skip(1)).exec();
                 eprintln!("Could not run the selected Namedrop runtime: {error}");
+                // A layer may wait long for its key, and an update, the
+                // repair here, needs the gate meanwhile.
+                drop(command_guard);
                 return refuse_before_screen(&cli, inherited, 69);
             }
         }
