@@ -73,7 +73,7 @@
     },
     {
       "kind": "shared-home",
-      "text": "ND-INSTALL-001: Namedrop on Rex moved to Herdr's install in <path>. In each Rex session, run Activate Namedrop again and name the panes again, then restart the agents there so they load the new hooks.",
+      "text": "ND-INSTALL-001: Namedrop on Rex moved to Herdr's install in <path>. In each Rex session, run Activate Namedrop again and name the panes again. Restart an agent there that shows Hook failed or does not answer a mention.",
       "surfaces": [
         "activate (Herdr took the state over)",
         "name (Herdr took the state over)",
@@ -82,21 +82,21 @@
         "doctor text (Herdr took the state over)"
       ],
       "sources": [
-        {"file": "src/installed_runtime/retirement.rs", "line": 27, "source": "ND-INSTALL-001: Namedrop on Rex moved to Herdr's install in {}. In each Rex session, run Activate Namedrop again and name the panes again, then restart the agents there so they load the new hooks."}
+        {"file": "src/installed_runtime/retirement.rs", "line": 27, "source": "ND-INSTALL-001: Namedrop on Rex moved to Herdr's install in {}. In each Rex session, run Activate Namedrop again and name the panes again. Restart an agent there that shows Hook failed or does not answer a mention."}
       ],
       "reason": "UI.md, Retiring a state: a Rex state that Herdr took over says where it went. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
     },
     {
       "kind": "shared-home",
-      "text": "Namedrop on Rex moved to Herdr's install in <path>. 1 agent on Rex still runs the old hooks from <path>, and the names made there were not carried over. In each Rex session, run Activate Namedrop again and name the panes again, then restart those agents so they load the new hooks. This warning clears when they have all ended.",
+      "text": "Namedrop on Rex moved to Herdr's install in <path>. 1 agent on Rex has not run its hooks since the move from <path>, and the names made there were not carried over. In each Rex session, run Activate Namedrop again and name the panes again. An agent runs the new hooks at its next turn. Restart one that shows Hook failed or does not answer a mention. This warning clears as each of them takes a turn or ends.",
       "surfaces": [
         "doctor (Herdr took the state over)",
         "doctor text (Herdr took the state over)"
       ],
       "sources": [
-        {"file": "src/rex_ui/handoff.rs", "line": 278, "source": "Namedrop on Rex moved to Herdr's install in {}. {count} the old hooks from {}, and the names made there were not carried over. In each Rex session, run Activate Namedrop again and name the panes again, then restart those agents so they load the new hooks. This warning clears when they have all ended.\n{blocks}"}
+        {"file": "src/rex_ui/handoff.rs", "line": 285, "source": "Namedrop on Rex moved to Herdr's install in {}. {count} not run its hooks since the move from {}, and the names made there were not carried over. In each Rex session, run Activate Namedrop again and name the panes again. An agent runs the new hooks at its next turn. Restart one that shows Hook failed or does not answer a mention. This warning clears as each of them takes a turn or ends.\n{blocks}"}
       ],
-      "reason": "ND-INSTALL-001 in Doctor of the state that took over, read from a Rex block whose agent still runs the old hooks. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
+      "reason": "ND-INSTALL-001 in Doctor of the state that took over, read from a Rex block whose agent has not run that state's hooks yet. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
     },
     {
       "kind": "shared-home",

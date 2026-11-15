@@ -67,8 +67,8 @@ OLD_RELEASE = "v1.11.1"
 PROFILES = {"herdr-first": ("rex-u13-h1",), "old-herdr": ("rex-u13-h0",), "rex-first": ("rex-u13-r1",),
             "stopped-server": ("rex-u13-r2",), "two-lanes": ("rex-u13-a", "rex-u13-b")}
 REFUSED_AFTER_HANDOFF = ("ND-INSTALL-001: Namedrop on Rex moved to Herdr's install in {}. In each Rex session, "
-                         "run Activate Namedrop again and name the panes again, then restart the agents there "
-                         "so they load the new hooks.")
+                         "run Activate Namedrop again and name the panes again. Restart an agent there that shows "
+                         "Hook failed or does not answer a mention.")
 REFUSED_AFTER_REMOVAL = "Namedrop was removed from Rex. Run sh scripts/install.sh to install it again."
 HELPER_WORDS = {("rex", "bridge"): "bridge", ("relay", "worker"): "relay worker",
                 ("hook", "agent-status-worker"): "status worker", ("dashboard-server",): "dashboard server"}
@@ -665,18 +665,20 @@ def scenario_rex_first(run, args, request):
                   {"code": refused.returncode, "stdout": refused.stdout, "stderr": refused.stderr})
     run.check("the refusals started no helper of the old state", not helpers(old), helpers(old))
 
-    def warning_names_both(issues):
+    def warning_names(issues, named):
+        """One ND-INSTALL-001 that counts the agents of `named` and names their blocks, and no other's."""
         if len(issues) != 1:
             return False
         text = issues[0]["explanation"]
-        return ("2 agents on Rex still run the old hooks from {}".format(old) in text and
-                all("{} on rex:{}".format(blocks[a], lane.socket) in text for a in agents))
+        count = "1 agent on Rex has" if len(named) == 1 else "{} agents on Rex have".format(len(named))
+        return ("{} not run its hooks since the move from {}".format(count, old) in text and
+                all(("{} on rex:{}".format(blocks[a], lane.socket) in text) == (a in named) for a in agents))
 
     issues, _ = herdr_doctor(run, profile)
-    run.check("Herdr's Doctor: ND-INSTALL-001 counts 2 agents and names both blocks", warning_names_both(issues),
-              issues)
+    run.check("Herdr's Doctor: ND-INSTALL-001 counts 2 agents and names both blocks",
+              warning_names(issues, agents), issues)
 
-    # Codex's next turn, on the hooks it started with.
+    # Codex's next turn, which runs Herdr's hooks from the package copy that replaced its own.
     cache_after = sorted(str(path) for path in (profile.dir / "codex/plugins/cache/namedrop/namedrop").glob("*"))
     run.observe("Codex plugin cache after the handoff", cache_after)
     watch = Watch([str(old) + "/", "/codex/plugins/cache/namedrop/", str(state) + "/"])
@@ -701,12 +703,20 @@ def scenario_rex_first(run, args, request):
     run.check("the old state's hook runs did not change", hook_runs(old) == old_runs,
               {"before": old_runs, "after": hook_runs(old)})
     run.observe("Herdr state hook runs after Codex's turn", hook_runs(state))
+    # Codex's turn ran Herdr's hooks, which bound it in Herdr's state, so it
+    # runs the new hooks and Doctor counts only Claude Code (the U13 review's F1).
+    codex_agent = next(a["agent"] for a in predecessors[0]["agents"] if a["block"] == blocks["codex"])
+    run.check("Codex's turn bound its agent in Herdr's state",
+              codex_agent in [b.get("agent") for b in bindings(state)], bindings(state))
+    issues, _ = herdr_doctor(run, profile)
+    run.check("Herdr's Doctor: after Codex's turn, ND-INSTALL-001 counts only Claude Code",
+              warning_names(issues, ["claude"]), issues)
 
     # Doctor in a fresh process, with every Namedrop process stopped.
     run.observe("stopped every Namedrop process", stop_namedrop(profile.dir / "state"))
     issues, _ = herdr_doctor(run, profile, drop=("XDG_STATE_HOME", "NAMEDROP_STATE_DIR"))
-    run.check("after every Namedrop process stopped, a fresh Doctor with no XDG_STATE_HOME still counts both",
-              warning_names_both(issues), issues)
+    run.check("after every Namedrop process stopped, a fresh Doctor with no XDG_STATE_HOME still counts Claude Code",
+              warning_names(issues, ["claude"]), issues)
 
     # A Rex server restart ends both agents.
     agent_pids = [int(a["agent"].split("@")[0]) for a in predecessors[0]["agents"]]
