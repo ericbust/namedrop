@@ -91,43 +91,11 @@ where
         && let Some(inspected) =
             crate::rex_ui::inspect(runtime.home_directory, runtime.mux.endpoint())
     {
-        let (confirmed, explanation, diagnostic) = match inspected {
-            Ok(diagnostic) => (
-                diagnostic["confirmed"] == true,
-                rex_module_explanation(&diagnostic),
-                diagnostic,
-            ),
-            Err(error) => (
-                false,
-                error.clone(),
-                serde_json::json!({"confirmed":false,"error":error}),
-            ),
-        };
-        let mut check = issue(
-            "ND-REX-001",
-            if confirmed {
-                HealthSeverity::Info
-            } else {
-                HealthSeverity::Notice
-            },
-            if confirmed {
-                "The Rex module is confirmed."
-            } else {
-                "The Rex module is not confirmed."
-            },
-            &explanation,
-            HealthRepairKind::ProductAction,
-            if confirmed {
-                "Keys bound later in init.lua override the Namedrop keys."
-            } else {
-                "Run sh scripts/install.sh, then check Namedrop Doctor again."
-            },
-        );
-        check.diagnostic = diagnostic;
-        report.issues.push(check);
-        if !confirmed && report.status == HealthStatus::Healthy {
+        let check = rex_module_issue(inspected);
+        if check.severity != HealthSeverity::Info && report.status == HealthStatus::Healthy {
             report.status = HealthStatus::NeedsAttention;
         }
+        report.issues.push(check);
     }
     if let Some(diagnostic) = crate::dashboard::tailscale::diagnose(runtime.state_directory) {
         let explanation = match (&diagnostic.url, &diagnostic.problem) {
@@ -1608,6 +1576,59 @@ fn add_operation<M, C, I>(
         issue.repair.command = Some(command);
     }
 }
+/// `ND-REX-001`: the module the server loaded, as `rex_ui::inspect` read
+/// it. Only a confirmed module is information; any other is a notice, with a
+/// reload for a module the server loaded before a refresh rewrote it, and a
+/// reinstall otherwise.
+fn rex_module_issue(inspected: Result<serde_json::Value, String>) -> HealthIssue {
+    let (confirmed, mut explanation, diagnostic) = match inspected {
+        Ok(diagnostic) => (
+            diagnostic["confirmed"] == true,
+            rex_module_explanation(&diagnostic),
+            diagnostic,
+        ),
+        Err(error) => (
+            false,
+            error.clone(),
+            serde_json::json!({"confirmed":false,"error":error}),
+        ),
+    };
+    let stale = !confirmed && diagnostic["stale"] == true;
+    if stale {
+        explanation.push_str(
+            " Rex still runs an older namedrop.lua, which it loaded before Namedrop rewrote the file. A reload loads the current one.",
+        );
+    }
+    let repair = if confirmed {
+        "Keys bound later in init.lua override the Namedrop keys.".to_owned()
+    } else if stale {
+        format!(
+            "{} Then check Namedrop Doctor again.",
+            crate::rex_ui::RELOAD_REPAIR
+        )
+    } else {
+        "Run sh scripts/install.sh, then check Namedrop Doctor again.".to_owned()
+    };
+    let mut check = issue(
+        "ND-REX-001",
+        if confirmed {
+            HealthSeverity::Info
+        } else {
+            HealthSeverity::Notice
+        },
+        if confirmed {
+            "The Rex module is confirmed."
+        } else {
+            "The Rex module is not confirmed."
+        },
+        &explanation,
+        HealthRepairKind::ProductAction,
+        &repair,
+    );
+    check.diagnostic = diagnostic;
+    check
+}
+
 /// Doctor's account of the Rex module. An issue's text renders as one line,
 /// because the report escapes control characters, newlines included.
 fn rex_module_explanation(diagnostic: &serde_json::Value) -> String {
@@ -1620,7 +1641,7 @@ fn rex_module_explanation(diagnostic: &serde_json::Value) -> String {
             let status = match k["status"].as_str() {
                 Some("in_effect") => "in effect",
                 Some("shadowed") => "shadowed",
-                Some("skipped") => "skipped at load",
+                Some("not_bound") => "not bound to Namedrop",
                 _ => "unknown",
             };
             match k["source"].as_str() {
@@ -1629,14 +1650,32 @@ fn rex_module_explanation(diagnostic: &serde_json::Value) -> String {
             }
         })
         .collect::<Vec<_>>();
+    let about = &diagnostic["about"];
+    let loaded = match about["module"].as_str() {
+        Some(module) => format!(
+            "Loaded module: {}, launcher {}, state {}.",
+            module.strip_prefix('@').unwrap_or(module),
+            text(&about["launcher"]),
+            text(&about["state"])
+        ),
+        None => "No module answered namedrop_about.".to_owned(),
+    };
+    // Only the variables the server sets, so no JSON reaches the sentence.
+    let environment = diagnostic["env"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(name, value)| value.as_str().map(|value| format!("{name}={value}")))
+        .collect::<Vec<_>>();
     let mut explanation = format!(
-        "Registered module: {}. Loaded module: {}, launcher {}, state {}. Server config: {}. Server environment: {}. Keys: {}.",
+        "Registered module: {}. {loaded} Server config: {}. Server environment: {}. Keys: {}.",
         text(&diagnostic["module"]),
-        text(&diagnostic["about"]["module"]),
-        text(&diagnostic["about"]["launcher"]),
-        text(&diagnostic["about"]["state"]),
         text(&diagnostic["config"]["path"]),
-        diagnostic["env"],
+        if environment.is_empty() {
+            "none".to_owned()
+        } else {
+            environment.join(", ")
+        },
         if keys.is_empty() {
             "none".to_owned()
         } else {
@@ -1746,11 +1785,11 @@ mod tests {
             "module": "/cfg/namedrop.lua",
             "about": {"module": "/cfg/namedrop.lua", "launcher": "/s/runtime/namedrop", "state": "/s"},
             "config": {"path": "/cfg/init.lua"},
-            "env": {"HOME": "/home"},
+            "env": {"HOME": "/home", "XDG_CONFIG_HOME": null, "REX_SERVER": "unix:///tmp/r.sock"},
             "keys": [
                 {"key": "alt+shift+cmd+i", "status": "in_effect", "source": "namedrop.lua:39"},
                 {"key": "alt+shift+cmd+m", "status": "shadowed", "source": "init.lua:4"},
-                {"key": "alt+shift+cmd+h", "status": "skipped"}
+                {"key": "alt+shift+cmd+h", "status": "not_bound"}
             ],
             "error": "no about"
         });
@@ -1766,8 +1805,46 @@ mod tests {
         assert_eq!(terminal_safe_text(&explanation), explanation);
         assert_eq!(
             explanation,
-            "Registered module: /cfg/namedrop.lua. Loaded module: /cfg/namedrop.lua, launcher /s/runtime/namedrop, state /s. Server config: /cfg/init.lua. Server environment: {\"HOME\":\"/home\"}. Keys: alt+shift+cmd+i in effect (namedrop.lua:39), alt+shift+cmd+m shadowed (init.lua:4), alt+shift+cmd+h skipped at load. Readback error: no about"
+            "Registered module: /cfg/namedrop.lua. Loaded module: /cfg/namedrop.lua, launcher /s/runtime/namedrop, state /s. Server config: /cfg/init.lua. Server environment: HOME=/home, REX_SERVER=unix:///tmp/r.sock. Keys: alt+shift+cmd+i in effect (namedrop.lua:39), alt+shift+cmd+m shadowed (init.lua:4), alt+shift+cmd+h not bound to Namedrop. Readback error: no about"
         );
+    }
+
+    /// The U6 review's F7: a module the server loaded before a refresh
+    /// rewrote it needs a reload, and only an unconfirmed module whose file
+    /// is current asks for the reinstall.
+    #[test]
+    fn an_unconfirmed_rex_module_names_a_reload_when_stale_and_a_reinstall_otherwise() {
+        let confirmed = rex_module_issue(Ok(serde_json::json!({"confirmed": true, "stale": true})));
+        assert_eq!(confirmed.severity, HealthSeverity::Info);
+        assert_eq!(confirmed.summary, "The Rex module is confirmed.");
+        let stale = rex_module_issue(Ok(serde_json::json!({"confirmed": false, "stale": true})));
+        assert_eq!(stale.severity, HealthSeverity::Notice);
+        assert!(
+            stale
+                .explanation
+                .contains("Rex still runs an older namedrop.lua"),
+            "{}",
+            stale.explanation
+        );
+        assert_eq!(
+            stale.repair.prompt,
+            "Reload Rex's configuration with rex config reload. Then check Namedrop Doctor again."
+        );
+        let unconfirmed = rex_module_issue(Ok(serde_json::json!({"confirmed": false})));
+        assert_eq!(unconfirmed.severity, HealthSeverity::Notice);
+        assert!(
+            unconfirmed
+                .explanation
+                .contains("No module answered namedrop_about.")
+        );
+        assert!(!unconfirmed.explanation.contains("older namedrop.lua"));
+        assert_eq!(
+            unconfirmed.repair.prompt,
+            "Run sh scripts/install.sh, then check Namedrop Doctor again."
+        );
+        let unreachable = rex_module_issue(Err("Rex is not running".into()));
+        assert_eq!(unreachable.severity, HealthSeverity::Notice);
+        assert_eq!(unreachable.explanation, "Rex is not running");
     }
 
     #[test]

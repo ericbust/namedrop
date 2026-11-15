@@ -316,3 +316,57 @@ fn the_line_state_is_read_from_init_lua_each_time_and_a_failed_read_changes_noth
     }
     assert!(!config.exists());
 }
+
+/// The U6 review's F3 and F7: activation names the keys only for a confirmed
+/// module, and a module the server loaded before a refresh rewrote it gets
+/// a reload, not a reinstall.
+#[test]
+fn shortcuts_name_keys_only_for_a_confirmed_module_and_a_reload_for_a_stale_one() {
+    let f = Fixture::new();
+    let module = f.0.join("namedrop.lua");
+    let config = f.0.join("init.lua");
+    let (launcher, state) = (Path::new("/new/runtime/namedrop"), Path::new("/new"));
+    fs::write(&config, format!("{CONFIG_LINE}\n")).unwrap();
+    fs::write(&module, module_text(launcher, state).unwrap()).unwrap();
+    fs::write(
+        crate::locator::rex_registration(&f.0),
+        json!({"module":module,"config":config,"line":"inserted","launcher":launcher,"state":state})
+            .to_string(),
+    )
+    .unwrap();
+    // The server's report: About names `loaded` as the module that answered,
+    // baked to the old launcher.
+    let report = |confirmed: bool, loaded: &Path| {
+        let about = json!({"module":format!("@{}", loaded.display()),"launcher":"/old/runtime/namedrop","state":"/old"});
+        move |record: &Value| {
+            Ok::<_, String>(
+                json!({"confirmed":confirmed,"module":record["module"],"keys":["k"],"actions_complete":true,"about":about}),
+            )
+        }
+    };
+    let shortcuts = |confirmed, loaded: &Path| {
+        shortcut_report(inspect_with(Some(&f.0), report(confirmed, loaded)))
+    };
+    assert_eq!(
+        shortcuts(true, &module),
+        json!({"status":"rex_module","path":module,"keys":["k"]})
+    );
+    let reload = json!({"status":"stale_module","path":module,"repair":RELOAD_REPAIR});
+    assert_eq!(shortcuts(false, &module), reload);
+    let reinstall = json!({"status":"no_module", "repair":"Run sh scripts/install.sh."});
+    // Another module answered, so a reload would not help.
+    assert_eq!(shortcuts(false, &f.0.join("other/namedrop.lua")), reinstall);
+    // The file is not the text a reload would load.
+    fs::write(
+        &module,
+        module_text(Path::new("/elsewhere"), state).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(shortcuts(false, &module), reinstall);
+    fs::write(&module, module_text(launcher, state).unwrap()).unwrap();
+    assert_eq!(shortcuts(false, &module), reload);
+    // With the line gone, a reload loads no module at all.
+    fs::write(&config, "-- mine\n").unwrap();
+    assert_eq!(shortcuts(true, &module), reinstall);
+    assert_eq!(shortcuts(false, &module), reinstall);
+}

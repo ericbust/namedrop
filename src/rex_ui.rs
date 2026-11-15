@@ -255,15 +255,49 @@ fn inspect_with(
     Some(report(&record).map(|mut report| {
         if record["line"] == "removed" {
             report["confirmed"] = json!(false);
+        } else if report["confirmed"] != true && stale(&record, &report) {
+            report["stale"] = json!(true);
         }
         report
     }))
 }
 
+/// Whether the server runs an older text of the registered module, so a
+/// reload is all it needs: About names the registered file, the eleven
+/// actions loaded, and the file now holds the text for the recorded
+/// launcher and state, as after a refresh rewrote it (the U6 review's F7).
+fn stale(record: &Value, report: &Value) -> bool {
+    let (Some(module), Some(launcher), Some(state)) = (
+        record["module"].as_str(),
+        record["launcher"].as_str(),
+        record["state"].as_str(),
+    ) else {
+        return false;
+    };
+    report["actions_complete"] == true
+        && report["about"]["module"]
+            .as_str()
+            .map(|loaded| loaded.strip_prefix('@').unwrap_or(loaded))
+            == Some(module)
+        && module_text(Path::new(launcher), Path::new(state))
+            .is_ok_and(|text| fs::read_to_string(module).is_ok_and(|written| written == text))
+}
+
+/// The repair for a module the server loaded before a refresh rewrote it.
+pub const RELOAD_REPAIR: &str = "Reload Rex's configuration with rex config reload.";
+
 pub(crate) fn shortcuts(home: Option<&Path>, endpoint: &Endpoint) -> Value {
-    match inspect(home, endpoint) {
+    shortcut_report(inspect(home, endpoint))
+}
+
+/// Activation's shortcut report: the keys only for a confirmed module.
+fn shortcut_report(inspected: Option<Result<Value, String>>) -> Value {
+    match inspected {
         Some(Ok(report)) if report["confirmed"] == true => {
             json!({"status":"rex_module", "path":report["module"], "keys":report["keys"]})
+        }
+        Some(Ok(report)) if report["stale"] == true => {
+            json!({"status":"stale_module", "path":report["module"], "repair":RELOAD_REPAIR})
         }
         _ => json!({"status":"no_module", "repair":"Run sh scripts/install.sh."}),
     }
