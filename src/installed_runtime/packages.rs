@@ -39,6 +39,7 @@ pub(crate) enum Writer {
     /// `activate` and an explicit package install. Waits for the lock,
     /// records this state, and reports an owner it may not displace.
     Activation,
+    Handoff,
     /// Another command, such as `name`. Waits and records this state. Under
     /// a standalone record, Herdr leaves the packages to its next activation.
     Command,
@@ -48,6 +49,18 @@ pub(crate) enum Writer {
     /// run. Waits at most [`REFRESH_WAIT`] for the per-user lock, and leaves
     /// the packages to the next activation when it cannot take the lock.
     Refresh,
+}
+
+impl Writer {
+    pub(crate) fn for_operation(operation: &str) -> Self {
+        match operation {
+            "activate" | "install" => Self::Activation,
+            "deactivate" | "install.remove" => Self::Removal,
+            "reconcile" => Self::Refresh,
+            op if op.starts_with("event.") || op == "hook.agent-status-worker" => Self::Refresh,
+            _ => Self::Command,
+        }
+    }
 }
 
 const REFRESH_WAIT: Duration = Duration::from_secs(1);
@@ -139,11 +152,16 @@ pub(crate) fn refusal_notice(home: Option<&Path>, state: &Path) -> Option<String
     }
 }
 
-fn lock_file(path: &Path, name: &str) -> Result<fs::File, String> {
-    fs::create_dir_all(path.parent().ok_or("package lock has no directory")?)
-        .map_err(|error| error.to_string())?;
+fn open_lock(path: &Path, name: &str) -> std::io::Result<fs::File> {
+    fs::create_dir_all(
+        path.parent()
+            .ok_or_else(|| std::io::Error::other("package lock has no directory"))?,
+    )?;
     if fs::symlink_metadata(path).is_ok_and(|metadata| !metadata.is_file()) {
-        return Err(format!("{name} is not a regular file"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{name} is not a regular file"),
+        ));
     }
     let file = fs::OpenOptions::new()
         .create(true)
@@ -152,16 +170,32 @@ fn lock_file(path: &Path, name: &str) -> Result<fs::File, String> {
         .write(true)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)
-        .map_err(|error| error.to_string())?;
-    if !file
-        .metadata()
-        .map_err(|error| error.to_string())?
-        .is_file()
-    {
-        return Err(format!("{name} is not a regular file"));
+        .open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{name} is not a regular file"),
+        ));
     }
     Ok(file)
+}
+
+fn lock_file(path: &Path, name: &str) -> Result<fs::File, String> {
+    open_lock(path, name).map_err(|e| e.to_string())
+}
+
+pub(crate) fn preflight_handoff(home: &Path) -> Result<(), String> {
+    let path = crate::locator::package_lock(home);
+    open_lock(&path, "package lock")
+        .map(|_| ())
+        .map_err(|e| user_lock_error(&path, &e))
+}
+
+fn user_lock_error(path: &Path, error: &std::io::Error) -> String {
+    format!(
+        "Namedrop could not open its package lock {}: {error}.",
+        path.display()
+    )
 }
 
 fn lock(path: &Path, name: &str) -> Result<fs::File, String> {
@@ -170,23 +204,7 @@ fn lock(path: &Path, name: &str) -> Result<fs::File, String> {
     Ok(file)
 }
 
-/// The per-user lock within `wait`, or `None` when another process holds it
-/// that long or it cannot be taken.
-fn try_lock(path: &Path, wait: Duration) -> Option<fs::File> {
-    let file = lock_file(path, "package lock").ok()?;
-    let deadline = Instant::now() + wait;
-    loop {
-        match file.try_lock() {
-            Ok(()) => return Some(file),
-            Err(fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            Err(_) => return None,
-        }
-    }
-}
-
-fn same(left: &Path, right: &Path) -> bool {
+pub(crate) fn same(left: &Path, right: &Path) -> bool {
     left == right
         || fs::canonicalize(left)
             .ok()
@@ -213,13 +231,50 @@ fn locked(
     // Without an absolute HOME there is no package slot, so only the
     // per-state lock applies, as before the lease.
     let home = home.filter(|home| home.is_absolute());
+    let mut fallback = false;
     let user = match home.map(crate::locator::package_lock) {
         None => None,
-        Some(path) if writer == Writer::Refresh => match try_lock(&path, REFRESH_WAIT) {
-            Some(file) => Some(file),
-            None => return Ok(PackageLease::leave()),
+        Some(path) => match open_lock(&path, "package lock") {
+            Ok(file) => {
+                if writer == Writer::Refresh {
+                    let deadline = Instant::now() + REFRESH_WAIT;
+                    loop {
+                        match file.try_lock() {
+                            Ok(()) => break,
+                            Err(fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                                std::thread::sleep(Duration::from_millis(20))
+                            }
+                            Err(_) => return Ok(PackageLease::leave()),
+                        }
+                    }
+                } else {
+                    file.lock().map_err(|e| user_lock_error(&path, &e))?;
+                }
+                Some(file)
+            }
+            Err(error) => {
+                let shared_failure = error.kind() == std::io::ErrorKind::InvalidInput
+                    || matches!(
+                        error.raw_os_error(),
+                        Some(
+                            libc::EACCES | libc::EROFS | libc::ENOTDIR | libc::EISDIR | libc::ELOOP
+                        )
+                    );
+                if mine == Owner::Herdr && writer != Writer::Handoff && shared_failure {
+                    fallback = true;
+                    eprintln!(
+                        "{} It wrote under the lock of {} only.",
+                        user_lock_error(&path, &error),
+                        state.display()
+                    );
+                    None
+                } else if writer == Writer::Refresh {
+                    return Ok(PackageLease::leave());
+                } else {
+                    return Err(user_lock_error(&path, &error));
+                }
+            }
         },
-        Some(path) => Some(lock(&path, "package lock")?),
     };
     let local = lock(&runtime.join("packages.lock"), "runtime package lock")?;
     let selected =
@@ -239,10 +294,18 @@ fn locked(
     };
     if let Some(home) = home
         && matches!(lease.verdict, Verdict::Write)
-        && writer != Writer::Removal
+        && !matches!(writer, Writer::Removal | Writer::Handoff)
     {
-        crate::locator::write_install_record(&lease, &crate::locator::install_record(home), state)
-            .map_err(|error| error.to_string())?;
+        let path = crate::locator::install_record(home);
+        if let Err(error) = crate::locator::write_install_record(&lease, &path, state) {
+            if !fallback {
+                return Err(error.to_string());
+            }
+            eprintln!(
+                "Namedrop could not record its state directory in {}: {error}",
+                path.display()
+            );
+        }
     }
     Ok(lease)
 }
@@ -261,24 +324,18 @@ fn decide(mine: Owner, state: &Path, home: &Path, writer: Writer) -> Result<Verd
     else {
         return Ok(Verdict::Write);
     };
-    let retired = match fs::read(record.join("runtime/retired.json")) {
-        Ok(bytes) => Some(
-            serde_json::from_slice::<serde_json::Value>(&bytes)
-                .map_err(|error| error.to_string())?,
-        ),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error.to_string()),
-    };
-    if retired
-        .as_ref()
-        .and_then(|value| value["successor"].as_str())
-        .is_some_and(|successor| same(Path::new(successor), state))
-    {
+    if super::retirement(&record)?.is_some_and(|marker| {
+        marker.hands_to(state) || matches!(marker, super::Retirement::Removed { .. })
+    }) {
         return Ok(Verdict::Write);
     }
     Ok(match (mine, owner(&record)?) {
         (_, None) | (Owner::Herdr, Some(Owner::Herdr)) => Verdict::Write,
-        (Owner::Herdr, Some(Owner::Standalone)) if writer != Writer::Activation => Verdict::Leave,
+        (Owner::Herdr, Some(Owner::Standalone))
+            if !matches!(writer, Writer::Activation | Writer::Handoff) =>
+        {
+            Verdict::Leave
+        }
         (_, Some(owner)) => Verdict::Refuse {
             state: record,
             owner,
@@ -480,6 +537,64 @@ mod tests {
         assert!(!home.join(".local").exists());
         assert_eq!(record(&home), None);
     }
+    #[test]
+    fn removed_records_admit_a_new_owner_and_herdr_falls_back_only_on_shared_lock_failures() {
+        let f = Fixture::new();
+        let home = f.0.join("home");
+        let old = f.owned("old", Some("standalone"));
+        let herdr = f.state("herdr");
+        drop(take(&home, &old));
+        fs::write(
+            old.join("runtime/retired.json"),
+            serde_json::json!({"reason":"removed","successor":null,"at":"now"}).to_string(),
+        )
+        .unwrap();
+        assert!(take(&home, &herdr).writable().unwrap());
+        assert_eq!(record(&home), Some(herdr.clone()));
+        let path = crate::locator::package_lock(&home);
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert!(take(&home, &herdr).writable().unwrap());
+        assert!(
+            locked(Some(&home), &old, &old.join("runtime"), Writer::Activation)
+                .err()
+                .unwrap()
+                .contains(path.to_str().unwrap())
+        );
+        assert!(
+            preflight_handoff(&home)
+                .unwrap_err()
+                .contains(path.to_str().unwrap())
+        );
+        fs::remove_dir_all(home.join(".config")).unwrap();
+        fs::write(home.join(".config"), "file").unwrap();
+        assert!(take(&home, &herdr).writable().unwrap());
+    }
+
+    #[test]
+    fn lifecycle_operations_derive_one_lease_kind() {
+        for operation in [
+            "name",
+            "address.create",
+            "address.rename",
+            "address.release",
+        ] {
+            assert_eq!(Writer::for_operation(operation), Writer::Command);
+        }
+        for operation in [
+            "event.pane-lifecycle",
+            "event.agent-status-changed",
+            "reconcile",
+            "hook.agent-status-worker",
+        ] {
+            assert_eq!(Writer::for_operation(operation), Writer::Refresh);
+        }
+        for operation in ["activate", "install"] {
+            assert_eq!(Writer::for_operation(operation), Writer::Activation);
+        }
+        assert_eq!(Writer::for_operation("deactivate"), Writer::Removal);
+    }
+
     #[test]
     fn lease_process_child() {
         let Some(root) = std::env::var_os("NAMEDROP_TEST_LEASE_ROOT") else {

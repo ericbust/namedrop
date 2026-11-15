@@ -79,5 +79,19 @@ class Comparison(unittest.TestCase):
         self.assertNotEqual(self.compare(prefix,prefix+row("<STATE>/runtime/owner", "herdr\n"),["--allow-runtime-owner"]),0)
         self.assertNotEqual(self.compare(prefix,prefix+row("<STATE>-runtime/runtime/owner", "herdr\n", "0o644"),["--allow-runtime-owner"]),0)
 
+    def test_rex_ui_pin_is_explicit_and_exact(self):
+        base = {"runtime_protocol": 1, "helper_gate": 1}
+        def info(value):
+            return '## runtime-info\n--stdout\n' + json.dumps(value, separators=(",", ":")) + '\n'
+        def copied(value, path="<RELEASE>/runtime.json"):
+            return '## files (set)\n' + json.dumps({"mode": "0o644", "path": path, "text": json.dumps(value)}, sort_keys=True) + '\n'
+        gained = dict(base, rex_ui=1)
+        for report in (info, copied):
+            self.assertNotEqual(self.compare(report(base), report(gained)), 0)
+            self.assertEqual(self.compare(report(base), report(gained), ["--allow-rex-ui"]), 0)
+            for other in (dict(base, rex_ui=2), dict(base, rex_ui=True), dict(base, rex_ui="1"), dict(gained, extra=1)):
+                self.assertNotEqual(self.compare(report(base), report(other), ["--allow-rex-ui"]), 0, other)
+        self.assertNotEqual(self.compare(copied(base, "<STATE>/other.json"), copied(gained, "<STATE>/other.json"), ["--allow-rex-ui"]), 0)
+
 if __name__ == '__main__':
     unittest.main()

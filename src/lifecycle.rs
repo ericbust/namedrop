@@ -238,6 +238,7 @@ where
     C: Clock,
     I: IdGenerator,
 {
+    let writer = crate::installed_runtime::Writer::for_operation(operation);
     let discovered = match runtime.workspace_id {
         Some(workspace_id) => discover_reminder_workspace(
             runtime.state_directory,
@@ -311,7 +312,7 @@ where
             let lease = crate::installed_runtime::package_guard(
                 runtime.home_directory,
                 runtime.state_directory,
-                crate::installed_runtime::Writer::Command,
+                writer,
             )?;
             let sandbox_current = lease.writable()?;
             let address_id = store
@@ -424,7 +425,7 @@ where
                 runtime,
                 &attribution,
                 false,
-                crate::installed_runtime::Writer::Command,
+                writer,
             )?;
             let served =
                 crate::codex_app_server::served_codex_panes(runtime, std::slice::from_ref(pane));
@@ -512,10 +513,19 @@ where
                     hook_activation
                 ));
             }
+            let handoff = if runtime.mux.endpoint().kind == crate::mux::MuxKind::Herdr {
+                crate::rex_ui::handoff(
+                    runtime.home_directory,
+                    runtime.state_directory,
+                    runtime.agent_config,
+                )?
+            } else {
+                Vec::new()
+            };
             let lease = crate::installed_runtime::package_guard(
                 runtime.home_directory,
                 runtime.state_directory,
-                crate::installed_runtime::Writer::Activation,
+                writer,
             )?;
             let sandbox_current = lease.writable()?;
             let shell_command = crate::install::install_shell_command(
@@ -552,7 +562,7 @@ where
                 runtime,
                 &attribution,
                 false,
-                crate::installed_runtime::Writer::Activation,
+                writer,
             )?;
             let shortcuts =
                 crate::shortcuts::activate_shortcuts(runtime.home_directory, runtime.mux);
@@ -564,7 +574,7 @@ where
                 }
                 ActivationTour::NamingScreen => json!({"shown": false, "reason": "naming_screen"}),
             };
-            Ok(json!({
+            let mut report = json!({
                 "space_id": discovered.workspace_id,
                 "worktree_id": discovered.worktree_attached.then_some(discovered.worktree_id),
                 "state_directory": runtime.state_directory,
@@ -579,7 +589,14 @@ where
                 "reconciliation_epoch": reconciliation.epoch,
                 "drain": reconciliation.drain,
                 "tour": tour
-            }))
+            });
+            if !handoff.is_empty() {
+                report["handoff"] = json!(handoff);
+            }
+            if let Some(error) = reconciliation.installation.module_error() {
+                report["rex_module"] = json!({"written": false, "error": error, "repair": "Fix what the error names, then run Activate Namedrop again."});
+            }
+            Ok(report)
         }
         "deactivate" => {
             parse_input::<EmptyInput>(input)?;
@@ -594,7 +611,7 @@ where
             let lease = crate::installed_runtime::package_guard(
                 runtime.home_directory,
                 runtime.state_directory,
-                crate::installed_runtime::Writer::Removal,
+                writer,
             );
             let (permission_removal, sandbox_removal, subagent_removal) = match &lease {
                 Ok(lease) => (
@@ -703,11 +720,7 @@ where
                     Ok(enrich_record(record, &discovered.panes))
                 })
                 .map_err(|error| error.to_string())?;
-            onboard_settled_integrations(
-                runtime,
-                &discovered,
-                crate::installed_runtime::Writer::Command,
-            )?;
+            onboard_settled_integrations(runtime, &discovered, writer)?;
             serde_json::to_value(record).map_err(|error| error.to_string())
         }
         "address.list" => {
@@ -760,11 +773,7 @@ where
                     )
                 },
             )?;
-            onboard_settled_integrations(
-                runtime,
-                &discovered,
-                crate::installed_runtime::Writer::Command,
-            )?;
+            onboard_settled_integrations(runtime, &discovered, writer)?;
             let _ = reconcile_managed_tab_labels(&mut store, &namespace, &discovered, runtime);
             Ok(record)
         }
@@ -869,7 +878,7 @@ where
                 runtime,
                 &attribution,
                 true,
-                crate::installed_runtime::Writer::Refresh,
+                writer,
             )?;
             Ok(json!({
                 "space_id": discovered.workspace_id,

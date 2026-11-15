@@ -66,6 +66,10 @@ pub(super) fn peer_pid(stream: &UnixStream) -> io::Result<u32> {
 /// would block at once, and a connect that has not completed `within` fails
 /// `TimedOut`.
 pub(super) fn peer_within(socket: &Path, within: std::time::Duration) -> io::Result<u32> {
+    peer_pid(&connect_within(socket, within)?)
+}
+
+pub(super) fn connect_within(socket: &Path, within: std::time::Duration) -> io::Result<UnixStream> {
     use std::os::{
         fd::{AsRawFd, FromRawFd, OwnedFd},
         unix::ffi::OsStrExt,
@@ -145,7 +149,7 @@ pub(super) fn peer_within(socket: &Path, within: std::time::Duration) -> io::Res
             return Err(io::Error::from_raw_os_error(pending));
         }
     }
-    peer_pid(&UnixStream::from(descriptor))
+    Ok(UnixStream::from(descriptor))
 }
 
 /// Proves that the connection to `dial`, whose peer is process `peer`, is

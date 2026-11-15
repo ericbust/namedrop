@@ -808,6 +808,10 @@ def activate(root, args):
     state = Path(os.environ['HERDR_PLUGIN_STATE_DIR'])
     require(state.is_absolute() and state.is_dir(), 'Activation needs an absolute, existing state directory.')
     runtime = state / 'runtime'
+    retired = runtime / 'retired.json'
+    if retired.exists():
+        require(json.loads(retired.read_text()).get('reason') != 'herdr_handoff',
+                'Namedrop is moving to Herdr. Run Activate Namedrop in Herdr again.')
     owned_directory(runtime)
     owned_directory(runtime / 'releases')
     with lock(runtime, 'activation.lock'):

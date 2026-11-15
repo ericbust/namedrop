@@ -214,3 +214,30 @@ fn load_start_guard_accepts_only_the_server_parent() {
     assert!(server_start_endpoint(&start, 123).is_none());
     assert!(start.calls.borrow().is_empty());
 }
+
+#[test]
+fn refresh_remembers_a_removed_managed_line_without_restoring_it() {
+    let f = Fixture::new();
+    let config = f.0.join("init.lua");
+    let module = f.0.join("namedrop.lua");
+    fs::write(&config, "-- the person removed the line\n").unwrap();
+    fs::write(crate::locator::rex_registration(&f.0),json!({"config":config,"module":module,"line":"inserted","predecessors":[{"state":"/old"}]}).to_string()).unwrap();
+    refresh(
+        &f.lease(),
+        &f.0,
+        Path::new("/runtime/namedrop"),
+        &f.0.join("state"),
+    )
+    .unwrap();
+    let saved = registration(&f.0).unwrap().unwrap();
+    assert_eq!(saved["line"], "removed");
+    assert_eq!(saved["predecessors"], json!([{"state":"/old"}]));
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        "-- the person removed the line\n"
+    );
+    let mut restored = saved;
+    fs::write(&config, format!("{CONFIG_LINE}\n")).unwrap();
+    mark_removed_line(&mut restored);
+    assert_eq!(restored["line"], "removed");
+}

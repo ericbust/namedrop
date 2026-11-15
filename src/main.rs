@@ -40,9 +40,54 @@ type Runtime<'a> = LifecycleRuntime<'a, Arc<dyn Mux>, SystemClock, ProcessIds>;
 
 fn main() -> ExitCode {
     let inherited: &dyn Inherited = &namedrop::mux::home::ThisProcess;
+    // The contract query reads no state and makes no Rex call, so an
+    // updater can ask it of any runtime, a retired state's included.
     if env::args_os().skip(1).eq(["--runtime-info"]) {
         println!("{}", include_str!("../runtime.json").trim());
         return ExitCode::SUCCESS;
+    }
+    let raw: Vec<_> = env::args_os().skip(1).collect();
+    let raw_state = match raw.as_slice() {
+        [mode, state, ..]
+            if matches!(
+                mode.to_str(),
+                Some(
+                    "reminder-clock"
+                        | "--deferred-worker"
+                        | "--deferred-execute"
+                        | "--migrate-runtime-state"
+                )
+            ) =>
+        {
+            Some(PathBuf::from(state))
+        }
+        [mode, _] if mode == "--validate-update-manifest" => {
+            state_directory(&RuntimeOptions::default(), inherited)
+        }
+        _ => None,
+    };
+    if let Some(state) = raw_state.as_deref() {
+        match namedrop::retirement(state) {
+            Ok(None) => {}
+            Ok(Some(_))
+                if raw.first().is_some_and(|m| {
+                    matches!(
+                        m.to_str(),
+                        Some("reminder-clock" | "--deferred-worker" | "--deferred-execute")
+                    )
+                }) =>
+            {
+                return ExitCode::SUCCESS;
+            }
+            Ok(Some(marker)) => {
+                eprintln!("{}", marker.message());
+                return ExitCode::from(69);
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                return ExitCode::from(69);
+            }
+        }
     }
     let arguments: Vec<_> = env::args_os().skip(1).collect();
     if arguments.first().is_some_and(|arg| arg == "reminder-clock") {
@@ -168,16 +213,50 @@ fn main() -> ExitCode {
             );
         }
     };
+    let selected_state = cli.explicit_state().map(Path::to_path_buf).or_else(|| {
+        let rex =
+            || locator::state_directory(None, namedrop::mux::MuxKind::Rex, |n| inherited.var(n));
+        if cli.install_options().is_some() {
+            // `install` acts on the state it runs from. Without a named one,
+            // an installed runtime's is its own: Herdr's launcher must not
+            // reach a standalone state through the record.
+            inherited
+                .var("NAMEDROP_STATE_DIR")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .or_else(namedrop::runtime_own_state)
+                .or_else(rex)
+        } else if cli.rex_ensure_from_server() {
+            rex()
+        } else {
+            state_directory(&cli.runtime, inherited)
+        }
+    });
+    if let Some(state) = selected_state.as_deref() {
+        let refused = match namedrop::retirement(state) {
+            Ok(Some(namedrop::Retirement::Removed { .. }))
+                if cli.install_options() == Some((false, true)) =>
+            {
+                None
+            }
+            Ok(Some(marker)) => Some(marker.message()),
+            Ok(None) => None,
+            Err(error) => Some(error),
+        };
+        if let Some(error) = refused {
+            if cli.quiet_retirement() {
+                return ExitCode::SUCCESS;
+            }
+            eprintln!("{error}");
+            return refuse_before_screen(&cli, inherited, 69);
+        }
+    }
     if cli.rex_ensure_from_server() {
         let parent = unsafe { libc::getppid() } as u32;
         let Some(endpoint) = namedrop::rex_ui::server_start_endpoint(inherited, parent) else {
             return ExitCode::SUCCESS;
         };
-        let state = locator::state_directory(
-            cli.runtime.plugin_state.clone(),
-            namedrop::mux::MuxKind::Rex,
-            |name| inherited.var(name),
-        );
+        let state = selected_state;
         return rex_action_result(state.ok_or_else(state_required).and_then(|state| {
             namedrop::rex_bridge::ensure(&state, &endpoint).map(|_| serde_json::Value::Null)
         }));
@@ -187,6 +266,8 @@ fn main() -> ExitCode {
     {
         return rex_action_result(Err(error));
     }
+    // These hooks take no command gate, so an update's exclusive gate never
+    // holds up an agent's turn. The retirement check above already ran.
     if let Some((state, host)) = cli.subagent_hook() {
         let _ = namedrop::reminder::ensure_clock(state, None, Starter::Caller);
         return run_subagent_hook(state, host, inherited);
@@ -204,23 +285,6 @@ fn main() -> ExitCode {
     if let Some((terminal, rows, cols)) = cli.dashboard_observer() {
         return namedrop::dashboard::run_observer_guard(terminal, rows, cols);
     }
-    let selected_state = cli
-        .runtime
-        .plugin_state
-        .clone()
-        .or_else(|| {
-            cli.user_prompt_submit_hook_state_directory()
-                .map(Path::to_path_buf)
-        })
-        .or_else(|| {
-            cli.mailbox_wake_hook_state_directory()
-                .map(Path::to_path_buf)
-        })
-        .or_else(|| {
-            cli.session_start_hook_state_directory()
-                .map(Path::to_path_buf)
-        })
-        .or_else(|| state_directory(&cli.runtime, inherited));
     // The bridge and the status worker outlive what starts them and take the
     // command gate themselves, around each flush or event.
     if cli.is_rex_bridge() {
@@ -263,6 +327,36 @@ fn main() -> ExitCode {
         }
         return run_agent_status_worker(inherited);
     }
+    if cli.install_options() == Some((false, true)) {
+        let result = (|| {
+            let state = selected_state.as_deref().ok_or_else(state_required)?;
+            namedrop::rex_ui::confirm_remove(&cli.input()?)?;
+            let _gate = if namedrop::runtime_standalone(state)? {
+                namedrop::runtime_begin_removal(state)?;
+                None
+            } else {
+                namedrop::runtime_removal_guard(state, None)?
+            };
+            namedrop::rex_ui::remove(
+                state,
+                &namedrop::InheritedDirectories::from_environment(),
+                inherited,
+            )
+        })();
+        if result.is_err()
+            && let Some(state) = selected_state.as_deref()
+            && let Ok(Some(marker @ namedrop::Retirement::HerdrHandoff { .. })) =
+                namedrop::retirement(state)
+        {
+            eprintln!("{}", marker.message());
+            return ExitCode::from(69);
+        }
+        return finish(
+            "install.remove",
+            result,
+            cli.result_format(io::stdout().is_terminal()),
+        );
+    }
     // A dashboard successor started mid-update waits a bounded time rather
     // than parking forever behind a stuck migration.
     let gate_wait = cli.is_dashboard_server().then_some(Duration::from_secs(60));
@@ -273,6 +367,13 @@ fn main() -> ExitCode {
     {
         Ok(guard) => guard,
         Err(error) => {
+            if cli.quiet_retirement()
+                && selected_state.as_deref().is_some_and(|state| {
+                    namedrop::retirement(state).is_ok_and(|marker| marker.is_some())
+                })
+            {
+                return ExitCode::SUCCESS;
+            }
             if cli.rex_action().is_some() {
                 return rex_action_result(Err(error));
             }
@@ -304,6 +405,24 @@ fn main() -> ExitCode {
                 return refuse_before_screen(&cli, inherited, 69);
             }
         }
+    }
+    if let Some((print_config, false)) = cli.install_options() {
+        return finish(
+            "install",
+            selected_state
+                .as_deref()
+                .ok_or_else(state_required)
+                .and_then(|state| {
+                    namedrop::rex_ui::install(
+                        state,
+                        &namedrop::InheritedDirectories::from_environment(),
+                        inherited,
+                        print_config,
+                        cli.input()?,
+                    )
+                }),
+            cli.result_format(io::stdout().is_terminal()),
+        );
     }
     if let Some(name) = cli.rex_action() {
         return rex_action_result(run_rex_action(name, &cli.runtime, inherited));
@@ -1210,6 +1329,9 @@ fn with_runtime_options<T>(
             return Err("a deferred Rex place runs no command of its own".to_owned());
         }
     };
+    if let Some(marker) = namedrop::retirement(&state_directory)? {
+        return Err(marker.message());
+    }
     let _ = namedrop::rex_bridge::ensure(&state_directory, &place.endpoint);
     let directories = namedrop::InheritedDirectories::from_environment();
     let cwd = env::current_dir().map_err(|error| error.to_string())?;
@@ -1597,6 +1719,14 @@ fn retryable_queue_scan(error: &io::Error) -> bool {
 }
 
 fn run_agent_status_worker(inherited: &dyn Inherited) -> ExitCode {
+    let initial_gate = match locator::inherited_state_directory()
+        .as_deref()
+        .map(|state| namedrop::runtime_command_guard(state, None))
+        .transpose()
+    {
+        Ok(gate) => gate,
+        Err(_) => return ExitCode::SUCCESS,
+    };
     // The hook that starts the worker runs in a pane's directory, which can be
     // removed while the worker lives; every reconcile reads the current one.
     if let Some(state) = locator::inherited_state_directory()
@@ -1622,6 +1752,7 @@ fn run_agent_status_worker(inherited: &dyn Inherited) -> ExitCode {
     if lock.try_lock().is_err() {
         return ExitCode::SUCCESS;
     }
+    drop(initial_gate);
     run_agent_status_worker_queue(
         &directory,
         lock,
@@ -1867,8 +1998,22 @@ fn serve_queue<E: UnitFailure>(
     let mut blocked = std::collections::HashSet::new();
     let mut read_failures = std::collections::HashMap::<PathBuf, usize>::new();
     let mut drafts: Option<DraftRecheck> = None;
+    let retired = || {
+        directory
+            .parent()
+            .and_then(Path::parent)
+            .is_some_and(|state| {
+                namedrop::retirement(state).map_or(true, |marker| marker.is_some())
+            })
+    };
+    if retired() {
+        return ExitCode::SUCCESS;
+    }
     let _ = prune_rejected_markers(directory);
     loop {
+        if retired() {
+            return ExitCode::SUCCESS;
+        }
         let mut scan_available = |directory: &Path| {
             scan(directory).map(|mut pending| {
                 pending.retain(|marker| !blocked.contains(marker));
@@ -1966,6 +2111,9 @@ fn serve_queue<E: UnitFailure>(
         };
         let event = input.clone();
         let outcome = reconcile(input);
+        if retired() {
+            return ExitCode::SUCCESS;
+        }
         if let ReconciliationWork::Marker(marker) = &work
             && !matches!(&outcome, Err(error) if error.retryable())
         {

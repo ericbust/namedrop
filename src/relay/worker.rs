@@ -70,6 +70,9 @@ pub(crate) fn work(run: &mut Run<'_>) {
     let mut faults = 0;
     let mut reading = Reading::default();
     loop {
+        if crate::installed_runtime::retirement::check(run.state, false).is_err() {
+            return;
+        }
         // An update while the worker waited selects another runtime, which
         // takes the worker's place before it does anything more.
         drop((run.gate)());

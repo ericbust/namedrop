@@ -17,6 +17,59 @@ pub(super) fn report(wire: &impl Wire, socket: &Path, record: &Value) -> Result<
     Ok(readback(record, &keymap, about))
 }
 
+pub(super) fn configuration(
+    wire: &impl Wire,
+    socket: &Path,
+    method: &str,
+    record: Option<&Value>,
+    deadline: std::time::Instant,
+) -> Result<Value, MuxError> {
+    let narrower = Narrower {
+        budget: Box::new(move || {
+            let timeout = deadline
+                .checked_duration_since(std::time::Instant::now())
+                .ok_or("Rex configuration budget expired")?;
+            Ok(crate::mux::Budget {
+                timeout,
+                max_output_bytes: super::control::MAX_CALL_BYTES,
+            })
+        }),
+        cancelled: None,
+    };
+    let (mut control, peer) = wire.open(narrower).map_err(fault)?;
+    local::prove_local(socket, &mut *control, peer).map_err(fault)?;
+    let result = control
+        .request(method, Some(json!({})))
+        .map_err(fault)?
+        .payload;
+    let Some(record) = record else {
+        return Ok(result);
+    };
+    if method == "server.config_reload" && has_errors(&result) {
+        return Err(MuxError::Protocol(format!(
+            "Rex rejected its configuration: {result}"
+        )));
+    }
+    let keymap = if method == "client.keymap" {
+        result
+    } else {
+        control
+            .request("client.keymap", Some(json!({})))
+            .map_err(fault)?
+            .payload
+    };
+    let about = control
+        .request("client.action", Some(json!({"action":"namedrop_about"})))
+        .map(|reply| reply.payload["result"].clone());
+    Ok(readback(record, &keymap, about))
+}
+
+pub(crate) fn has_errors(reply: &Value) -> bool {
+    reply["diagnostics"]
+        .as_array()
+        .is_some_and(|items| items.iter().any(|d| d["severity"] == "error"))
+}
+
 fn fault(fault: Fault) -> MuxError {
     super::wire::mux_error(fault, Gone::Pane)
 }

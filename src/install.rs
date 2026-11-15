@@ -441,7 +441,7 @@ pub fn install_integration_package(
     )
 }
 
-fn install_integration_package_with_config(
+pub(crate) fn install_integration_package_with_config(
     lease: &PackageLease,
     root: &Path,
     runtime: AgentRuntime,
@@ -838,9 +838,16 @@ fn installed_instructions(
 /// event. A runtime whose package failed must not be challenged.
 pub(crate) struct IntegrationPackageInstallation {
     outcomes: Vec<(AgentRuntime, Result<PathBuf, String>)>,
+    /// Why the registered Rex module could not be rewritten. The module is no
+    /// agent package, so its failure leaves both outcomes as they are.
+    module: Option<String>,
 }
 
 impl IntegrationPackageInstallation {
+    pub(crate) fn module_error(&self) -> Option<&str> {
+        self.module.as_deref()
+    }
+
     pub(crate) fn failed(&self, runtime: AgentRuntime) -> bool {
         self.outcomes
             .iter()
@@ -928,7 +935,7 @@ where
         eprintln!("{refusal}");
     }
     let executable = crate::collaboration_executable().map(PathBuf::from);
-    let mut outcomes = [AgentRuntime::Codex, AgentRuntime::ClaudeCode].map(|agent_runtime| {
+    let outcomes = [AgentRuntime::Codex, AgentRuntime::ClaudeCode].map(|agent_runtime| {
         let outcome = match (runtime.home_directory, &executable, &current) {
             (_, _, Err(refusal)) => Err(refusal.clone()),
             (Some(home_directory), _, Ok(false)) => {
@@ -952,15 +959,12 @@ where
         };
         (agent_runtime, outcome)
     });
-    if matches!(current, Ok(true))
-        && let (Some(home), Ok(executable)) = (runtime.home_directory, &executable)
-        && let Err(error) =
-            crate::rex_ui::refresh(&lease, home, executable, runtime.state_directory)
-    {
-        for (_, outcome) in &mut outcomes {
-            *outcome = Err(error.clone());
+    let module = match (&current, runtime.home_directory, &executable) {
+        (Ok(true), Some(home), Ok(executable)) => {
+            crate::rex_ui::refresh(&lease, home, executable, runtime.state_directory).err()
         }
-    }
+        _ => None,
+    };
     drop(lease);
     let namespace = discovered.namespace(runtime.session_socket_id);
     let attribution = MutationAttribution::new(
@@ -1004,6 +1008,7 @@ where
         .map_err(|error| error.to_string())?;
     Ok(IntegrationPackageInstallation {
         outcomes: outcomes.into_iter().collect(),
+        module,
     })
 }
 
@@ -1148,6 +1153,77 @@ fn subagent_script(
     ))
 }
 
+pub(crate) fn remove_all(
+    lease: &PackageLease,
+    home: &Path,
+    state: &Path,
+    config: AgentConfigDirectories<'_>,
+) -> Result<(), String> {
+    lease.require_write()?;
+    remove_claude_permissions(lease, state)?;
+    codex_sandbox::remove(lease, state)?;
+    let codex = config.codex(home);
+    let policy = codex.join("rules/namedrop.rules");
+    if fs::symlink_metadata(&policy).is_ok_and(|m| m.is_file())
+        && fs::read_to_string(&policy).is_ok_and(|s| s.starts_with(CODEX_RULES_MARKER))
+    {
+        fs::remove_file(policy).map_err(|e| e.to_string())?;
+    }
+    let path = codex.join("config.toml");
+    if fs::symlink_metadata(&path).is_ok_and(|m| m.is_file()) {
+        let before = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        let mut doc = before.parse::<DocumentMut>().map_err(|e| e.to_string())?;
+        if codex_plugin_configuration(home, &package_directory(home, AgentRuntime::Codex), config).0
+            == CodexMarketplaceConfiguration::Matching
+        {
+            if let Some(table) = doc
+                .get_mut("marketplaces")
+                .and_then(Item::as_table_like_mut)
+            {
+                table.remove("namedrop");
+            }
+            if let Some(table) = doc.get_mut("plugins").and_then(Item::as_table_like_mut) {
+                table.remove("namedrop@namedrop");
+            }
+            replace_if_changed(lease, &path, &doc.to_string(), None)?;
+        }
+    }
+    for agent in [AgentRuntime::Codex, AgentRuntime::ClaudeCode] {
+        let directory = package_directory(home, agent);
+        if directory.exists() {
+            if fs::read_dir(&directory)
+                .map_err(|e| e.to_string())?
+                .next()
+                .is_some()
+            {
+                verified_package_directory(home, agent)?;
+                for entry in fs::read_dir(&directory).map_err(|e| e.to_string())? {
+                    let entry = entry.map_err(|e| e.to_string())?;
+                    if entry.file_name() == OWNERSHIP_MARKER_FILE {
+                        continue;
+                    }
+                    let kind = entry.file_type().map_err(|e| e.to_string())?;
+                    if kind.is_dir() {
+                        fs::remove_dir_all(entry.path())
+                    } else {
+                        fs::remove_file(entry.path())
+                    }
+                    .map_err(|e| e.to_string())?;
+                }
+                fs::remove_file(directory.join(OWNERSHIP_MARKER_FILE))
+                    .map_err(|e| e.to_string())?;
+            }
+            fs::remove_dir(directory).map_err(|e| e.to_string())?;
+        }
+    }
+    command::remove_shell_command(lease, home, state)?;
+    let record = crate::locator::install_record(home);
+    if crate::locator::read_install_record(&record).as_deref() == Some(state) {
+        fs::remove_file(record).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 pub(crate) fn remove_subagent_hooks(
     lease: &PackageLease,
     state: &Path,
@@ -1156,7 +1232,10 @@ pub(crate) fn remove_subagent_hooks(
     if !lease.writable()? {
         return Ok(0);
     }
-    if StateStore::open(state)
+    if !matches!(
+        crate::installed_runtime::retirement(state)?,
+        Some(crate::installed_runtime::Retirement::Removed { .. })
+    ) && StateStore::open(state)
         .map_err(|e| e.to_string())?
         .transaction(|tx| tx.any_activated_worktrees())
         .map_err(|e| e.to_string())?

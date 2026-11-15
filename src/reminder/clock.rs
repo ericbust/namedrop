@@ -139,6 +139,9 @@ pub fn ensure_clock(
     socket: Option<&str>,
     starter: crate::daemon::Starter,
 ) -> Result<(), String> {
+    if crate::installed_runtime::retirement::check(state, false).is_err() {
+        return Ok(());
+    }
     let pending = pending(state, 0, false);
     if pending.as_ref().is_ok_and(|pending| pending.count == 0) || clock_running(state) {
         return Ok(());
@@ -170,6 +173,13 @@ pub(super) fn signal_clock(state: &Path, socket: &str) -> Result<(), String> {
 }
 
 pub fn run_clock(state: &Path, socket: &str) -> Result<(), String> {
+    let initial_gate = match crate::runtime_command_guard(state, None) {
+        Ok(gate) => gate,
+        Err(_) => return Ok(()),
+    };
+    if crate::installed_runtime::retirement::check(state, false).is_err() {
+        return Ok(());
+    }
     let lock = fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -183,8 +193,17 @@ pub fn run_clock(state: &Path, socket: &str) -> Result<(), String> {
         return Ok(());
     }
     let mut catch_up = CatchUp::default();
+    drop(initial_gate);
     loop {
+        if crate::installed_runtime::retirement::check(state, false).is_err() {
+            return Ok(());
+        }
+        let wake_gate = match crate::runtime_command_guard(state, None) {
+            Ok(gate) => gate,
+            Err(_) => return Ok(()),
+        };
         let _ = fs::remove_file(state.join("reminder-clock.wake"));
+        drop(wake_gate);
         let plan = match pending(state, SystemClock.now_unix_ms(), catch_up.0.is_none()) {
             Ok(plan) => plan,
             Err(error) if transient(&error) => {
@@ -261,6 +280,9 @@ pub fn run_clock(state: &Path, socket: &str) -> Result<(), String> {
         let wait_ms = wait_ms(&plan, SystemClock.now_unix_ms());
         let mut waited = 0;
         while waited < wait_ms && !state.join("reminder-clock.wake").exists() {
+            if crate::installed_runtime::retirement::check(state, false).is_err() {
+                return Ok(());
+            }
             let step = (wait_ms - waited).min(100);
             thread::sleep(Duration::from_millis(step));
             waited += step;

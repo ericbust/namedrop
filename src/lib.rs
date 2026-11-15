@@ -99,6 +99,11 @@ pub use installed_runtime::package_refusal;
 pub use installed_runtime::reexec_if_replaced as runtime_reexec_if_replaced;
 #[doc(hidden)]
 pub use installed_runtime::validate_update_manifest;
+pub use installed_runtime::{
+    Retirement, begin_removal as runtime_begin_removal,
+    command_guard_allow_removed as runtime_removal_guard, own_state as runtime_own_state,
+    retirement, standalone as runtime_standalone,
+};
 pub use integration::{
     AgentRuntime, AttachedContext, CONTEXT_DELIVERY_OPERATIONS, CatalogExample, CatalogOperation,
     ContextRequest, DELIVERY_PERMITTED_OPERATIONS, DeliveryAddress, DeliveryControl,
@@ -293,3 +298,19 @@ mod scan;
 mod sync_cell;
 #[cfg(test)]
 mod work_counters;
+
+#[cfg(feature = "test-support")]
+pub fn test_process_opens(pid: u32, path: &std::path::Path) -> bool {
+    mux::processes::opens(pid, path)
+}
+
+/// The `<pid>@<start>` incarnation that a Rex binding records for a live
+/// local process, as the survey reads it.
+#[cfg(feature = "test-support")]
+pub fn test_process_incarnation(pid: u32) -> Option<String> {
+    use mux::processes::{LocalProcesses, LocalRead, ThisMachine};
+    match ThisMachine.read(pid) {
+        LocalRead::Alive(process) => Some(process.incarnation.0),
+        _ => None,
+    }
+}

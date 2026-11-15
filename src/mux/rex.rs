@@ -77,6 +77,24 @@ pub(crate) fn ui_report(endpoint: &Endpoint, record: &Value) -> Result<Value, St
     ui::report(&wire, socket, record).map_err(|error| error.to_string())
 }
 
+pub(crate) fn configuration(
+    endpoint: &Endpoint,
+    method: &str,
+    record: Option<&Value>,
+    deadline: std::time::Instant,
+) -> Result<Value, String> {
+    let socket = endpoint
+        .unix_socket()
+        .ok_or("Namedrop needs a Rex Unix socket")?;
+    let mut wire = Socket::new(socket.to_owned(), Budget::ADAPTER_DEFAULT, Arc::default());
+    wire.connect_deadline = Some(deadline);
+    ui::configuration(&wire, socket, method, record, deadline).map_err(|e| e.to_string())
+}
+
+pub(crate) fn config_errors(reply: &Value) -> bool {
+    ui::has_errors(reply)
+}
+
 /// What the Rex server at `socket` says about `block` of `session`, over one
 /// connection that proves the server local.
 pub(crate) fn claimed(socket: &Path, session: &str, block: &str) -> Result<Claimed, String> {
@@ -128,6 +146,7 @@ struct Socket {
     /// the Stop wrapper sets it to 250 ms, so a process that carries it
     /// types no prompt it could not confirm.
     set_cap: Option<Duration>,
+    connect_deadline: Option<std::time::Instant>,
 }
 
 impl Socket {
@@ -137,6 +156,7 @@ impl Socket {
             budget,
             cancelled,
             set_cap: control::explicit_timeout_cap(),
+            connect_deadline: None,
         }
     }
 }
@@ -151,7 +171,14 @@ impl Wire for Socket {
             budget: Box::new(move || Ok(ask()?.tighter(own))),
             cancelled,
         };
-        let stream = UnixStream::connect(&self.path).map_err(|error| {
+        let stream = match self.connect_deadline {
+            Some(until) => local::connect_within(
+                &self.path,
+                until.saturating_duration_since(std::time::Instant::now()),
+            ),
+            None => UnixStream::connect(&self.path),
+        }
+        .map_err(|error| {
             Fault::Closed(format!(
                 "could not reach Rex at {}: {error}",
                 self.path.display()

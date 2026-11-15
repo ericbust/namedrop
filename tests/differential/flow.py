@@ -143,6 +143,8 @@ def calls_since(mark):
 
 
 ST = ["--plugin-state", state]
+run("runtime-info", plugin("p1"), ["--runtime-info"])
+
 run("activate", pane("p1"), ST + ["--json", "activate", "--input-json", '{"confirmed":true}'])
 run("ui-launch-name", pane("p1"), ST + ["--json", "ui", "launch", "name"])
 run("ui-launch-doctor", pane("p1"), ST + ["--json", "ui", "launch", "doctor"])

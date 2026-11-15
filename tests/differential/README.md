@@ -13,3 +13,5 @@ U3 also runs deactivate, activate again, and name in a second inactive space. Pa
 U4 adds, after the base flow and in a profile of its own (`home-runtime`, `state-runtime`), a first publish through `scripts/run.sh activate` and `runtime.py`, from the `scripts/` and `runtime.json` two levels above each binary, then a live update of a re-signed copy. Pass `--allow-runtime-owner` only for a base from before U4. It requires the added `<STATE>-runtime/runtime/owner` file with the text `herdr` and mode 0600 in the head report and its absence from the base report, and preserves every other comparison, the `herdr` call logs and the steps in order included. The runner passes allowances only to base-against-head pairs; a pair within one build is compared without them.
 
 U5 also runs `ui launch name` and `ui launch doctor` from a pane, after activation. Nothing is pinned.
+
+U7 also reads `--runtime-info`. Pass `--allow-rex-ui` for U7 to permit only the integer `rex_ui: 1` capability in that response and copied `runtime.json` files. Activation with no Rex registration and no standalone owner remains in the base flow without another pin.
