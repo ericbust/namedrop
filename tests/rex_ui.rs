@@ -105,7 +105,14 @@ fn a_palette_action_starts_the_reminder_clock_as_every_command_does() {
         );
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    fs::remove_dir_all(root).unwrap();
+    // The clock the action started may still be writing into the state when
+    // the record appears, so a removal can race it. The folder is scratch.
+    for _ in 0..50 {
+        if fs::remove_dir_all(&root).is_ok() || !root.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 }
 
 /// The U6 review's F1 and F3: the guard's accept path, at the binary, with
