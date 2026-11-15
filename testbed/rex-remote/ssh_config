@@ -1,6 +1,8 @@
 # The lab's ssh config. `testbed rex-remote up` writes it to LAB/ssh/config with @LAB@ replaced
-# by the lab's directory. Nothing here reads ~/.ssh: one key, one known_hosts, no agent, no
-# global known_hosts, and no shared control socket.
+# by the lab's directory. Nothing here reads ~/.ssh: one key, one known_hosts, no agent, and no
+# global known_hosts. Its ControlMaster and ControlPath apply only to ssh runs that set neither:
+# Rex's ssh transport passes its own ControlMaster and ControlPath on the command line, which
+# win, and keeps that socket under /tmp/rex-UID/, never under ~/.ssh.
 Host *
   IdentityFile @LAB@/ssh/id_lab
   IdentitiesOnly yes

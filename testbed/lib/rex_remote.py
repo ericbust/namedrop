@@ -19,6 +19,7 @@ import re
 import shlex
 import shutil
 import socket
+import sqlite3
 import subprocess
 import time
 
@@ -32,7 +33,8 @@ B_HOME = "/home/nd"
 B_STATE = B_HOME + "/ndstate"
 B_SOCKET = B_HOME + "/.local/state/rex/run/server.sock"
 B_NAMEDROP = B_HOME + "/.local/bin/namedrop"
-LINUX_RUST = "rust:1.97.0"
+LINUX_RUST = "rust:1.97.0@sha256:b92b8c8574f8f3b207fcb0912fb3e2de4041580b5934d90312d53938c9a038a9"
+MARKER = "ndrp-rexlab.json"
 
 
 def fail(message):
@@ -72,6 +74,48 @@ def rex_version(binary, home):
     return found.group(1)
 
 
+def processes():
+    """This user's processes: pid to (parent pid, start time, command line)."""
+    listed = run(["ps", "-U", str(os.getuid()), "-ww", "-o", "pid=,ppid=,lstart=,command="]).stdout
+    table = {}
+    for line in listed.splitlines():
+        fields = line.split(None, 7)
+        if len(fields) == 8 and fields[0].isdigit() and fields[1].isdigit():
+            table[int(fields[0])] = (int(fields[1]), " ".join(fields[2:7]), fields[7])
+    return table
+
+
+def lineage(table):
+    """This process and its ancestors, which `down` never signals, even when their command lines
+    name the lab."""
+    spared = {os.getpid()}
+    pid = os.getppid()
+    while pid > 1 and pid not in spared:
+        spared.add(pid)
+        pid = table.get(pid, (0,))[0]
+    return spared
+
+
+def signal_all(found, number):
+    """Sends `number` to each process of `found` that still has the same pid, start time and
+    command line, and returns those."""
+    now = processes()
+    alive = {pid: identity for pid, identity in found.items() if now.get(pid, (None,))[1:] == identity}
+    for pid in alive:
+        try:
+            os.kill(pid, number)
+        except (ProcessLookupError, PermissionError):
+            pass
+    return alive
+
+
+def hosts_by_label(listed):
+    """`rex hosts list --json` as {label: endpoints}. Each entry nests its host, as
+    `{"hosts": [{"host": {"label": …, "endpoints": […]}, …}]}`."""
+    return {entry["host"]["label"]: list(entry["host"].get("endpoints") or [])
+            for entry in listed.get("hosts") or [] if isinstance(entry.get("host"), dict)}
+
+
 def apt_version(version):
     """Rex's apt package spells `0.1.0-preview.18` as `0.1.0~preview.18`."""
     return version.replace("-", "~", 1)
@@ -85,6 +129,30 @@ class Lab:
         self.a_socket = Path("/tmp/nd-tb-rexremote-{}-{}.sock".format(os.getuid(), digest))
         self.state_file = self.dir / "lab.json"
         self.state = json.loads(self.state_file.read_text()) if self.state_file.exists() else {}
+
+    def claim(self):
+        """Makes the directory a lab, or proves it is one: `up` writes only into a directory that
+        is new, empty, or holds the lab's marker, and `--fresh` and `down` act only on one with it."""
+        marker = self.path(MARKER)
+        if marker.is_symlink() or (marker.exists() and not marker.is_file()):
+            fail("{} is not a regular file".format(marker))
+        if marker.exists():
+            self.owned()
+            return
+        if self.dir.exists() and any(self.dir.iterdir()):
+            fail("{} is not a remote-host lab: it holds files and no {}. Pass a new or empty --dir"
+                 .format(self.dir, MARKER))
+        self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        marker.write_text(json.dumps({"kind": "ndrp-rexlab", "dir": str(self.dir)}) + "\n")
+
+    def owned(self):
+        marker = self.path(MARKER)
+        try:
+            shown = json.loads(marker.read_text()) if marker.is_file() and not marker.is_symlink() else None
+        except ValueError:
+            shown = None
+        if shown != {"kind": "ndrp-rexlab", "dir": str(self.dir)}:
+            fail("{} is not a remote-host lab: {} is missing or names another directory".format(self.dir, MARKER))
 
     def save(self):
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -147,7 +215,9 @@ class Lab:
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline:
             if self.a_running():
-                self.state["a_server_pid"] = server.pid
+                shown = processes().get(server.pid)
+                self.state.pop("a_server_pid", None)
+                self.state["a_server"] = {"pid": server.pid, "start": shown[1], "command": shown[2]} if shown else None
                 self.save()
                 return
             time.sleep(0.2)
@@ -194,13 +264,59 @@ class Lab:
             time.sleep(0.2)
         fail("B's Rex server did not start")
 
+    def bring_b_back(self):
+        """B's container running and unpaused, with sshd, B's Rex server and B's bridge: what a
+        check that stops or pauses B leaves, even when it raises."""
+        shown = self.container_state()
+        if shown.startswith("paused"):
+            self.docker("unpause", self.container)
+        elif shown != "absent" and not shown.startswith("running"):
+            self.docker("start", self.container)
+        self.wait_sshd()
+        self.start_b()
+        self.start_b_bridge()
+
     def stop_b(self):
         if self.b_running():
             self.bx("rex", "--autostart=false", "-S", "unix://" + B_SOCKET, "server", "stop")
 
+    def b_namedrop_pids(self, args=""):
+        """B's Namedrop processes: those whose command line starts with B's Namedrop binary."""
+        prefix = (B_NAMEDROP + " " + args).rstrip()
+        listed = self.bx("ps", "-eo", "pid=,args=", check=False).stdout
+        pids = []
+        for line in listed.splitlines():
+            pid, _, command = line.strip().partition(" ")
+            command = command.strip()
+            if pid.isdigit() and (command == prefix or command.startswith(prefix + " ")):
+                pids.append(pid)
+        return pids
+
+    def install_b_namedrop(self):
+        """Copies the Linux build to B unless B has it already. A running Namedrop on B is stopped
+        first, because a bridge whose binary was replaced answers every relay call `retry` with
+        `No such file or directory`; `start_b_bridge` starts it again."""
+        local = self.path("target-linux/release/namedrop")
+        want = hashlib.sha256(local.read_bytes()).hexdigest()
+        have = self.bx("sha256sum", B_NAMEDROP, check=False).stdout.split()[:1]
+        if have == [want]:
+            return
+        pids = self.b_namedrop_pids()
+        if pids:
+            say("Stopping B's Namedrop {} to replace its binary".format(" ".join(pids)))
+            self.bx("kill", *pids, check=False)
+            deadline = time.monotonic() + 10
+            while self.b_namedrop_pids() and time.monotonic() < deadline:
+                time.sleep(0.2)
+            left = self.b_namedrop_pids()
+            if left:
+                self.bx("kill", "-9", *left, check=False)
+        self.bx("mkdir", "-p", B_HOME + "/.local/bin", B_STATE + "/relay")
+        self.docker("cp", str(local), self.container + ":" + B_NAMEDROP)
+        self.docker("exec", self.container, "chown", "{0}:{0}".format(B_USER), B_NAMEDROP)
+
     def start_b_bridge(self):
-        running = self.bx("pgrep", "-f", "namedrop rex bridge", check=False).stdout.split()
-        if running:
+        if self.b_namedrop_pids("rex bridge"):
             return
         self.bx("sh", "-c", "nohup {} rex bridge --endpoint rex:{} >> {}/bridge.log 2>&1 &".format(
             B_NAMEDROP, B_SOCKET, B_HOME))
@@ -271,6 +387,7 @@ class Lab:
 
     def forget(self):
         """Deletes A's and B's run state and keeps the builds, the cargo cache and the reports."""
+        self.owned()
         if self.a_running() or self.container_state() != "absent":
             fail("run `rex-remote down` before `up --fresh`")
         for name in ("home-a", "a-namedrop", "a-rex", "ssh", "bin", "logs/ssh-calls.log",
@@ -284,6 +401,7 @@ class Lab:
         self.save()
 
     def up(self, checkout, rex_bin, b_version, fresh=False):
+        self.claim()
         if fresh:
             self.forget()
         for name in ("logs", "home-a", "a-namedrop", "target-linux", "cargo-linux"):
@@ -299,7 +417,8 @@ class Lab:
         if self.state.get("image") != tag and self.container_state() != "absent":
             say("B's Rex version changed; removing the old container")
             self.down_b()
-        if self.container_state() == "absent":
+        shown = self.container_state()
+        if shown == "absent":
             ssh_port, http_port = free_port(), free_port()
             self.docker("run", "-d", "--name", self.container, "--hostname", LABEL,
                         "--label", "ndrp-rexlab=" + str(self.dir),
@@ -309,27 +428,69 @@ class Lab:
             self.state.update(image=tag, b_version=b_version, ssh_port=ssh_port, http_port=http_port)
             self.state.pop("b", None)
             self.save()
-        elif self.container_state().startswith("exited"):
-            self.docker("start", self.container)
-        elif self.container_state() == "running true":
+        elif shown.startswith("paused"):
             self.docker("unpause", self.container)
+        elif not shown.startswith("running"):
+            self.docker("start", self.container)
         self.wait_sshd()
-        self.bx("mkdir", "-p", B_HOME + "/.local/bin", B_STATE + "/relay")
-        self.docker("cp", str(self.path("target-linux/release/namedrop")), self.container + ":" + B_NAMEDROP)
-        self.docker("exec", self.container, "chown", "{0}:{0}".format(B_USER), B_NAMEDROP)
+        self.install_b_namedrop()
         self.start_b()
         self.start_a()
-        hosts = self.ar_json("hosts", "list", "--json")
-        listed = {host.get("label") for host in (hosts.get("hosts") if isinstance(hosts, dict) else hosts) or []}
-        if LABEL not in listed:
-            self.ar("hosts", "add", LABEL, "ssh://{}@127.0.0.1:{}".format(B_USER, self.state["ssh_port"]), check=True)
+        self.list_b()
         self.name_b()
         self.name_a()
+        self.pin_b()
         say("\nReady: lab {}\n  A: Rex {} on {} (Namedrop {})\n  B: Rex {} in container {}, "
             "ssh://{}@127.0.0.1:{} as label {}\n  @lead {} on A, @bterm {} on B".format(
                 self.dir, a_version, self.a_socket, commit[:12], self.state["b_version"], self.container,
                 B_USER, self.state["ssh_port"], LABEL, self.state["a"]["lead"], self.state["b"]["bterm"]))
         say("Run the checks with: ./testbed rex-remote check --dir " + shlex.quote(str(self.dir)))
+
+    def b_endpoint(self):
+        return "ssh://{}@127.0.0.1:{}".format(B_USER, self.state["ssh_port"])
+
+    def list_b(self):
+        """Lists B as `labb` in A's hosts at B's current port: added the first time, and edited
+        when a new container has another port."""
+        listed = hosts_by_label(self.ar_json("hosts", "list", "--json"))
+        if LABEL not in listed:
+            self.ar("hosts", "add", LABEL, self.b_endpoint(), check=True)
+        elif listed[LABEL] != [self.b_endpoint()]:
+            say("B moved to {}; editing {} in A's hosts".format(self.b_endpoint(), LABEL))
+            self.ar("hosts", "edit", LABEL, "--endpoint", self.b_endpoint(), check=True)
+
+    def peer_pin(self, label=LABEL):
+        """The `host_id` A's relay last recorded for `label` in `peers`, or None."""
+        path = self.path("a-namedrop/relay.sqlite3")
+        if not path.exists():
+            return None
+        connection = sqlite3.connect("file:{}?mode=ro".format(path), uri=True, timeout=10)
+        try:
+            row = connection.execute("select host_id from peers where label = ?", (label,)).fetchone()
+        finally:
+            connection.close()
+        return row[0] if row else None
+
+    def pin_b(self, missing=False):
+        """When A's relay still pins `labb` to the `host_id` of an earlier B, as after `down` or a
+        new Rex version on B, or with `missing` when it pins none yet, sends one item to
+        @bterm@labb, so A's relay worker takes B's `host_id` from a live `server.status`, the only
+        place it takes one (ADAPTER.md, "Who B is"). Items still pinned to the old server then
+        fail as `labb now answers as another Rex server`."""
+        current = json.loads(self.ar("api", "call", "server.status", server=LABEL, check=True).stdout)["host_id"]
+        pinned = self.peer_pin()
+        if pinned == current or (pinned is None and not missing):
+            return
+        say("A's relay pins {} to host_id {}; sending one item so it takes B's {}".format(LABEL, pinned, current))
+        a = self.state["a"]
+        self.a_namedrop("send", "--json", "--space", a["session"], "--pane", a["lead"], "--input-json",
+                        json.dumps({"request_id": "lab-pin-" + str(int(time.time())),
+                                    "source": "@bterm@{} echo lab-pin".format(LABEL)}))
+        deadline = time.monotonic() + 60
+        while self.peer_pin() != current:
+            if time.monotonic() >= deadline:
+                fail("A's relay did not take B's host_id {} within 60 s".format(current))
+            time.sleep(0.5)
 
     def wait_sshd(self):
         deadline = time.monotonic() + 20
@@ -357,10 +518,19 @@ class Lab:
         self.save()
         self.start_b_bridge()
 
+    def a_has_block(self, block):
+        resolved = json.loads(self.ar("api", "call", "target.resolve",
+                                      json.dumps({"queries": [block], "kinds": ["block"]}), check=True).stdout)
+        return any(result.get("status") == "resolved" for result in resolved.get("results") or [])
+
     def name_a(self):
-        if self.state.get("a"):
+        """Names @lead once. A's server restores its sessions after `down`, so a later `up` keeps
+        the same @lead in the same block."""
+        if self.state.get("a") and self.a_has_block(self.state["a"]["lead"]):
             self.start_a_bridge()
             return
+        if self.state.get("a"):
+            fail("A's server did not restore @lead's block {}; run `up --fresh`".format(self.state["a"]["lead"]))
         created = self.ar_json("new", "nd-lead", "--shell", "none", "-c", str(self.path("home-a")), "--json", "--", "/bin/bash")
         session, block = created["session_id"], created["initial_windows"][0]["block_ids"][0]
         time.sleep(1)
@@ -378,17 +548,45 @@ class Lab:
         subprocess.run(["/bin/sh", "-c", '"$@" >> "$0" 2>&1 < /dev/null &', str(self.path("logs/a-bridge.log"))] + command,
                        check=True, start_new_session=True)
 
-    def a_pids(self, needle=""):
-        """A's Namedrop processes: every process of this user whose command line names A's socket
-        or A's Namedrop state directory, and `needle`."""
-        listed = run(["ps", "-U", str(os.getuid()), "-o", "pid=,command="]).stdout
-        marks = (str(self.a_socket), str(self.path("a-namedrop")), str(self.path("target-mac")))
-        pids = []
-        for line in listed.splitlines():
-            pid, _, command = line.strip().partition(" ")
-            if any(mark in command for mark in marks) and needle in command and "rex_remote" not in command \
-                    and int(pid) != os.getpid():
-                pids.append(int(pid))
+    def lab_processes(self):
+        """The lab's processes on this machine, by pid, start time and command line: those whose
+        command starts with A's Namedrop binary, the ssh runs that start with the lab's ssh config,
+        and A's server as `start_a` recorded it. A process that only names the lab in its
+        arguments, as a shell, an editor or `tail` may, is not one, and neither is this process or
+        an ancestor of it."""
+        table = processes()
+        spared = lineage(table)
+        namedrop = str(self.path("target-mac/release/namedrop"))
+        ssh = "/usr/bin/ssh -F " + str(self.path("ssh/config")) + " "
+        server = self.state.get("a_server") or {}
+        found = {}
+        for pid, (_, start, command) in table.items():
+            ours = command == namedrop or command.startswith((namedrop + " ", ssh)) \
+                or (pid == server.get("pid") and start == server.get("start") and command == server.get("command"))
+            if ours and pid not in spared:
+                found[pid] = (start, command)
+        return found
+
+    def a_pids(self, args=""):
+        """A's Namedrop processes whose arguments start with `args`."""
+        prefix = (str(self.path("target-mac/release/namedrop")) + " " + args).rstrip()
+        return [pid for pid, (_, command) in self.lab_processes().items() if command.startswith(prefix)]
+
+    def stop_lab_processes(self):
+        """Sends SIGTERM to the lab's processes, then SIGKILL to those still running with the
+        same pid, start time and command line after 10 s, and returns the pids it found."""
+        found = self.lab_processes()
+        pids = sorted(found)
+        for number in (15, 9):
+            found = signal_all(found, number)
+            deadline = time.monotonic() + 10
+            while found and time.monotonic() < deadline:
+                time.sleep(0.2)
+                now = processes()
+                found = {pid: identity for pid, identity in found.items() if now.get(pid, (None,))[1:] == identity}
+            if not found:
+                return pids
+        say("Still running after SIGKILL: {}".format(sorted(found)))
         return pids
 
     def remove_tunnel_dirs(self):
@@ -420,29 +618,15 @@ class Lab:
         self.save()
 
     def down(self):
-        for pid in self.a_pids():
-            try:
-                os.kill(pid, 15)
-            except ProcessLookupError:
-                pass
-        server = self.state.get("a_server_pid")
-        if server:
-            try:
-                os.kill(server, 15)
-                say("Stopped A's scratch server {}".format(server))
-            except ProcessLookupError:
-                pass
-        deadline = time.monotonic() + 10
-        while self.a_socket.exists() and time.monotonic() < deadline:
-            time.sleep(0.2)
+        self.owned()
+        stopped = self.stop_lab_processes()
+        if stopped:
+            say("Stopped the lab's processes {}".format(" ".join(map(str, stopped))))
         if self.a_socket.exists() and not self.a_running():
             self.a_socket.unlink()
-        left = self.a_pids()
-        for pid in left:
-            os.kill(pid, 9)
         self.down_b()
         self.remove_tunnel_dirs()
-        for key in ("a", "a_server_pid"):
+        for key in ("a_server", "a_server_pid"):
             self.state.pop(key, None)
         self.save()
         say("The lab's files stay in {}; delete them with rm -rf {}".format(self.dir, shlex.quote(str(self.dir))))
@@ -468,6 +652,7 @@ def main(args):
         lab.up(Path(args.link or KIT.parent), args.rex_bin or lab.state.get("rex_bin") or default_rex(), args.b_rex,
                fresh=args.fresh)
     elif args.action == "check":
+        lab.owned()
         import rex_remote_checks
         sys.exit(0 if rex_remote_checks.run(lab, args.only) else 1)
     else:

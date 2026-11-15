@@ -380,26 +380,51 @@ otherwise `REX_BIN` or the `rex` on PATH. B runs A's Rex version unless
 `--b-rex 0.1.0-preview.19` names another. `--link PATH` names the checkout to
 build, by default this kit's own, and the lab builds its last commit.
 
-`up` does these steps, and running it again starts only what stopped:
+`up` does these steps. Each step does only what is missing, so `up` on a
+running lab changes nothing, and `up` after `down`, after a stopped or paused
+container, or with another `--b-rex` brings back only what stopped or changed:
 
-1. Makes an ed25519 key, an ssh config, and an empty known_hosts in the lab's
+1. Makes the lab's directory and its marker `ndrp-rexlab.json`. `up`, `check`,
+   and `down` refuse a directory that holds files and no marker, so `--dir`
+   and `--fresh` never write into or delete from another directory.
+2. Makes an ed25519 key, an ssh config, and an empty known_hosts in the lab's
    `ssh/` directory, and copies [rex-remote/ssh](rex-remote/ssh) to `bin/ssh`.
    That wrapper runs `/usr/bin/ssh -F ssh/config`, and the
    [config](rex-remote/ssh_config) names only that key and that known_hosts,
-   with no agent, no global known_hosts, and no shared control socket. Each
-   ssh run is logged to `logs/ssh-calls.log`.
-2. Builds Namedrop for both sides, and B's image from
-   [rex-remote/Dockerfile](rex-remote/Dockerfile). The Dockerfile pins the Rex
-   package version and the fingerprint of Superlogical's signing key, and the
-   build stops when the downloaded keyring holds another key or the installed
-   package is not Superlogical's.
-3. Starts B's container with sshd and Rex ports on `127.0.0.1` only. The
-   public key is mounted read-only, and the image holds no key. It starts B's
-   Rex server as the user `nd`, because a container has no systemd.
-4. Starts A's server on `/tmp/nd-tb-rexremote-UID-HASH.sock` with
-   `HOME=LAB/home-a`, adds `labb`, names a terminal `@lead` on A and a terminal
-   `@bterm` on B, opts B in to terminal recipients with
-   `relay/allow-terminals`, and starts both bridges.
+   with no agent and no global known_hosts. Rex's ssh transport passes its own
+   `ControlMaster` and `ControlPath` on the command line, and keeps that socket
+   under `/tmp/rex-UID/`, never under `~/.ssh`. Each ssh run is logged to
+   `logs/ssh-calls.log`.
+3. Builds Namedrop for both sides, and B's image from
+   [rex-remote/Dockerfile](rex-remote/Dockerfile). The Dockerfile pins the
+   Debian base image by digest, the Rex package version, and the fingerprint
+   of Superlogical's signing key. The build stops when the downloaded keyring
+   holds another key. The apt source's `Signed-By` names that key, so apt
+   installs only packages that key signed. The build also stops when the
+   installed `rex` does not name Superlogical as its maintainer. A package
+   declares its own maintainer, so that check only tells Superlogical's `rex`
+   from Debian's unrelated `rex`.
+4. Starts B's container with sshd and Rex ports on `127.0.0.1` only. The
+   public key is mounted read-only. The image holds no user key, no client key
+   and no authorized key, but it does hold sshd's host keys, made when the
+   image is built, so each container of one image has the same host keys. `up`
+   starts a stopped container and unpauses a paused one. A new Rex version
+   for B replaces the container. It starts B's Rex server as the user `nd`,
+   because a container has no systemd.
+5. Copies B's Namedrop into the container when B lacks that build. A
+   Namedrop running on B is stopped first, because a bridge whose binary was
+   replaced answers every relay call `retry`.
+6. Starts A's server on `/tmp/nd-tb-rexremote-UID-HASH.sock` with
+   `HOME=LAB/home-a`, and lists B as `labb`. When a new container has another
+   port, `up` runs `rex hosts edit labb --endpoint`. It names a terminal
+   `@lead` on A once, and a terminal `@bterm` on B once per container, opts B
+   in to terminal recipients with `relay/allow-terminals`, and starts both
+   bridges. A's server restores `@lead`'s session after `down`.
+7. When A's relay still pins `labb` to the `host_id` of an earlier container,
+   sends one item to `@bterm@labb`. A's relay takes a `host_id` only from a
+   live `server.status` in a worker round, so that round records the new B.
+   Items still pinned to the old B fail as `labb now answers as another Rex
+   server`.
 
 Every `rex` that A runs starts from `env -i` with the lab's `HOME`, the lab's
 `bin` first on PATH, `REX_HOME` naming A's socket, `--autostart=false`, and an
@@ -409,13 +434,19 @@ or `~/.ssh`.
 `check` runs the lab checks that `experimental/rex/PORT.md` lists for PLAN #11
 and prints `ok`, `FAIL`, or `known` for each, with the evidence it read. A
 `known` result is a behavior that PORT.md records as a caveat. `--only 2,3`
-runs some of them. The report is in `LAB/reports/`.
+runs some of them. Each check that stops, pauses, or restarts B, or lists
+`labb-http`, puts the lab back before it ends, even when it fails. The report
+is in `LAB/reports/`.
 
-`down` stops A's server and A's Namedrop processes by pid, removes B's
-container and the tunnel directory under `/tmp/rex-UID` that A's ssh log
-names, and keeps the lab's directory, so the next `up` reuses its builds.
-`up --fresh` after `down` starts from a new key, hosts list, names, and state,
-and still reuses the builds.
+`down` stops the lab's processes and removes B's container and the tunnel
+directory under `/tmp/rex-UID` that A's ssh log names. A process is the lab's
+when its command starts with the lab's Namedrop binary or with `/usr/bin/ssh -F
+LAB/ssh/config`, or when it is A's server with the pid, start time, and
+command line that `up` recorded. `down` never signals itself or its ancestors,
+and a process that only names the lab's socket or directory in its arguments
+is not the lab's. `down` keeps the lab's directory, so the next `up` reuses
+its builds, A's state, and `@lead`. `up --fresh` after `down` starts from a
+new key, hosts list, names, and state, and still reuses the builds.
 The lab's directory is `TESTBED_HOME/rex-remote` unless `--dir` names
 another. The images, `ndrp-rexlab:rex-VERSION`, stay for the next run.
 

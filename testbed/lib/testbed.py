@@ -1423,7 +1423,8 @@ def main():
     remote.add_argument("action", choices=("up", "check", "down"),
                         help="up builds and starts A and B; check runs the lab checks; down stops "
                              "both and removes B's container")
-    remote.add_argument("--dir", help="the lab's directory (default: TESTBED_HOME/rex-remote)")
+    remote.add_argument("--dir", help="the lab's directory: new, empty, or holding the lab's marker "
+                                      "(default: TESTBED_HOME/rex-remote)")
     remote.add_argument("--link", metavar="PATH",
                         help="the Namedrop checkout to build (default: this kit's checkout)")
     remote.add_argument("--rex-bin", metavar="PATH", help="A's macOS rex (default: REX_BIN or rex on PATH)")
