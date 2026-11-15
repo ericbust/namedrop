@@ -84,18 +84,9 @@ pub fn install(
     })?;
     let launcher = crate::runtime_executable()?;
     if input["confirmed"] != true {
-        let writes = targets(home, directories.agent_config(), &config, &module);
-        let writes = writes
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(|t| {
-                format!(
-                    "{}: {}",
-                    t["what"].as_str().unwrap_or_default(),
-                    t["path"].as_str().unwrap_or_default()
-                )
-            })
+        let writes = targets(home, directories.agent_config(), &config, &module)
+            .iter()
+            .map(|(what, path)| format!("{what}: {}", path.display()))
             .collect::<Vec<_>>()
             .join("; ");
         return Err(format!(
@@ -193,7 +184,7 @@ pub fn install(
         return Err(format!("Namedrop's module is not confirmed: {report}"));
     }
     Ok(
-        json!({"state_directory":state,"module":module,"config":config,"line":line.word(),"config_line":CONFIG_LINE,"manual_config":matches!(line,Line::Printed|Line::Removed),"instruction":format!("Put {CONFIG_LINE} on its own line in {}.", config.display()),"keys":report["keys"],"confirmed":report["confirmed"],"integration_packages":package_report(home),"shell_command":shell,"agent_integration_hook_activation":crate::user_hook_activation_guidance(Some(home),directories.agent_config()),"targets":targets(home,directories.agent_config(),&config,&module)}),
+        json!({"state_directory":state,"module":module,"config":config,"line":line.word(),"config_line":CONFIG_LINE,"manual_config":matches!(line,Line::Printed|Line::Removed),"instruction":format!("Put {CONFIG_LINE} on its own line in {}.", config.display()),"keys":report["keys"],"confirmed":report["confirmed"],"integration_packages":package_report(home),"shell_command":shell,"agent_integration_hook_activation":crate::user_hook_activation_guidance(Some(home),directories.agent_config()),"targets":listed(targets(home,directories.agent_config(),&config,&module))}),
     )
 }
 
@@ -237,7 +228,7 @@ fn targets(
     config_directories: crate::AgentConfigDirectories<'_>,
     config: &Path,
     module: &Path,
-) -> Value {
+) -> Vec<(&'static str, PathBuf)> {
     let mut targets = vec![
         ("Rex module", module.to_owned()),
         (
@@ -246,13 +237,18 @@ fn targets(
         ),
     ];
     targets.extend(crate::install::package_targets(home, config_directories));
-    Value::Array(
-        targets
-            .into_iter()
-            .map(|(what, path)| json!({"what": what, "path": path}))
-            .collect(),
-    )
+    targets
 }
+
+fn listed(targets: Vec<(&'static str, PathBuf)>) -> Value {
+    targets
+        .into_iter()
+        .map(|(what, path)| json!({"what": what, "path": path}))
+        .collect()
+}
+
+const START_REX: &str =
+    "Start Rex, or set REX_SERVER to its Unix socket, then run sh scripts/install.sh again.";
 
 /// `install.sh`'s read-only look before it asks: the Rex server `install`
 /// would use, by the same rule, and what `install` would write. It writes
@@ -264,20 +260,18 @@ pub fn install_preview(
     let home = directories
         .home()
         .ok_or("Namedrop install needs an absolute HOME.")?;
-    let found = server(inherited, |error| {
-        match error {
+    let found = server(inherited, |error| match error {
         Some(error) => format!(
-            "Namedrop found no running Rex server: {}. Start Rex, or set REX_SERVER to its Unix socket, then run sh scripts/install.sh again.",
+            "Namedrop found no running Rex server: {}. {START_REX}",
             super::error_line(error).trim_end_matches('.')
         ),
-        _ => "Namedrop cannot tell where Rex's server is. Start Rex, or set REX_SERVER to its Unix socket, then run sh scripts/install.sh again.".into(),
-    }
+        None => format!("Namedrop cannot tell where Rex's server is. {START_REX}"),
     })?;
     Ok(json!({
         "server": found.endpoint.key,
         "config": found.config,
         "module": found.module,
-        "targets": targets(home, directories.agent_config(), &found.config, &found.module),
+        "targets": listed(targets(home, directories.agent_config(), &found.config, &found.module)),
     }))
 }
 
