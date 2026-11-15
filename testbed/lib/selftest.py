@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.request
 from types import SimpleNamespace
@@ -24,6 +25,7 @@ from unittest.mock import patch
 import livetest as live
 import rex_lane
 import rex_live
+import rex_remote
 import source as sources
 import selftest_daily
 import testbed
@@ -67,7 +69,13 @@ def check_install_table():
     link = {"kind": "link", "path": "/src/namedrop", "commit": "0123456789abcdef"}
     assert sources.install_plan(link) == {"method": "link", "clone": "/src/namedrop",
                                           "fetch": None, "checkout": "0123456789abcdef"}
-    return "install table: ref and in-repo PR install from GitHub; fork PR and link build and link"
+    assert sources.clone_plan(ref) == {"method": "link", "clone": "https://github.com/" + REPO + ".git",
+                                       "fetch": None, "checkout": "fix/token-cost"}
+    assert sources.clone_plan(same)["fetch"] == "pull/27/head:pr-27", sources.clone_plan(same)
+    assert sources.clone_plan(fork) == sources.install_plan(fork)
+    assert sources.clone_plan(link) == sources.install_plan(link)
+    return ("install table: ref and in-repo PR install from GitHub; fork PR and link build and "
+            "link; the Rex lane clones every kind")
 
 
 def check_pull_resolution():
@@ -290,8 +298,16 @@ def check_rex_lane_cleanup(scratch):
             "socket, block or profile, and keeps its logs")
 
 
+def executable(path, text="#!/bin/sh\n"):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    path.chmod(0o755)
+    return path
+
+
 def check_rex_live_hooks(scratch):
-    profile = SimpleNamespace(dir=scratch / "rex-live", env={
+    rex = executable(scratch / "rex-live-rex/rex")
+    profile = SimpleNamespace(dir=scratch / "rex-live", state={"rex_bin": str(rex)}, env={
         "HOME": "/p/home", "PATH": "/p/bin", "HERDR_SOCKET_PATH": "/tmp/h.sock",
         "HERDR_CONFIG_PATH": "/p/config/herdr/config.toml"})
     lane = rex_live.Lane(profile, testbed.fail, lambda message: None)
@@ -325,8 +341,176 @@ def check_rex_live_hooks(scratch):
         raise AssertionError("a hook baked to another state directory passed")
     except RuntimeError as error:
         assert "does not pass --state-directory" in str(error), error
-    return ("Rex live lane: blocks get no Herdr names, and a hook counts once its agent ran it "
-            "from a script baked to the profile's state directory")
+    assert state == profile.dir / "state/namedrop", state
+    host = scratch / "rex-live-host"
+    (host / "with").mkdir(parents=True)
+    (host / "without").mkdir()
+    herdr = executable(host / "with/herdr")
+    own = profile.dir / "bin"
+    own.mkdir(parents=True)
+    path = os.pathsep.join([str(own), str(host / "with"), str(host / "without")])
+    assert testbed.without_herdr(path, profile.dir) == os.pathsep.join(
+        [str(own), str(host / "without")]), testbed.without_herdr(path, profile.dir)
+    profile.env["PATH"] = path
+    assert "No herdr on the lane's PATH" in rex_live.require_no_herdr(lane)
+    beside = executable(rex.parent / "herdr")
+    assert "rex sits beside a herdr" in refusal(lambda: rex_live.require_no_herdr(lane))
+    beside.unlink()
+    with patch.object(testbed, "SYSTEM_DIRECTORIES", (str(host / "with"),)):
+        assert lane.environment()["PATH"] == path, "a system directory with a herdr was dropped"
+        assert "finds a herdr in a system directory: " + str(herdr) in refusal(
+            lambda: rex_live.require_no_herdr(lane))
+    (own / "herdr").symlink_to(herdr)
+    assert "PATH finds a herdr: " + str(own / "herdr") in refusal(lambda: rex_live.require_no_herdr(lane))
+    return ("Rex live lane: blocks get no Herdr names and no host directory with a herdr, a herdr "
+            "in the profile's own bin, beside the lane's rex or in a system directory is refused, "
+            "and a hook counts once its agent ran it from a script baked to the profile's state "
+            "directory")
+
+
+def check_rex_live_login_shells(scratch):
+    """A login shell's path_helper puts the host's directories back on PATH, which the profile's
+    login startup files take out again."""
+    profile = SimpleNamespace(dir=scratch / "rex-login")
+    home = profile.dir / "home"
+    home.mkdir(parents=True)
+    planted = executable(scratch / "rex-login-host/herdr")
+    own = executable(profile.dir / "bin/tool")
+    environment = {"HOME": str(home), "PATH": os.pathsep.join(
+        [str(planted.parent), str(own.parent), "/usr/bin", "/bin"])}
+    # path_helper can put the host's own herdr ahead of the planted one.
+    assert " in the Rex lane finds a herdr: " in refusal(
+        lambda: rex_live.login_shells_find_no_herdr(environment, profile.dir))
+    (home / ".bash_profile").write_text("kept=1\n")
+    rex_live.write_login_filters(profile)
+    rex_live.write_login_filters(profile)
+    for name in rex_live.LOGIN_FILES:
+        text = (home / name).read_text()
+        assert text.count(rex_live.FILTER_START) == 1, (name, text)
+    assert (home / ".bash_profile").read_text().endswith(rex_live.FILTER_END + "kept=1\n")
+    checked = rex_live.login_shells_find_no_herdr(environment, profile.dir)
+    assert "zsh" in checked and "bash" in checked, checked
+    for shell in ("zsh", "bash"):
+        seen = subprocess.run(testbed.env_command(environment, ["/bin/" + shell, "-lc", 'echo "$PATH"']),
+                              capture_output=True, text=True, check=True).stdout.strip()
+        assert str(own.parent) in seen.split(os.pathsep), (shell, seen)
+    executable(own.parent / "herdr")
+    assert str(own.parent / "herdr") in refusal(lambda: rex_live.login_shells_find_no_herdr(
+        environment, profile.dir)), "a herdr in the profile's bin passed"
+    return ("Rex live login shells: a login zsh, bash and sh find the host's herdr until the "
+            "profile's startup files filter PATH, then find none but one in the profile's bin")
+
+
+FAKE_RELEASE = """#!/bin/sh
+set -eu
+out=$2
+echo built >> {count}
+name=namedrop-9.9.9
+mkdir -p "$out/stage/$name/scripts"
+cp scripts/fake-install.sh "$out/stage/$name/scripts/install.sh"
+if [ -f state-line ]; then cp state-line "$out/stage/$name/"; fi
+printf 'version = "9.9.9"\\n' > "$out/stage/$name/herdr-plugin.toml"
+tar -czf "$out/$name.tar.gz" -C "$out/stage" "$name"
+cd "$out"
+shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+echo "$out/$name.tar.gz"
+echo "$out/$name.tar.gz.sha256"
+"""
+
+FAKE_INSTALL = """#!/bin/sh
+here=$(dirname "$0")/..
+{ command -v rex; printf '%s\\n' "$PATH"; } > "$HOME/install-saw"
+state=$XDG_STATE_HOME/namedrop
+if [ -f "$here/state-line" ]; then state=$(cat "$here/state-line"); fi
+printf 'Namedrop Rex install: new\\nState directory: %s\\n' "$state"
+"""
+
+
+def check_rex_live_install(scratch):
+    base = scratch / "rex-live-install"
+    builds = base / "builds"
+
+    def source(name, state_line=None):
+        repo = base / name
+        executable(repo / "scripts/package-release.sh",
+                   FAKE_RELEASE.format(count=shlex.quote(str(builds))))
+        executable(repo / "scripts/fake-install.sh", FAKE_INSTALL)
+        if state_line:
+            (repo / "state-line").write_text(state_line)
+        git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+        for command in (["init", "--quiet"], ["add", "."], ["commit", "--quiet", "-m", "fake"]):
+            subprocess.run(git + command, check=True, capture_output=True)
+        return {"kind": "link", "path": str(repo)}
+
+    rex = executable(base / "rex-dir/rex")
+    herdr = executable(base / "host/herdr")
+
+    def profile_named(name, **state):
+        profile = testbed.Profile(name)
+        profile.create()
+        profile.state.update(purpose="rex", rex_bin=str(rex), **state)
+        profile.save()
+        return profile, rex_live.Lane(profile, testbed.fail, lambda message: None)
+
+    quiet = contextlib.redirect_stdout(io.StringIO())
+    with quiet, patch.dict(os.environ, {"TESTBED_HOME": str(base / "home"), "HERDR_BIN": str(herdr)}), \
+            patch.object(rex_live.Lane, "start_server", lambda self: None), \
+            patch.object(testbed.Profile, "auth_links", lambda self, auth: None):
+        profile, lane = profile_named("rex-install")
+        (profile.dir / "bin").mkdir(mode=0o700)
+        (profile.dir / "bin/herdr").symlink_to(herdr)
+        # A rex on the lane's PATH that install.sh must not take.
+        executable(profile.dir / "home/.local/bin/rex")
+        rex_live.install(lane, source("one"), [])
+        assert not os.path.lexists(str(profile.dir / "bin/herdr")), "the Rex lane linked a herdr"
+        assert profile.state["installed"] is True, profile.state
+        assert profile.namedrop_version() == "9.9.9", profile.state
+        saw = (profile.dir / "home/install-saw").read_text().splitlines()
+        assert saw[0] == str(rex.resolve()), "install.sh ran another rex: {}".format(saw)
+        assert not shutil.which("herdr", path=saw[1]), saw[1]
+        assert builds.read_text() == "built\n"
+        rex_live.install(lane, None, [])
+        assert builds.read_text() == "built\n", "an installed profile was built again"
+
+        activated, lane = profile_named("rex-activated", activated=True)
+        assert "activated in a profile Herdr" in refusal(lambda: rex_live.install(lane, None, []))
+        elsewhere, lane = profile_named("rex-elsewhere")
+        assert "did not install into" in refusal(lambda: rex_live.install(
+            lane, source("two", "/elsewhere"), []))
+        assert "installed" not in elsewhere.state, elsewhere.state
+    return ("Rex live install: builds the archive, links no herdr, runs its install.sh with the "
+            "lane's rex first and no herdr on PATH, installs once, and refuses an activated "
+            "profile and another state directory")
+
+
+def check_rex_profile_environment(scratch):
+    with patch.dict(os.environ, {"TESTBED_HOME": str(scratch / "rex-env")}):
+        rex, herdr_lane = testbed.Profile("rex-env"), testbed.Profile("test-env")
+        for profile, purpose in ((rex, "rex"), (herdr_lane, "test")):
+            profile.create()
+            profile.state.update(purpose=purpose, toolchain=testbed.host_toolchain())
+            profile.save()
+        planted = executable(scratch / "rex-env-host/herdr")
+        clean = testbed.clean_environment
+
+        def with_planted(base, socket, toolchain):
+            environment = clean(base, socket, toolchain)
+            environment["PATH"] = str(planted.parent) + os.pathsep + environment["PATH"]
+            return environment
+
+        with patch.object(testbed, "clean_environment", with_planted):
+            env = rex.env
+            assert not [key for key in env if key.startswith("HERDR_")], env
+            assert not shutil.which("herdr", path=env["PATH"]), env["PATH"]
+            assert env["REX_SERVER"] == rex_live.Lane(rex, testbed.fail, None).server, env
+            shell = " ".join(rex.shell_command())
+            assert "HERDR_" not in shell and str(planted.parent) not in shell, shell
+            seen = rex.run(["/bin/sh", "-c", 'echo "$PATH"; env | grep -c ^HERDR_ || :']).stdout
+            assert seen.split() == [env["PATH"], "0"], seen
+            assert "HERDR_SOCKET_PATH" in herdr_lane.env, "the Herdr lane lost its socket"
+            assert str(planted.parent) in herdr_lane.env["PATH"]
+    return ("Rex profile environment: a Rex lane profile's shell, env.sh and commands get no "
+            "HERDR_* names and no herdr on PATH; a Herdr lane profile keeps both")
 
 
 def check_rex_events_log(scratch):
@@ -363,6 +547,15 @@ def stopped_after(lane):
         with contextlib.suppress(Exception):
             if lane.socket.exists():
                 lane.stop()
+
+
+def wait_for(found, timeout=10):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if found():
+            return True
+        time.sleep(0.1)
+    return False
 
 
 def check_rex_live_up_and_down(scratch):
@@ -408,19 +601,48 @@ def check_rex_live_up_and_down(scratch):
             assert not lane.socket.exists(), "a failed up left its server: " + str(lane.socket)
             assert not alive(proved[0][1]), "a failed up left its agent running"
             assert "rex_live_session" not in profile.state, profile.state
-            assert herdr_stops, "a failed up left the profile's Herdr"
+            assert not herdr_stops, "the Rex lane stopped a Herdr it never starts"
 
+            config = profile.dir / "rex/config/init.lua"
+            config.write_text("pcall(require, 'namedrop')\n")
             rex_live.up(profile, None, ["probe"])
+            assert config.read_text() == "pcall(require, 'namedrop')\n", "a start blanked init.lua"
+            # Typed text waiting at the saved shell block's prompt is cleared first.
+            lane.rex("send", "-s", profile.state["rex_live_session"], "-b",
+                     profile.state["rex_live_blocks"]["shell"], "echo ")
             _, session, blocks = rex_live.up(profile, None, ["probe"])
             assert len(proved) == 3, "the second up did not prove its saved block: {}".format(proved)
             assert proved[2][0] != proved[1][0], "the second up proved the first up's block"
             assert blocks == {"shell": blocks["shell"], "probe": proved[2][0]}, blocks
             assert not alive(proved[1][1]), "the saved block still runs its agent"
-            stops = len(herdr_stops)
+            assert (profile.dir / "logs/shell-herdr.txt").read_text() == "none\n"
+            planted = executable(profile.dir.parent / "planted/herdr")
+            rc = profile.dir / "planted.bashrc"
+            rc.write_text("PATH={}:$PATH\n".format(shlex.quote(str(planted.parent))))
+            other = json.loads(lane.rex("split", "-s", session, "-b", blocks["shell"], "--shell",
+                                        "none", "--focus=false", "--json", "--", "/bin/bash",
+                                        "--noprofile", "--rcfile", str(rc), "-i").stdout)
+            assert str(planted) in refusal(lambda: rex_live.shell_finds_no_herdr(
+                lane, session, {"shell": other["block_ids"][0]})), "the shell check missed a herdr"
+            lane.rex("block", "close", "-s", session, other["block_ids"][0])
+            # A saved shell block that runs a program gets nothing typed.
+            lane.rex("send", "-s", session, "-b", blocks["shell"], "sleep 600")
+            lane.rex("send-key", "-s", session, "-b", blocks["shell"], "enter")
+            busy = wait_for(lambda: json.loads(lane.rex(
+                "block", "call", "-s", session, "-b", blocks["shell"], "process").stdout).get(
+                    "foreground", {}).get("name") == "sleep")
+            assert busy, "the shell block never ran sleep"
+            assert "runs sleep, so no herdr lookup" in rex_live.shell_finds_no_herdr(
+                lane, session, blocks, timeout=2)
+            # What a login shell's startup files add after the filter is checked on every up.
+            with (profile.dir / "home/.zprofile").open("a") as zprofile:
+                zprofile.write("PATH={}:$PATH\n".format(shlex.quote(str(planted.parent))))
+            assert "a login zsh in the Rex lane finds a herdr: " + str(planted) in refusal(
+                lambda: rex_live.up(profile, None, ["probe"]))
             rex_live.down(profile)
             assert not lane.socket.exists(), lane.socket
             assert not alive(proved[2][1])
-            assert len(herdr_stops) > stops, "down left the profile's Herdr"
+            assert not herdr_stops, "down stopped a Herdr the Rex lane never starts"
 
             logs = profile.dir / "logs"
             (logs / "rex-server.log").write_text("kept")
@@ -430,7 +652,138 @@ def check_rex_live_up_and_down(scratch):
             assert len(herdr_stops) > stops, "a failed copy of the logs skipped the stop"
             assert not profile.dir.exists(), profile.dir
     return ("Rex live up and down: a failed up stops what it started, a second up proves a fresh "
-            "block, down stops the profile's Herdr, and a failed log copy still stops it")
+            "block and keeps init.lua, the shell block finds no herdr, its check finds a planted "
+            "one and types nothing into a busy block, an up stops at a herdr a login shell finds, "
+            "neither starts or stops a Herdr, and a failed log copy still stops the profile")
+
+
+def check_rex_remote_lab(scratch):
+    """The lab's ssh wrapper reads only the lab's config, and that config names only the lab's
+    key and known_hosts, with no agent and no shared control socket."""
+    lab = rex_remote.Lab(scratch / "remote-lab")
+    lab.claim()
+    for name in ("logs", "home-a"):
+        lab.path(name).mkdir(parents=True)
+    lab.ssh_files()
+    config = lab.path("ssh/config").read_text()
+    assert "@LAB@" not in config and "~" not in config and ".ssh" not in config, config
+    named = re.findall(r"^\s*(IdentityFile|UserKnownHostsFile)\s+(\S+)", config, re.M)
+    assert named == [("IdentityFile", str(lab.path("ssh/id_lab"))),
+                     ("UserKnownHostsFile", str(lab.path("ssh/known_hosts")))], named
+    for setting in ("IdentitiesOnly yes", "IdentityAgent none", "GlobalKnownHostsFile /dev/null",
+                    "ControlPath none"):
+        assert setting in config, setting
+    lab.claim()
+    other = scratch / "remote-lab-not-a-lab"
+    other.mkdir()
+    (other / "keep").write_text("not the lab's")
+    for action in (rex_remote.Lab(other).claim, rex_remote.Lab(other).forget, rex_remote.Lab(other).down):
+        try:
+            action()
+        except RuntimeError as error:
+            assert "not a remote-host lab" in str(error), error
+        else:
+            raise AssertionError("{} ran in a directory with no lab marker".format(action.__name__))
+    assert sorted(path.name for path in other.iterdir()) == ["keep"]
+    fake = scratch / "remote-lab-fake-ssh"
+    fake.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+    fake.chmod(0o755)
+    wrapper = lab.path("bin/ssh").read_text().replace("exec /usr/bin/ssh", "exec " + str(fake))
+    lab.path("bin/ssh").write_text(wrapper)
+    seen = subprocess.run([str(lab.path("bin/ssh")), "-p", "2222", "nd@127.0.0.1", "true"], text=True,
+                          capture_output=True, env={"PATH": "/usr/bin:/bin"}, check=True).stdout.split()
+    assert seen[:2] == ["-F", str(lab.path("ssh/config"))], seen
+    assert "ssh -p 2222" in lab.path("logs/ssh-calls.log").read_text()
+    assert rex_remote.apt_version("0.1.0-preview.18") == "0.1.0~preview.18"
+    dockerfile = (rex_remote.FILES / "Dockerfile").read_text()
+    assert re.search(r"^ARG REX_KEY_FINGERPRINT=[0-9A-F]{40}$", dockerfile, re.M), "the key's fingerprint is pinned"
+    assert '"rex=$REX_VERSION"' in dockerfile and "authorized_keys" not in dockerfile.split("COPY")[-1]
+    assert re.search(r"^FROM \S+@sha256:[0-9a-f]{64}$", dockerfile, re.M), "the base image is pinned by digest"
+    assert re.search(r"@sha256:[0-9a-f]{64}$", rex_remote.LINUX_RUST), "the Linux build image is pinned by digest"
+    assert dockerfile.index("RUN apt-get update") < dockerfile.index("ARG "), \
+        "the Rex arguments come after the base layer, so a new version keeps sshd's host keys"
+    # The shape of preview.18's `rex hosts list --json`, as A's server printed it in the lab.
+    listed = {"home": {"label": "nd-tb-rexremote.sock", "endpoint": "unix:///tmp/nd-tb-rexremote.sock",
+                       "this_machine": False, "reached": True},
+              "hosts": [{"host": {"id": "host:01", "label": "labb", "endpoints": ["ssh://nd@127.0.0.1:60970"],
+                                  "added_from": "mac.local", "updated_at": "2026-11-15T14:29:37Z"},
+                         "from": "home", "held": False},
+                        {"host": {"id": "host:02", "label": "labb-http", "endpoints": ["http://127.0.0.1:60971"],
+                                  "added_from": "mac.local", "updated_at": "2026-11-15T14:29:38Z"},
+                         "from": "home", "held": False}],
+              "warnings": []}
+    assert rex_remote.hosts_by_label(listed) == {"labb": ["ssh://nd@127.0.0.1:60970"],
+                                                 "labb-http": ["http://127.0.0.1:60971"]}
+    assert rex_remote.hosts_by_label({"hosts": []}) == {}
+    import rex_remote_checks
+    notice = ("Namedrop could not relay this message to @bterm@labb-http: labb-http's Rex server answers as "
+              "the one labb reaches")
+    assert rex_remote_checks.names_label(notice, "labb") and rex_remote_checks.names_label(notice, "labb-http")
+    assert not rex_remote_checks.names_label("Namedrop could not relay this message to @bterm@labb-http", "labb")
+    assert rex_remote_checks.tests_passed("running 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored\n") == 0
+    assert rex_remote_checks.tests_passed("test result: ok. 6 passed; 0 failed; 0 ignored; 1114 filtered out\n") == 6
+    return ("remote lab: its ssh runs with the lab's config, key and known_hosts only, B's image pins its "
+            "base, Rex's version and signing key, up reads Rex's nested host entries, up, --fresh and down "
+            "refuse a directory with no lab marker, check 7 reads labb as a whole label, and check 9 counts "
+            "a filter that ran no test as a failure")
+
+
+def check_rex_remote_down(scratch):
+    """`down` signals only the lab's processes: A's Namedrop binary and A's server by its
+    recorded pid, start time and command line. A process that only names the lab's socket
+    survives, and so does the shell that runs `down`."""
+    lab = rex_remote.Lab(scratch / "remote-down")
+    lab.claim()
+    binary = lab.path("target-mac/release/namedrop")
+    binary.parent.mkdir(parents=True)
+    binary.symlink_to(shutil.which("sleep"))
+    started = []
+
+    def start(*command):
+        process = subprocess.Popen(list(command), stdin=subprocess.DEVNULL)
+        started.append(process)
+        return process
+
+    def wait_listed(*pids):
+        for _ in range(50):
+            table = rex_remote.processes()
+            if all(pid in table for pid in pids):
+                return table
+            time.sleep(0.1)
+        raise AssertionError("not listed: {}".format(pids))
+
+    try:
+        ours = start(str(binary), "61")
+        server = start("/bin/sleep", "62")
+        bystander = start("/bin/sh", "-c", "sleep 63; true", str(lab.a_socket))
+        stale = start("/bin/sleep", "64")
+        table = wait_listed(ours.pid, server.pid, bystander.pid, stale.pid)
+        lab.state["a_server"] = {"pid": server.pid, "start": table[server.pid][1], "command": table[server.pid][2]}
+        assert os.getppid() in rex_remote.lineage(table) and os.getpid() in rex_remote.lineage(table)
+        assert set(lab.lab_processes()) == {ours.pid, server.pid}, lab.lab_processes()
+        stopped = lab.stop_lab_processes()
+        assert stopped == sorted([ours.pid, server.pid]), stopped
+        for process in (ours, server):
+            process.wait(timeout=5)
+        assert bystander.poll() is None, "a process that names the lab's socket was signalled"
+        # A recorded server pid whose start time no longer matches is another process.
+        lab.state["a_server"] = {"pid": stale.pid, "start": "Thu Jan  1 00:00:00 1970", "command": "/bin/sleep 64"}
+        assert lab.stop_lab_processes() == [] and stale.poll() is None
+        # The shell that runs `down` names the lab's socket and survives it.
+        code = ("import sys; sys.path.insert(0, sys.argv[1]); import rex_remote; "
+                "print(rex_remote.Lab(sys.argv[2]).stop_lab_processes())")
+        ran = subprocess.run(["/bin/sh", "-c", '"$1" -I -c "$2" "$3" "$4"; echo "shell survived $0"', str(lab.a_socket),
+                              sys.executable, code, str(Path(rex_remote.__file__).parent), str(lab.dir)],
+                             text=True, capture_output=True, timeout=60)
+        assert ran.stdout.splitlines() == ["[]", "shell survived " + str(lab.a_socket)], (ran.stdout, ran.stderr)
+        assert bystander.poll() is None
+    finally:
+        for process in started:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+    return ("remote lab down: it stops A's Namedrop and A's recorded server, and spares a process that "
+            "names the lab's socket, a recycled server pid, and its own shell")
 
 
 def check_syntax(kit):
@@ -1086,23 +1439,8 @@ def check_rex_live_down_after_a_failed_stop(scratch):
             raise AssertionError("a failed stop passed")
         except RuntimeError as error:
             assert str(error) == "the scratch Rex socket remains", error
-    assert stopped == ["herdr", "codex", "leftovers"], stopped
-
-    def failing_herdr_stop():
-        stopped.append("herdr")
-        raise RuntimeError("the profile socket remains")
-
-    stopped.clear()
-    profile.stop_server = failing_herdr_stop
-    with patch.object(rex_live.Lane, "stop", lambda lane: None):
-        try:
-            rex_live.down(profile)
-            raise AssertionError("a failed Herdr stop passed")
-        except RuntimeError as error:
-            assert str(error) == "the profile socket remains", error
-    assert stopped == ["herdr", "codex", "leftovers"], stopped
-    return ("Rex live down: a failed Rex or Herdr stop still stops Codex's daemon and the "
-            "leftovers")
+    assert stopped == ["codex", "leftovers"], stopped
+    return "Rex live down: a failed Rex stop still stops Codex's daemon and the leftovers"
 
 
 STUB_CLAUDE = """#!/bin/sh
@@ -1464,8 +1802,13 @@ def run(kit):
                   ("Rex lane cleanup", lambda: check_rex_lane_cleanup(base)),
                   ("Rex events log", lambda: check_rex_events_log(base)),
                   ("Rex live hooks", lambda: check_rex_live_hooks(base)),
+                  ("Rex live login shells", lambda: check_rex_live_login_shells(base)),
+                  ("Rex live install", lambda: check_rex_live_install(base)),
+                  ("Rex profile environment", lambda: check_rex_profile_environment(base)),
                   ("Rex live up and down", lambda: check_rex_live_up_and_down(base)),
                   ("Rex live down", lambda: check_rex_live_down_after_a_failed_stop(base)),
+                  ("remote lab", lambda: check_rex_remote_lab(base)),
+                  ("remote lab down", lambda: check_rex_remote_down(base)),
                   ("syntax", lambda: check_syntax(kit)),
                   ("screens", check_screens),
                   ("transcripts", check_transcripts),

@@ -160,10 +160,15 @@ testbed/testbed rex up --link . --fresh --yes
 testbed/testbed rex down --link .
 ```
 
-`rex up` gives the Rex adapter's live checks Claude Code and Codex in blocks of a scratch Rex
-server, with no Herdr names and with hooks baked to the profile's state directory, and prints the
-server and block IDs. It is not a checklist run and has no PASS line. See `testbed/README.md`,
-"The Rex lane".
+`rex up` installs the build as a machine with Rex and no Herdr does: it builds the release
+archive with `scripts/package-release.sh` and runs its `scripts/install.sh --yes` into the
+profile, with no `herdr` on the profile's `PATH` or beside its `rex`. The profile's login startup
+files filter `PATH` too, so a login shell, as Codex's and Claude Code's tool shells are, finds no
+`herdr` either, and `up` checks a login `zsh`, `bash` and `sh`. It then gives the Rex adapter's
+live checks Claude Code and Codex in blocks of a scratch Rex server, with no Herdr names and with
+hooks baked to the profile's state directory, and prints the server and block IDs. It runs the
+first `rex` on `PATH`. It is not a checklist run and has no PASS line. Run it for any change to
+the Rex host, the installer, or the archive. See `testbed/README.md`, "The Rex lane".
 
 ## Read the result
 

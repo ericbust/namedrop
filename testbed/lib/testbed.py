@@ -117,6 +117,29 @@ def clean_environment(base, socket, toolchain):
     }
 
 
+# The lane's build and install need these directories' tools, so a herdr in one stops the lane.
+SYSTEM_DIRECTORIES = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
+
+
+def without_herdr(path, profile_dir):
+    """PATH without the host's directories that hold a herdr. The profile's own directories and
+    the system directories stay, so a herdr in one of them is still found and refused."""
+    return os.pathsep.join(entry for entry in path.split(os.pathsep) if entry and (
+        Path(entry) == profile_dir or profile_dir in Path(entry).parents
+        or entry in SYSTEM_DIRECTORIES or not shutil.which("herdr", path=entry)))
+
+
+def rex_environment(env, profile_dir):
+    """The Rex lane's environment: no Herdr names, no host directory with a herdr on PATH, and
+    the lane's scratch server as Rex's server and home."""
+    environment = {key: value for key, value in env.items() if not key.startswith("HERDR_")}
+    environment["PATH"] = without_herdr(environment["PATH"], profile_dir)
+    server = "unix://" + str(rex_lane.socket_for(profile_dir))
+    environment["REX_SERVER"] = server
+    environment["REX_HOME"] = server
+    return environment
+
+
 CLAUDE_TOKEN_FILE_VARIABLE = "NAMEDROP_TESTBED_CLAUDE_TOKEN_FILE"
 # Claude Code's own map of an OAuth profile's organization_type to its subscription type.
 CLAUDE_PLANS = {"claude_max": "max", "claude_pro": "pro", "claude_team": "team",
@@ -365,7 +388,10 @@ class Profile:
         if "toolchain" not in self.state:
             fail("profile {} never finished setup; run ./testbed up --profile {}".format(
                 self.name, self.name))
-        return clean_environment(self.dir, self.socket, self.state["toolchain"])
+        env = clean_environment(self.dir, self.socket, self.state["toolchain"])
+        # So env.sh, `testbed shell` and every command the testbed runs in a Rex lane profile
+        # see the Rex lane's environment.
+        return rex_environment(env, self.dir) if self.state.get("purpose") == "rex" else env
 
     def save(self):
         write_if_changed(self.state_path, json.dumps(self.state, indent=2, sort_keys=True) + "\n")
@@ -393,7 +419,9 @@ class Profile:
             fcntl.flock(handle, fcntl.LOCK_EX)
             yield
 
-    def prepare(self, agents):
+    def prepare(self, agents, herdr=True):
+        """Links the host's tools into the profile's bin. Without herdr, the profile gets no
+        herdr, and a link an earlier run made is removed."""
         for name in ("home", "home/.claude", "config", "state", "data", "cache", "run", "codex",
                      "bin", "logs", "config-dirs", "data-dirs"):
             directory = self.dir / name
@@ -402,7 +430,10 @@ class Profile:
             directory.mkdir(exist_ok=True, mode=0o700)
         herdr_bin = os.environ.get("HERDR_BIN") or self.state.get("herdr_bin")
         tools = host_tools(herdr_bin)
-        missing = [name for name in REQUIRED_TOOLS + tuple(agents) if name not in tools]
+        if not herdr:
+            tools.pop("herdr", None)
+        required = REQUIRED_TOOLS if herdr else tuple(name for name in REQUIRED_TOOLS if name != "herdr")
+        missing = [name for name in required + tuple(agents) if name not in tools]
         if missing:
             fail("required executables are missing from PATH: " + ", ".join(missing))
         # A profile has Claude Code, and a login for it, only when its run starts Claude Code.
@@ -704,6 +735,13 @@ class Profile:
                  capture=False)
 
     def link_from_clone(self, plan):
+        local = self.clone(plan)
+        if not (local / "bin/namedrop").is_file():
+            self.run(["sh", "scripts/build.sh"], cwd=str(local), capture=False)
+        self.herdr("plugin", "link", str(local))
+
+    def clone(self, plan):
+        """Clones the plan's source into the profile once, and returns the clone."""
         local = self.dir / "namedrop-source"
         if not local.exists():
             # Build the clone aside so a crash never leaves a half-made source behind.
@@ -722,9 +760,7 @@ class Profile:
             partial.rename(local)
         if local.is_symlink():
             fail("refusing a symlinked clone directory: " + str(local))
-        if not (local / "bin/namedrop").is_file():
-            self.run(["sh", "scripts/build.sh"], cwd=str(local), capture=False)
-        self.herdr("plugin", "link", str(local))
+        return local
 
     def install_integrations(self, agents):
         installed = self.state.get("integrations") or []
@@ -922,7 +958,7 @@ class Profile:
                     "often clear it.".format(result.returncode))
 
     def namedrop_version(self):
-        root = self.state.get("plugin_root")
+        root = self.state.get("plugin_root") or self.state.get("archive_root")
         manifest = Path(root) / "herdr-plugin.toml" if root else None
         if not manifest or not manifest.is_file():
             return "not installed"
@@ -1203,6 +1239,11 @@ def cmd_rex(args):
     say("Stop it with: ./testbed rex down --profile " + profile.name)
 
 
+def cmd_rex_remote(args):
+    import rex_remote
+    rex_remote.main(args)
+
+
 def cmd_status(args):
     profile = chosen_profile(args.profile)
     profile.owned()
@@ -1412,6 +1453,22 @@ def main():
                           "and the server")
     add_source_options(rex)
     rex.add_argument("--agents", help="comma-separated agents (default: claude,codex)")
+    remote = command("rex-remote", cmd_rex_remote,
+                     "run the remote-host lab: scratch Rex A here, Linux Rex B in Docker over ssh",
+                     profile=None)
+    remote.add_argument("action", choices=("up", "check", "down"),
+                        help="up builds and starts A and B; check runs the lab checks; down stops "
+                             "both and removes B's container")
+    remote.add_argument("--dir", help="the lab's directory: new, empty, or holding the lab's marker "
+                                      "(default: TESTBED_HOME/rex-remote)")
+    remote.add_argument("--link", metavar="PATH",
+                        help="the Namedrop checkout to build (default: this kit's checkout)")
+    remote.add_argument("--rex-bin", metavar="PATH", help="A's macOS rex (default: REX_BIN or rex on PATH)")
+    remote.add_argument("--b-rex", metavar="VERSION",
+                        help="B's Rex version, such as 0.1.0-preview.19 (default: A's version)")
+    remote.add_argument("--only", metavar="N,...", help="run only these lab checks")
+    remote.add_argument("--fresh", action="store_true",
+                        help="with up: start from new keys, hosts, names and state, keeping the builds")
     command("attach", cmd_attach, "open the profile's Herdr from a plain terminal")
     command("status", cmd_status, "show the server, plugin, names and doctor")
     command("stop", cmd_stop, "stop the profile's server and keep its files")

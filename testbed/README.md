@@ -301,7 +301,8 @@ With exactly one profile, every command picks it without `--profile`.
 | `list` | Lists every profile with its server state, Namedrop version and source |
 | `report` | Prints one line for Namedrop's [compatibility page](https://github.com/ericbust/namedrop/blob/main/docs/compatibility.md) |
 | `shell` | Opens a Bash shell with only the profile's environment |
-| `rex up`, `rex down` | Runs Claude Code and Codex in blocks of a scratch Rex server, in a `rex-` profile. See [The Rex lane](#the-rex-lane) |
+| `rex up`, `rex down` | Installs the build with its archive's `install.sh`, with no Herdr, and runs Claude Code and Codex in blocks of a scratch Rex server, in a `rex-` profile. See [The Rex lane](#the-rex-lane) |
+| `rex-remote up`, `check`, `down` | Runs the relay between a scratch Rex server here and a Linux Rex server in Docker, over `ssh://`. See [The remote-host lab](#the-remote-host-lab) |
 
 Options for `up`:
 
@@ -332,20 +333,50 @@ when `up` or `reset` starts the agent again.
 ./testbed rex down --link /path/to/namedrop
 ```
 
-`rex up` builds the source and activates it in the profile's own Herdr, which
-installs the Claude Code and Codex packages with every hook baked to the
-profile's state directory. It then stops that Herdr and starts a scratch Rex
-server under `env -i`, with the profile's environment minus its `HERDR_*`
-names and with `REX_SERVER` naming the server. So a block's only location
-names are the `REX_*` the server gives it, and the server's own files stay in
-the profile's `HOME`. Claude Code in a block starts as `PROFILE/bin/claude`,
-the profile's token wrapper, named in full because a block's shell can put
-another `claude` ahead of the profile's `bin`. A scratch server started by hand needs the same wrapper and its own `HOME`, with
-no keychain link, as the probe recipe in
+`rex up` installs Namedrop as a machine with Rex and no Herdr does. The
+profile gets no `herdr`: its `bin` links none, and the lane's `PATH` drops each
+host directory that holds one, such as Homebrew's. `rex up` prints that `PATH`
+and stops if a `herdr` is still on it or beside the lane's `rex`, whose
+directory the Rex server puts on every block's `PATH`. A `herdr` in `/usr/bin`,
+`/bin`, `/usr/sbin` or `/sbin` stops the lane with an error that says so,
+because the build and the install need those directories. Every command the
+testbed runs in a `rex-` profile, `env.sh` and `testbed shell` included, gets
+the lane's environment. It starts a scratch Rex server under
+`env -i`, with the profile's environment minus its `HERDR_*` names and with
+`REX_SERVER` and `REX_HOME` naming the server. So a block's only location names are the
+`REX_*` the server gives it, and the server's own files stay in the profile's
+`HOME`. It then clones the source into the profile, builds the release archive
+with the source's own `scripts/package-release.sh`, checks the archive's
+checksum, unpacks it, and runs its `scripts/install.sh --yes` with the
+lane's `rex` first on `PATH`, so the install takes that `rex` and no other. The install's report follows: it puts
+the state in `PROFILE/state/namedrop`, the module and the `require` line in
+the scratch server's `init.lua`, and the Claude Code and Codex packages into
+the profile with every hook baked to that state directory. A profile installs
+once, so a new build needs `--fresh`. A profile that an older testbed
+activated in a profile Herdr is refused. The release build and the install
+log to `logs/package-release.log` and `logs/install.log`. Claude Code in a
+block starts as `PROFILE/bin/claude`, the profile's token wrapper, named in
+full because a block's shell can put another `claude` ahead of the profile's
+`bin`. A scratch server started by hand needs the same wrapper and its own
+`HOME`, with no keychain link, as the probe recipe in
 [ADAPTER.md](../experimental/rex/ADAPTER.md#reproduce-the-probes) shows.
 
-The session `testbed-rex` gets a shell block and one block per agent, Claude
-Code as `PROFILE/bin/claude` and Codex as `codex --no-daemon`, whose model settings are in
+The lane runs the first `rex` on `PATH`, and a profile keeps the one it first
+ran. To run another Rex build, put its `rex` first on `PATH` and pass `--fresh`.
+
+A login shell runs `/etc`'s `path_helper`, which puts the host's directories,
+such as Homebrew's through `/etc/paths.d/homebrew`, back on `PATH`. Codex's and
+Claude Code's tool shells are login shells. So `rex up` writes a `PATH` filter
+first in the profile `HOME`'s `.zprofile`, `.bash_profile` and `.profile`,
+and keeps the rest of each file. It then runs `command -v herdr` in a login
+`zsh`, `bash` and `sh` in the lane's environment, and each must find none.
+
+The session `testbed-rex` gets a shell block and one block per agent. The
+shell block runs `bash --noprofile` with the profile's `.bashrc`, and `up`
+types a `herdr` lookup into it, which must find none. On a repeat `up`, a saved
+shell block whose foreground is a program gets nothing typed, and `up` says so.
+A saved shell block at its prompt has its typed line cleared first. Claude Code runs as
+`PROFILE/bin/claude` and Codex as `codex --no-daemon`, whose model settings are in
 the profile's `codex/config.toml`. The lane answers the first-run prompts the
 Herdr lane knows, starts Codex again after it trusts its hooks, and sends Codex
 the Herdr lane's warm-up prompt, because Codex runs its hooks only from its
@@ -356,7 +387,100 @@ that passes the profile's state directory: Codex's hook run is recorded in
 and Namedrop records no hook run for them. `up` then prints the `rex` lines
 that start more of the profile's agents, with Claude Code's wrapper named in
 full. `rex down` kills every session, stops the server and
-any Codex app server, and keeps the profile.
+any Codex app server, and keeps the profile. No Herdr runs on this lane.
+
+### The remote-host lab
+
+```sh
+./testbed rex-remote up --rex-bin "/Applications/Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex"
+./testbed rex-remote check
+./testbed rex-remote down
+```
+
+The lab tests Namedrop's relay between two Rex servers over `ssh://`, with no
+model and no machine outside this one. A is a scratch Rex server on this
+machine. B is a Debian container that runs Superlogical's signed apt Rex
+package and an sshd. A reaches B as the host `labb`, with
+`rex hosts add labb ssh://nd@127.0.0.1:PORT`. Each side runs its own
+Namedrop: a macOS build on A, and a Linux build made in Docker's `rust:1.97.0`
+image on B.
+
+It needs Docker, Git, Cargo, and a macOS `rex`. `--rex-bin` names A's `rex`,
+otherwise `REX_BIN` or the `rex` on PATH. B runs A's Rex version unless
+`--b-rex 0.1.0-preview.19` names another. `--link PATH` names the checkout to
+build, by default this kit's own, and the lab builds its last commit.
+
+`up` does these steps. Each step does only what is missing, so `up` on a
+running lab changes nothing, and `up` after `down`, after a stopped or paused
+container, or with another `--b-rex` brings back only what stopped or changed:
+
+1. Makes the lab's directory and its marker `ndrp-rexlab.json`. `up`, `check`,
+   and `down` refuse a directory that holds files and no marker, so `--dir`
+   and `--fresh` never write into or delete from another directory.
+2. Makes an ed25519 key, an ssh config, and an empty known_hosts in the lab's
+   `ssh/` directory, and copies [rex-remote/ssh](rex-remote/ssh) to `bin/ssh`.
+   That wrapper runs `/usr/bin/ssh -F ssh/config`, and the
+   [config](rex-remote/ssh_config) names only that key and that known_hosts,
+   with no agent and no global known_hosts. Rex's ssh transport passes its own
+   `ControlMaster` and `ControlPath` on the command line, which win over the
+   config: its tunnels pass `ControlMaster=no`, and its first probe of a host
+   opens a control socket under `/tmp/rex-UID/<hash>/ssh/` and closes it with
+   `-O exit`. None is under `~/.ssh`. Each ssh run is logged to
+   `logs/ssh-calls.log`.
+3. Builds Namedrop for both sides, and B's image from
+   [rex-remote/Dockerfile](rex-remote/Dockerfile). The Dockerfile pins the
+   Debian base image by digest, the Rex package version, and the fingerprint
+   of Superlogical's signing key. The build stops when the downloaded keyring
+   holds another key. The apt source's `Signed-By` names that key, so apt
+   installs only packages that key signed. The build also stops when the
+   installed `rex` does not name Superlogical as its maintainer. A package
+   declares its own maintainer, so that check only tells Superlogical's `rex`
+   from Debian's unrelated `rex`.
+4. Starts B's container with sshd and Rex ports on `127.0.0.1` only. The
+   public key is mounted read-only. The image holds no user key, no client key
+   and no authorized key, but it does hold sshd's host keys, made when the
+   image is built, so each container of one image has the same host keys. `up`
+   starts a stopped container and unpauses a paused one. A new Rex version
+   for B replaces the container. It starts B's Rex server as the user `nd`,
+   because a container has no systemd.
+5. Copies B's Namedrop into the container when B lacks that build. A
+   Namedrop running on B is stopped first, because a bridge whose binary was
+   replaced answers every relay call `retry`.
+6. Starts A's server on `/tmp/nd-tb-rexremote-UID-HASH.sock` with
+   `HOME=LAB/home-a`, and lists B as `labb`. When a new container has another
+   port, `up` runs `rex hosts edit labb --endpoint`. It names a terminal
+   `@lead` on A once, and a terminal `@bterm` on B once per container, opts B
+   in to terminal recipients with `relay/allow-terminals`, and starts both
+   bridges. A's server restores `@lead`'s session after `down`.
+7. When A's relay still pins `labb` to the `host_id` of an earlier container,
+   sends one item to `@bterm@labb`. A's relay takes a `host_id` only from a
+   live `server.status` in a worker round, so that round records the new B.
+   Items still pinned to the old B fail as `labb now answers as another Rex
+   server`.
+
+Every `rex` that A runs starts from `env -i` with the lab's `HOME`, the lab's
+`bin` first on PATH, `REX_HOME` naming A's socket, `--autostart=false`, and an
+explicit `-S`. So no lab call reaches your own Rex server, your Rex hosts list,
+or `~/.ssh`.
+
+`check` runs the lab checks that `experimental/rex/PORT.md` lists for PLAN #11
+and prints `ok`, `FAIL`, or `known` for each, with the evidence it read. A
+`known` result is a behavior that PORT.md records as a caveat. `--only 2,3`
+runs some of them. Each check that stops, pauses, or restarts B, or lists
+`labb-http`, puts the lab back before it ends, even when it fails. The report
+is in `LAB/reports/`.
+
+`down` stops the lab's processes and removes B's container and the tunnel
+directory under `/tmp/rex-UID` that A's ssh log names. A process is the lab's
+when its command starts with the lab's Namedrop binary or with `/usr/bin/ssh -F
+LAB/ssh/config`, or when it is A's server with the pid, start time, and
+command line that `up` recorded. `down` never signals itself or its ancestors,
+and a process that only names the lab's socket or directory in its arguments
+is not the lab's. `down` keeps the lab's directory, so the next `up` reuses
+its builds, A's state, and `@lead`. `up --fresh` after `down` starts from a
+new key, hosts list, names, and state, and still reuses the builds.
+The lab's directory is `TESTBED_HOME/rex-remote` unless `--dir` names
+another. The images, `ndrp-rexlab:rex-VERSION`, stay for the next run.
 
 ## Where profiles live
 
