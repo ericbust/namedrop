@@ -97,63 +97,115 @@ fn naming_activation_keeps_the_tour_unclaimed_and_naming_continues() {
     assert!(!namedrop::tour::is_shown(&state, namedrop::tour::CURRENT_ID).unwrap());
 }
 
+/// Runs one Rex screen whose start is refused, and checks that it prints
+/// `refusal`, waits for a key even after a second, and closes on one.
+fn waits_for_one_key(mut command: std::process::Command, mode: &str, refusal: &str) {
+    let mut child = command
+        .args(["--endpoint", "rex:/tmp/nd-rex-popup-does-not-exist.sock"])
+        .args(["ui", "run", mode])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let (sent, received) = mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        let mut byte = [0];
+        while stderr.read(&mut byte).unwrap() != 0 {
+            text.push(byte[0] as char);
+            if text.ends_with("Press any key to close: ") {
+                sent.send(()).unwrap();
+            }
+        }
+        text
+    });
+    received
+        .recv_timeout(Duration::from_secs(10))
+        .unwrap_or_else(|_| panic!("{mode}: no key prompt was printed"));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "{mode} exited before a key"
+    );
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "{mode} closed a slow failure"
+    );
+    input.write_all(b"x").unwrap();
+    drop(input);
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(0), "{mode}");
+    let error = reader.join().unwrap();
+    assert!(error.contains(refusal), "{mode}: {error}");
+}
+
+fn untargeted(f: &Fixture) -> std::process::Command {
+    let mut command = binary::namedrop();
+    command
+        .env("HOME", f.0.join("home"))
+        .env_remove("NAMEDROP_TARGET_WORKSPACE")
+        .env_remove("NAMEDROP_TARGET_PANE")
+        .env_remove("NAMEDROP_TARGET_TERMINAL");
+    command
+}
+
 #[test]
 fn rex_screen_refusals_wait_for_any_key_even_after_one_second() {
     for mode in ["name", "manage", "doctor", "tour", "status"] {
         let f = Fixture::new();
-        let mut child = binary::namedrop()
-            .env("HOME", f.0.join("home"))
-            .env_remove("NAMEDROP_TARGET_WORKSPACE")
-            .env_remove("NAMEDROP_TARGET_PANE")
-            .env_remove("NAMEDROP_TARGET_TERMINAL")
-            .args([
-                "--endpoint",
-                "rex:/tmp/nd-rex-popup-does-not-exist.sock",
-                "ui",
-                "run",
-                mode,
-            ])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let mut input = child.stdin.take().unwrap();
-        let mut stderr = child.stderr.take().unwrap();
-        let (sent, received) = mpsc::channel();
-        let reader = std::thread::spawn(move || {
-            let mut text = String::new();
-            let mut byte = [0];
-            while stderr.read(&mut byte).unwrap() != 0 {
-                text.push(byte[0] as char);
-                if text.ends_with("Press any key to close: ") {
-                    sent.send(()).unwrap();
-                }
-            }
-            text
-        });
-        received
-            .recv_timeout(Duration::from_secs(10))
-            .expect("the refusal and key prompt were printed");
-        assert!(
-            child.try_wait().unwrap().is_none(),
-            "{mode} exited before a key"
-        );
-        std::thread::sleep(Duration::from_secs(1));
-        assert!(
-            child.try_wait().unwrap().is_none(),
-            "{mode} closed a slow failure"
-        );
-        input.write_all(b"x").unwrap();
-        drop(input);
-        let output = child.wait_with_output().unwrap();
-        assert_eq!(output.status.code(), Some(0), "{mode}");
-        let error = reader.join().unwrap();
-        assert!(
-            error.contains("This popup is missing its invoking space"),
-            "{mode}: {error}"
+        waits_for_one_key(
+            untargeted(&f),
+            mode,
+            "This popup is missing its invoking space",
         );
         assert!(!f.0.join("home/.config").exists());
+    }
+}
+
+/// A runtime command gate that refuses, or a selected runtime that cannot
+/// start, ends the process before any screen runs. A Rex layer still waits
+/// for its key, and Herdr's popup keeps today's exit.
+/// Breaks a state's `runtime` directory one way.
+type Break = fn(&std::path::Path);
+
+#[test]
+fn refusals_before_a_screen_starts_wait_for_a_key_only_in_rex() {
+    let cases: [(&str, Break, &str); 2] = [
+        (
+            "gate",
+            |runtime| fs::create_dir_all(runtime.join("commands.lock")).unwrap(),
+            "runtime command lock is not a regular file",
+        ),
+        (
+            "runtime",
+            |runtime| fs::write(runtime.join("namedrop"), "not executable").unwrap(),
+            "Could not run the selected Namedrop runtime",
+        ),
+    ];
+    for (case, break_runtime, refusal) in cases {
+        for mode in ["name", "status"] {
+            let f = Fixture::new();
+            let state = f.0.join("state");
+            fs::create_dir_all(state.join("runtime")).unwrap();
+            break_runtime(&state.join("runtime"));
+            let mut rex = untargeted(&f);
+            rex.env("NAMEDROP_STATE_DIR", &state);
+            waits_for_one_key(rex, mode, refusal);
+            let output = untargeted(&f)
+                .env("HERDR_SOCKET_PATH", f.0.join("herdr.sock"))
+                .env("HERDR_PLUGIN_STATE_DIR", &state)
+                .args(["ui", "run", mode])
+                .stdin(Stdio::null())
+                .output()
+                .unwrap();
+            let error = String::from_utf8_lossy(&output.stderr);
+            assert_eq!(output.status.code(), Some(69), "{case} {mode}: {error}");
+            assert!(error.contains(refusal), "{case} {mode}: {error}");
+            assert!(!error.contains("Press any key"), "{case} {mode}: {error}");
+        }
     }
 }
 
