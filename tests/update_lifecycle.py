@@ -476,6 +476,7 @@ def case(mode, answer=b'yes\n', ref='main', subdir=None, interactive=True, choic
 
 if __name__ == '__main__':
     if len(sys.argv) == 3 and sys.argv[1] == '--upgrade-from':
+        sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python3 -I` leaves this folder out
         from runtime_activation import upgrade_from
         upgrade_from(sys.argv[2])
         sys.exit(0)
