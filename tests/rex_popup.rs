@@ -156,3 +156,35 @@ fn rex_screen_refusals_wait_for_any_key_even_after_one_second() {
         assert!(!f.0.join("home/.config").exists());
     }
 }
+
+/// Herdr closes its own popups, so a Herdr screen's error keeps today's exit
+/// code and never waits for the Rex key.
+#[test]
+fn herdr_screen_errors_exit_65_without_the_rex_key_wait() {
+    for mode in ["name", "manage", "doctor", "tour", "status"] {
+        let f = Fixture::new();
+        let mut child = binary::namedrop()
+            .env("HOME", f.0.join("home"))
+            .env("HERDR_SOCKET_PATH", f.0.join("herdr.sock"))
+            .env("HERDR_PANE_ID", "popup-pane")
+            .env("HERDR_PLUGIN_STATE_DIR", f.0.join("state"))
+            .env_remove("NAMEDROP_TARGET_WORKSPACE")
+            .env_remove("NAMEDROP_TARGET_PANE")
+            .env_remove("NAMEDROP_TARGET_TERMINAL")
+            .args(["ui", "run", mode])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"x\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(65), "{mode}: {error}");
+        assert!(
+            error.contains("This popup is missing its invoking space"),
+            "{mode}: {error}"
+        );
+        assert!(!error.contains("Press any key"), "{mode}: {error}");
+    }
+}
