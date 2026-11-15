@@ -785,7 +785,7 @@ What the design did not say, found while building 6a to 8:
 
 - **Claude Code's hooks leave no hook-run record.** Claude Code passes its plugin hooks `CLAUDE_PLUGIN_ROOT`, and `record_hook_run` reads only `PLUGIN_ROOT`, so only Codex records a hook run (the Herdr lane's profiles hold Codex records only). The Rex lane proves Claude Code's SessionStart hook from Claude Code's own `--debug=hooks` log instead. A step that reads hook runs for Claude Code needs the record to read `CLAUDE_PLUGIN_ROOT` too.
 - **Codex runs its hooks only from its first prompt.** After the hook review, Codex runs none in that session, and a restarted Codex runs SessionStart with its first prompt, not at start. The Rex lane restarts it, as the Herdr lane does, and sends the Herdr lane's warm-up prompt.
-- **Namedrop has no `integration install`.** Namedrop installs its agent packages only through `activate`, which needs a Herdr pane. The Rex lane activates in the profile's own Herdr, then stops it before any Rex block starts. Step 6's installer replaces this.
+- **Namedrop has no `integration install`.** Namedrop installs its agent packages only through `activate`, which needs a Herdr pane. Until step 6's U12, the Rex lane activated in the profile's own Herdr, then stopped it before any Rex block started. U12 replaced this: the lane runs the build's `install.sh` and starts no Herdr (see [Step 6 commits](#step-6-commits)).
 - **A login-shell block puts the system PATH first.** `rex new` without `--shell none` runs the command through the login shell's environment, where `path_helper` puts the system directories ahead of the server's PATH. The lane's agents and printed lines use `--shell none`, which keeps the profile's `bin` first.
 - **Claude Code in a scratch `HOME` signs in with the testbed token only.** On macOS, a `home/Library/Keychains` link in a scratch `HOME` signs Claude Code in with this machine's default login. The profile links no keychain. Its `bin/claude` wrapper reads the testbed's token file when Claude Code starts. A scratch server started by hand needs the same wrapper, as ADAPTER.md's probe recipe shows.
 - **`mux::connect` takes no state directory yet.** Its only reader is the Rex arm of commit 11, so the parameter joins then.
@@ -945,7 +945,7 @@ What the design did not say, found while building 17 to 19:
 - **`ensure_worker` already ran from Rex hooks.** Since commit 16 a Rex context hook builds its runtime for the Rex place, and that runtime ensures the deferred worker, as the live check shows.
 - **Naming an agent whose session is bound registers it at once.** `name` saw the bound session and registered both agents in the same call, so no registration prompt was typed and no `reconcile` was needed.
 - **Codex answers a mention through its final reply.** Codex answered each mention in its transcript, and Namedrop's Stop hook sent that answer as the reply. It treats the mention's text as untrusted, so the rendered `reply` line ran only once Codex's person told it to answer the next message that way.
-- **A testbed Rex profile keeps its first build.** `testbed rex up` skips the install for a profile it already activated, so a new build needs `testbed destroy` first. The commit 18 checks ran on a fresh profile built at `72e2a3c`.
+- **A testbed Rex profile keeps its first build.** `testbed rex up` skips the install for a profile it already installed, so a new build needs `testbed rex up --fresh`. Since U12 the state key is `installed`. Before U12 it was `activated`, and the remedy was `testbed destroy`. The commit 18 checks ran on a fresh profile built at `72e2a3c`.
 - **Activating the Rex space left Codex's plugin cache stale.** Doctor reported `ND-HOOK-001` (`cache_current: false`) after `activate` in the lane's Rex session, which rewrote the Codex package the lane's Herdr activation had cached. The hooks kept running from the cached package.
 
 Evidence for these commits:
@@ -1494,6 +1494,26 @@ Evidence for the revision 14 round:
 - **Live matrix** at `02fa5127`, on one scratch server per build (preview.14 at 12, preview.18 at 13, preview.19 at 14). The four live tests, doctor, activate, `term1` naming, and the address list pass, and no Herdr config is written. The first preview.14 run failed `activate` once with a package-directory ownership conflict in a fresh `HOME`, and the rerun passed. That code path does not read Rex's revision.
 - **Mutations.** On a preview.19 scratch server, removing the root set or the root removal from the decoder fails both the startup-gap test and the live bridge test. The restored decoder passes both. At `799a8ebb`, the renamed test fails each of five decoder mutants: root set off, root removal off, `block_closed` off, `session_destroyed` off, and the `session_created` resync put back.
 - **Fix round** at `799a8ebb`. fmt, both clippy variants, and `--lib` for `mux::rex` (143 passed, 9 ignored) and `rex_bridge` (25 passed) pass. The four live tests pass on fresh scratch preview.14, preview.18, and preview.19 servers. Two welcome-test mutants fail only on preview.19, the one build where the offered 13 differs from the server's maximum: a status that reports the negotiated revision, and a welcome whose `api_revision` is the server's maximum. The first mutant passes the old check on all three builds.
+
+## Step 6 commits
+
+Step 6 follows [UI.md](UI.md) and its units. Each PR's description holds its evidence.
+
+- **Design** (#208, then #212 for U7's handoff, removal and Doctor rules).
+- **U1 to U3** (#210). The handshake accepts revisions 12 and 13, activation reports what it did and the Herdr differential harness runs, and one package lease guards every package writer.
+- **Revision 14** (#211). The control connection accepts revision 14, for Rex preview.19. See [Control API revisions 12 through 14](#control-api-revisions-12-through-14).
+- **U4** (#215). `runtime.py` takes its state directory, and the update preflight counts Rex-bound sessions.
+- **U5** (#213). Namedrop's popups open as Rex floating layers.
+- **U6** (#216). The Namedrop module, `namedrop rex action`, the guarded start, and Doctor's Rex report.
+- **U7** (#219, with the U6 and U7 review fixes in #220). `namedrop install`, retirement, the handoff, and removal.
+- **U8** (pending, `exp/rex-ui-u8`). `runtime.py --verify install`.
+- **U9** (pending, `exp/rex-ui-u9`). `scripts/install.sh` and the archive.
+- **U10** (pending, `exp/rex-ui-u10`). Standalone updates.
+- **U11** (not built). The sweep test of UI.md's Words.
+- **U12** (`5a277299`, fix round `b64d0f36`, on `exp/rex-ui-u12`, cut from U9). The testbed's Rex lane installs without Herdr:
+  - **What changed.** `testbed rex up` links no `herdr`, and drops each host directory that holds one from the lane's `PATH`. It builds the release archive with the source's own `scripts/package-release.sh`, checks the checksum, and runs the archive's `install.sh --yes` with the lane's `rex` first on `PATH`. The fix round adds a `PATH` filter to the profile `HOME`'s `.zprofile`, `.bash_profile` and `.profile`, because a login shell's `path_helper` puts Homebrew's `herdr` back through `/etc/paths.d/homebrew`. Codex's and Claude Code's tool shells are login shells. It also refuses a `herdr` beside the lane's `rex`, gives every command on a Rex lane profile the lane's environment, and names the cause when a `herdr` sits in a system directory.
+  - **Evidence.** The step 4 and step 5 live checks passed at `5a277299` on preview.18 and preview.19. At `b64d0f36`, `testbed check` passes, and the self-tests kill 19 of the review's and the fix round's 20 mutants. The 20th, a login shell block, now behaves the same, because the profile's `.bash_profile` filters `PATH`. The fix round's live run on preview.18 also asks Codex and Claude Code to run `command -v herdr` in their tool shells, and the PR description has its result.
+  - **Limits.** A `herdr` in `/usr/bin`, `/bin`, `/usr/sbin` or `/sbin` stops the lane. A program that runs `herdr` by an absolute path is not covered. No live run restarted the server on an installed profile, so U13 covers the restart with the module.
 
 ## Next implementation step
 
