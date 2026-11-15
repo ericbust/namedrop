@@ -4,6 +4,7 @@ import copy
 import fcntl
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -52,6 +53,108 @@ class UpdateCheck(unittest.TestCase):
 
     def cache(self):
         return json.loads((self.state / 'update-check.json').read_text())
+
+    def standalone(self, kind='archive', origin='/tmp/archive'):
+        runtime = self.state / 'runtime'
+        runtime.mkdir(parents=True)
+        (runtime / 'owner').write_text('standalone\n')
+        (runtime / 'source.json').write_text(json.dumps(
+            dict(kind=kind, origin=origin, version='1.7.9')))
+
+    def test_standalone_archive_uses_scripted_tags_without_herdr_or_manifest(self):
+        self.standalone()
+        git = self.root / 'git'
+        log = self.root / 'git-args'
+        git.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "' + str(log) + '"\n'
+                       + 'printf "%s\\n" "' + 'a' * 40 + '\trefs/tags/v9.9.0" "'
+                       + 'b' * 40 + '\trefs/tags/v9.10.0-exp.2" "'
+                       + 'c' * 40 + '\trefs/tags/v9.10.0" "'
+                       + 'd' * 40 + '\trefs/tags/v9.10.0^{}" "'
+                       + 'e' * 40 + '\trefs/tags/v99.0.0-beta"\n')
+        git.chmod(0o700)
+        with patch.dict(os.environ, PATH=str(self.root) + os.pathsep + os.environ['PATH']):
+            self.check()
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.cache()['remote_version'], '9.10.0')
+        self.assertEqual(self.cache()['remote_commit'], 'd' * 40)
+        self.assertIsNone(self.cache()['last_error'])
+        args = log.read_text().splitlines()
+        self.assertEqual(args[-4:], ['ls-remote', '--tags', 'https://github.com/ericbust/namedrop.git', 'v*'])
+        self.assertEqual(self.cache()['source']['installed_version'], '1.7.9')
+
+    def test_checkout_uses_only_its_github_origin(self):
+        self.standalone(kind='checkout')
+        metadata = self.state / 'runtime/source.json'
+        for origin in ['https://github.com/team/project.git', 'git@github.com:team/project.git',
+                       'ssh://git@github.com/team/project.git']:
+            metadata.write_text(json.dumps(dict(kind='checkout', origin=origin, version='1.7.9')))
+            source = worker.standalone_source(self.state)
+            self.assertEqual((source['owner'], source['repo']), ('team', 'project'))
+        for origin in ['/tmp/local', 'https://github.com.evil/team/project',
+                       'https://github.com/team/project?token=secret']:
+            metadata.write_text(json.dumps(dict(kind='checkout', origin=origin, version='1.7.9')))
+            with patch.object(worker, 'run') as run:
+                self.check(now=len(origin) * worker.DAY_MS)
+                run.assert_not_called()
+                self.assertIsNone(self.cache()['source'])
+
+    def test_apple_git_stub_is_never_started_without_developer_tools(self):
+        self.standalone()
+        tools = self.root / 'tools'
+        tools.mkdir()
+        xcode = tools / 'xcode-select'
+        xcode.write_text('#!/bin/sh\nexit 1\n')
+        xcode.chmod(0o700)
+        original_run = worker.run
+        def guarded_run(command, **kwargs):
+            self.assertEqual(command, ['xcode-select', '-p'], 'Git must never start')
+            return original_run(command, **kwargs)
+        for owner in ('standalone', 'herdr'):
+            (self.state / 'runtime/owner').write_text(owner)
+            with patch.object(worker.sys, 'platform', 'darwin'), \
+                    patch.dict(os.environ, PATH=str(tools) + ':/usr/bin:/bin'), \
+                    patch.object(worker, 'run', side_effect=guarded_run) as run:
+                self.assertEqual(worker.shutil.which('git'), '/usr/bin/git')
+                self.check(now=(1 if owner == 'standalone' else 2) * worker.DAY_MS)
+            self.assertEqual(run.call_args_list[0].args[0], ['xcode-select', '-p'])
+            self.assertEqual(run.call_count, 1)
+            self.assertEqual(self.cache()['status'], 'skipped')
+            self.assertEqual(self.cache()['reason'], 'developer_tools_missing')
+            self.assertIsNone(self.cache()['remote_version'])
+            self.assertNotIn('git', self.calls)
+
+    def test_other_git_binaries_and_working_developer_tools_are_allowed(self):
+        with patch.object(worker.sys, 'platform', 'darwin'), \
+                patch.object(worker.shutil, 'which', return_value='/opt/homebrew/bin/git'), \
+                patch.object(worker, 'run') as run:
+            self.assertFalse(worker.developer_tools_missing())
+            run.assert_not_called()
+        with patch.object(worker.sys, 'platform', 'darwin'), \
+                patch.object(worker.shutil, 'which', return_value='/usr/bin/git'), \
+                patch.object(worker, 'run') as run:
+            self.assertFalse(worker.developer_tools_missing())
+            run.assert_called_once_with(['xcode-select', '-p'], timeout=5)
+
+    def test_herdr_registration_and_git_scripts_keep_the_existing_update_flow(self):
+        tools = self.root / 'tools'
+        tools.mkdir()
+        herdr = tools / 'herdr'
+        registration = self.root / 'registration.json'
+        registration.write_text(json.dumps(self.value))
+        calls = self.root / 'herdr-args'
+        herdr.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "' + str(calls)
+                         + '"\ncat "' + str(registration) + '"\n')
+        herdr.chmod(0o700)
+        git = tools / 'git'
+        git.write_text('#!/bin/sh\nprintf "%s\\n" "' + 'b' * 40 + '\trefs/heads/main"\n')
+        git.chmod(0o700)
+        with patch.dict(os.environ, PATH=str(tools) + ':/usr/bin:/bin', HERDR_BIN_PATH=str(herdr)):
+            worker.check(self.state, self.settings, now=100_000, lookup_version=self.lookup_version)
+        self.assertEqual(calls.read_text().splitlines(), ['plugin', 'list', '--plugin', 'namedrop', '--json'])
+        self.assertEqual(self.calls, ['manifest'])
+        self.assertEqual(self.cache()['remote_version'], self.remote)
+        self.assertEqual(self.cache()['source']['requested_ref'], 'main')
+        self.assertNotIn('kind', self.cache()['source'])
 
     def test_experimental_versions_are_cached_and_reused(self):
         self.remote = '1.5.0-exp.2'

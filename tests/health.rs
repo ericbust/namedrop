@@ -94,6 +94,40 @@ fn cached_update_is_informational_and_doctor_remains_healthy_and_read_only() {
 }
 
 #[test]
+fn standalone_doctor_uses_download_guidance_without_a_herdr_command() {
+    let f = Fixture::new();
+    if update_profile::isolate(&f.root, &f.home) {
+        return;
+    }
+    f.register();
+    fs::create_dir_all(f.root.join("runtime")).unwrap();
+    fs::write(f.root.join("runtime/owner"), "standalone\n").unwrap();
+    fs::write(
+        f.root.join("update-check.json"),
+        json!({
+            "schema_version":1, "checked_at":100, "last_success_at":100,
+            "last_error":null, "remote_version":"9.10.0"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let report = diagnose_collaboration(&f.runtime());
+    let update = report
+        .issues
+        .iter()
+        .find(|issue| issue.code == "ND-UPDATE-001")
+        .unwrap();
+    assert!(
+        update
+            .explanation
+            .contains("Update: download Namedrop 9.10.0 and run sh scripts/install.sh"),
+        "{update:?}"
+    );
+    assert_eq!(update.repair.command, None);
+    assert!(!render_health_report_to_text(&report).contains("herdr plugin action invoke update"));
+}
+
+#[test]
 fn invalid_update_settings_are_visible_in_doctor_without_a_health_failure() {
     let f = Fixture::new();
     if update_profile::isolate(&f.root, &f.home) {

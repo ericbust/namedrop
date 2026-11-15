@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -87,6 +88,64 @@ def registration():
         [os.environ.get('HERDR_BIN_PATH', 'herdr'), 'plugin', 'list', '--plugin', 'namedrop', '--json'],
         timeout=5)
     return json.loads(output.stdout)
+
+
+def standalone_source(state):
+    source = read_json(state / 'runtime/source.json')
+    if not version(source['version']):
+        raise ValueError('Invalid installed version')
+    if source['kind'] == 'archive':
+        owner, repo = 'ericbust', 'namedrop'
+    elif source['kind'] == 'checkout':
+        origin = source['origin']
+        if not isinstance(origin, str):
+            raise ValueError('Invalid checkout origin')
+        match = re.fullmatch(
+            r'(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)'
+            r'([A-Za-z0-9_][A-Za-z0-9_.-]{0,99})/([A-Za-z0-9_][A-Za-z0-9_.-]{0,99}?)(?:\.git)?/?', origin)
+        if not match:
+            return None
+        owner, repo = match.groups()
+    else:
+        raise ValueError('Invalid standalone source kind')
+    return dict(owner=owner, repo=repo, kind=source['kind'],
+                installed_version=source['version'], subdir='')
+
+
+def version_key(value):
+    core, separator, serial = value.partition('-exp.')
+    return (*map(int, core.split('.')), not separator, int(serial) if separator else 0)
+
+
+def latest_tag(source):
+    output = run(
+        ['git', '-c', 'credential.helper=', '-c', 'core.hooksPath=/dev/null',
+         'ls-remote', '--tags', f'https://github.com/{source["owner"]}/{source["repo"]}.git', 'v*'],
+        text=True, timeout=8, env=dict(os.environ, GIT_TERMINAL_PROMPT='0'))
+    tags = {}
+    for line in output.stdout.splitlines():
+        commit, name = line.split('\t')
+        if not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', commit):
+            raise ValueError('Invalid remote commit')
+        match = re.fullmatch(r'refs/tags/v(.+?)(\^\{\})?', name)
+        if match and version(match[1]):
+            release = match[1]
+            if release not in tags or match[2]:
+                tags[release] = commit
+    if not tags:
+        raise ValueError('No release tags were found')
+    newest = max(tags, key=version_key)
+    return tags[newest], newest
+
+
+def developer_tools_missing():
+    if sys.platform != 'darwin' or shutil.which('git') != '/usr/bin/git':
+        return False
+    try:
+        run(['xcode-select', '-p'], timeout=5)
+        return False
+    except (OSError, subprocess.SubprocessError):
+        return True
 
 
 def remote_commit(source):
@@ -186,19 +245,31 @@ def check(state, settings, now=None, lookup_registration=registration,
         cache = dict(schema_version=1, checked_at=now, source=None,
                      remote_commit=None, remote_version=None, last_success_at=None, last_error=None)
         try:
-            source = source_from_registration(lookup_registration())
+            owner_path = state / 'runtime/owner'
+            owner = owner_path.read_text().strip() if owner_path.exists() else 'herdr'
+            if owner not in ('herdr', 'standalone'):
+                raise ValueError('Invalid runtime owner')
+            source = (standalone_source(state) if owner == 'standalone'
+                      else source_from_registration(lookup_registration()))
             cache['source'] = source
             if source is not None:
+                if developer_tools_missing():
+                    cache.update(status='skipped', reason='developer_tools_missing')
+                    atomic_write(path, cache)
+                    return
                 if (previous.get('source') == source and version(previous.get('remote_version'))
                         and isinstance(previous.get('remote_commit'), str)
                         and re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', previous['remote_commit'])
                         and type(previous.get('last_success_at')) is int):
                     for key in ('remote_commit', 'remote_version', 'last_success_at'):
                         cache[key] = previous.get(key)
-                commit = lookup_commit(source)
-                available = cache['remote_version']
-                if commit != cache['remote_commit'] or not version(available):
-                    available = lookup_version(source, commit)
+                if owner == 'standalone':
+                    commit, available = latest_tag(source)
+                else:
+                    commit = lookup_commit(source)
+                    available = cache['remote_version']
+                    if commit != cache['remote_commit'] or not version(available):
+                        available = lookup_version(source, commit)
                 if not version(available):
                     raise ValueError('Invalid remote version')
                 cache.update(remote_commit=commit, remote_version=available, last_success_at=now)

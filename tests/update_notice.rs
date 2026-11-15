@@ -324,6 +324,104 @@ fn update_settings_follow_the_subprocess_xdg_and_home_environment() {
 }
 
 #[test]
+fn standalone_owner_selects_its_home_settings_and_download_notice() {
+    let f = Fixture::new();
+    if update_profile::isolate(&f.root, &f.home) {
+        return;
+    }
+    f.seed("9.10.0");
+    fs::create_dir_all(f.state.join("runtime")).unwrap();
+    fs::write(f.state.join("runtime/owner"), "standalone\n").unwrap();
+    f.settings("{\"check_for_updates\":false}");
+    let settings = f.home.join(".config/namedrop/settings.json");
+    fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    fs::write(&settings, "{\"check_for_updates\":true}").unwrap();
+    assert_eq!(
+        f.notice(1000).unwrap()["systemMessage"],
+        format!(
+            "Namedrop 9.10.0 is available (you have {}). Update: download Namedrop 9.10.0 and run sh scripts/install.sh",
+            env!("CARGO_PKG_VERSION")
+        )
+    );
+    fs::remove_file(f.state.join("update-notice.json")).unwrap();
+    f.settings("{\"check_for_updates\":true}");
+    fs::write(&settings, "{\"check_for_updates\":false}").unwrap();
+    assert_eq!(f.notice(1001), None);
+    fs::write(f.state.join("runtime/owner"), "herdr\n").unwrap();
+    assert!(
+        f.notice(1002).unwrap()["systemMessage"]
+            .as_str()
+            .unwrap()
+            .ends_with("Update: herdr plugin action invoke update --plugin namedrop")
+    );
+}
+
+#[test]
+fn standalone_tag_check_reaches_the_real_session_hook() {
+    let f = Fixture::new();
+    let runtime = f.state.join("runtime");
+    fs::create_dir_all(&runtime).unwrap();
+    fs::write(runtime.join("owner"), "standalone\n").unwrap();
+    fs::write(
+        runtime.join("source.json"),
+        r#"{"version":"1.7.9","kind":"archive","origin":"/tmp/archive"}"#,
+    )
+    .unwrap();
+    let tools = f.root.join("tools");
+    fs::create_dir(&tools).unwrap();
+    executable::write_executable(
+        tools.join("git"),
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' '{}\trefs/tags/v9.10.0'\n",
+            "b".repeat(40)
+        ),
+    );
+    let checked = crate::binary::command("python3")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/scripts/check-update.py"
+        ))
+        .arg(&f.state)
+        .arg(f.home.join(".config/namedrop/settings.json"))
+        .env("PATH", format!("{}:/usr/bin:/bin", tools.display()))
+        .env("HERDR_BIN_PATH", f.root.join("missing-herdr"))
+        .output()
+        .unwrap();
+    assert!(checked.status.success(), "{checked:?}");
+    let cache: Value =
+        serde_json::from_slice(&fs::read(f.state.join("update-check.json")).unwrap()).unwrap();
+    assert_eq!(cache["remote_version"], "9.10.0", "{cache}");
+    let mut child = f
+        .command(&[
+            "hook",
+            "session-start",
+            "--state-directory",
+            f.state.to_str().unwrap(),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(br#"{"hook_event_name":"SessionStart","source":"startup"}"#)
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let notice: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        notice["systemMessage"],
+        format!(
+            "Namedrop 9.10.0 is available (you have {}). Update: download Namedrop 9.10.0 and run sh scripts/install.sh",
+            env!("CARGO_PKG_VERSION")
+        )
+    );
+}
+
+#[test]
 fn only_background_triggers_launch_the_worker_and_events_do_not_wait_for_it() {
     use std::time::{Duration, Instant};
     let f = Fixture::new();
@@ -503,6 +601,66 @@ fn both_wrappers_forward_only_composed_notices_and_reject_hostile_versions() {
                 false,
             ),
         ] {
+            let text = value.to_string();
+            executable::write_executable(
+                &executable,
+                format!(
+                    "#!/bin/sh\nprintf '%s' '{}'\n",
+                    text.replace('\'', "'\"'\"'")
+                ),
+            );
+            let output = crate::binary::command(package.join("scripts/session-start"))
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            assert_eq!(
+                String::from_utf8(output.stdout).unwrap(),
+                if forward { text.clone() } else { String::new() },
+                "{runtime:?}: {text}"
+            );
+        }
+    }
+}
+
+#[test]
+fn both_wrappers_forward_only_the_exact_standalone_notice() {
+    let f = Fixture::new();
+    let executable = f.root.join("hook-result");
+    let message = "Namedrop 9.10.0-exp.2 is available (you have 1.7.9). Update: download Namedrop 9.10.0-exp.2 and run sh scripts/install.sh";
+    for runtime in [AgentRuntime::ClaudeCode, AgentRuntime::Codex] {
+        let package = install_integration_package(&f.home, runtime, &executable, &f.state).unwrap();
+        let mut cases = vec![
+            (json!({"systemMessage":message}), true),
+            (
+                json!({"hookSpecificOutput":{"additionalContext":"Namedrop selection policy. Existing policy.","hookEventName":"SessionStart"},"systemMessage":message}),
+                true,
+            ),
+            (
+                json!({"hookSpecificOutput":{"additionalContext":"unrelated context","hookEventName":"SessionStart"},"systemMessage":message}),
+                false,
+            ),
+            (
+                json!({"systemMessage":message,"unexpected":"payload"}),
+                false,
+            ),
+        ];
+        for changed in [
+            message.replace(
+                "download Namedrop 9.10.0-exp.2",
+                "download Namedrop 9.10.0-exp.3",
+            ),
+            message.replace("sh scripts/install.sh", "sh scripts/other.sh"),
+            message.replace("download Namedrop 9.10.0-exp.2", "download Namedrop "),
+            message.replace("9.10.0-exp.2", "09.10.0-exp.2"),
+            message.replace("9.10.0-exp.2", "9.10.0-exp.01"),
+            message.replace("9.10.0-exp.2", "9.10.0-exp.18446744073709551616"),
+            message.replace("1.7.9", "1.7.9\nmalice"),
+            format!("{message} "),
+            format!("{message}; echo malice"),
+        ] {
+            cases.push((json!({"systemMessage":changed}), false));
+        }
+        for (value, forward) in cases {
             let text = value.to_string();
             executable::write_executable(
                 &executable,

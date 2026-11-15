@@ -1438,42 +1438,58 @@ fn forward_update_notice(runtime: AgentRuntime) -> String {
         .expect("hook output is an object");
     let message_start = "\"systemMessage\":\"Namedrop ";
     let message_middle = " is available (you have ";
-    let message_end = format!("). Update: {}\"}}", crate::update_check::UPDATE_COMMAND,);
-    let mut patterns = vec![
-        format!(
-            "{}*{}*{}",
-            shell_single_quote(&format!("{{{message_start}")),
-            shell_single_quote(message_middle),
-            shell_single_quote(&message_end)
-        ),
-        format!(
-            "{}*{}*{}*{}",
-            shell_single_quote(&policy_start),
-            shell_single_quote(&format!("{policy_end},{message_start}")),
-            shell_single_quote(message_middle),
-            shell_single_quote(&message_end)
-        ),
-    ];
-    if runtime == AgentRuntime::Codex {
-        for kind in [MuxKind::Herdr, MuxKind::Rex] {
-            let notice = crate::hook::codex_app_server_hook_output(kind).to_string();
-            let start = notice
-                .strip_suffix("\"}")
-                .expect("notice ends with systemMessage");
-            patterns.push(format!(
-                "{}*{}*{}",
-                shell_single_quote(&format!("{start}\\nNamedrop ")),
+    let mut cases = Vec::new();
+    for standalone in [false, true] {
+        let message_end = if standalone {
+            format!(
+                "{}*{}",
+                shell_single_quote("). Update: download Namedrop "),
+                shell_single_quote(" and run sh scripts/install.sh\"}")
+            )
+        } else {
+            shell_single_quote(&format!(
+                "). Update: {}\"}}",
+                crate::update_check::UPDATE_COMMAND
+            ))
+        };
+        let mut patterns = vec![
+            format!(
+                "{}*{}*{message_end}",
+                shell_single_quote(&format!("{{{message_start}")),
                 shell_single_quote(message_middle),
-                shell_single_quote(&message_end)
-            ));
+            ),
+            format!(
+                "{}*{}*{}*{message_end}",
+                shell_single_quote(&policy_start),
+                shell_single_quote(&format!("{policy_end},{message_start}")),
+                shell_single_quote(message_middle),
+            ),
+        ];
+        if runtime == AgentRuntime::Codex {
+            for kind in [MuxKind::Herdr, MuxKind::Rex] {
+                let notice = crate::hook::codex_app_server_hook_output(kind).to_string();
+                let start = notice
+                    .strip_suffix("\"}")
+                    .expect("notice ends with systemMessage");
+                patterns.push(format!(
+                    "{}*{}*{message_end}",
+                    shell_single_quote(&format!("{start}\\nNamedrop ")),
+                    shell_single_quote(message_middle),
+                ));
+            }
         }
+        let parse = if standalone {
+            "notice=${output%' and run sh scripts/install.sh\"}'}\n    download=${notice##*'Namedrop '}\n    versions=${notice%'). Update: download Namedrop '*}\n    versions=${versions##*'Namedrop '}".to_owned()
+        } else {
+            format!(
+                "versions=${{output##*'Namedrop '}}\n    versions=${{versions%{message_end}}}\n    download=${{versions%%' is available (you have '*}}"
+            )
+        };
+        cases.push(format!("  {})\n    {parse}\n    ;;", patterns.join("|")));
     }
-    // Validate both versions with shell builtins; wrapper bytes must remain
-    // stable when only the release version changes.
     format!(
-        "case \"$output\" in\n  {})\n    versions=${{output##*'Namedrop '}}\n    versions=${{versions%{}}}\n    available=${{versions%%' is available (you have '*}}\n    installed=${{versions#*' is available (you have '}}\n    valid_version() {{\n      [ \"${{#1}}\" -le 32 ] || return 1\n      value=$1\n      serial=\n      case \"$value\" in\n        *-exp.*) serial=${{value#*-exp.}}; value=${{value%%-exp.*}}; [ -n \"$serial\" ] || return 1 ;;\n      esac\n      case \"$value\" in ''|*[!0-9.]*) return 1 ;; esac\n      IFS=.\n      set -- $value\n      [ \"$#\" -eq 3 ] || return 1\n      [ \"$value\" = \"$1.$2.$3\" ] || return 1\n      if [ -n \"$serial\" ]; then set -- \"$@\" \"$serial\"; fi\n      for part do\n        case \"$part\" in ''|*[!0-9]*|0[0-9]*) return 1 ;; esac\n        [ \"${{#part}}\" -le 20 ] || return 1\n        if [ \"${{#part}}\" -eq 20 ]; then\n          high=${{part%??????????}}\n          low=${{part#??????????}}\n          [ \"$high\" -lt 1844674407 ] || {{\n            [ \"$high\" -eq 1844674407 ] && [ \"$low\" -le 3709551615 ]\n          }} || return 1\n        fi\n      done\n    }}\n    valid_version \"$available\" && valid_version \"$installed\" || exit 0\n    printf '%s' \"$output\"\n    ;;\nesac\n",
-        patterns.join("|"),
-        shell_single_quote(&message_end),
+        "case \"$output\" in\n{}\n  *) exit 0 ;;\nesac\n    available=${{versions%%' is available (you have '*}}\n    installed=${{versions#*' is available (you have '}}\n    valid_version() {{\n      [ \"${{#1}}\" -le 32 ] || return 1\n      value=$1\n      serial=\n      case \"$value\" in\n        *-exp.*) serial=${{value#*-exp.}}; value=${{value%%-exp.*}}; [ -n \"$serial\" ] || return 1 ;;\n      esac\n      case \"$value\" in ''|*[!0-9.]*) return 1 ;; esac\n      IFS=.\n      set -- $value\n      [ \"$#\" -eq 3 ] || return 1\n      [ \"$value\" = \"$1.$2.$3\" ] || return 1\n      if [ -n \"$serial\" ]; then set -- \"$@\" \"$serial\"; fi\n      for part do\n        case \"$part\" in ''|*[!0-9]*|0[0-9]*) return 1 ;; esac\n        [ \"${{#part}}\" -le 20 ] || return 1\n        if [ \"${{#part}}\" -eq 20 ]; then\n          high=${{part%??????????}}\n          low=${{part#??????????}}\n          [ \"$high\" -lt 1844674407 ] || {{\n            [ \"$high\" -eq 1844674407 ] && [ \"$low\" -le 3709551615 ]\n          }} || return 1\n        fi\n      done\n    }}\n    valid_version \"$available\" && valid_version \"$installed\" || exit 0\n    [ \"$download\" = \"$available\" ] || exit 0\n    printf '%s' \"$output\"\n",
+        cases.join("\n"),
     )
 }
 
@@ -1728,13 +1744,17 @@ mod permission_tests {
                 .unwrap(),
         )
         .unwrap();
-        let updated = |notice: &str| {
+        let updated = |notice: &str, standalone: bool| {
             let mut composed: Value = serde_json::from_str(notice).unwrap();
             composed["systemMessage"] = format!(
                 "{}\nNamedrop 9.0.0 is available (you have {}). Update: {}",
                 composed["systemMessage"].as_str().unwrap(),
                 env!("CARGO_PKG_VERSION"),
-                crate::update_check::UPDATE_COMMAND
+                if standalone {
+                    "download Namedrop 9.0.0 and run sh scripts/install.sh"
+                } else {
+                    crate::update_check::UPDATE_COMMAND
+                }
             )
             .into();
             composed.to_string()
@@ -1742,8 +1762,10 @@ mod permission_tests {
         for (output, forward) in [
             (herdr.clone(), true),
             (rex.clone(), true),
-            (updated(&herdr), true),
-            (updated(&rex), true),
+            (updated(&herdr, false), true),
+            (updated(&rex, false), true),
+            (updated(&herdr, true), true),
+            (updated(&rex, true), true),
             (format!("{rex} "), false),
             (rex.replacen("Namedrop", "Nomedrop", 1), false),
         ] {

@@ -4,7 +4,7 @@ and the palette's error lines.
 Usage: python3 -I tests/rex_install_live.py BINARY REX_BINARY OUT [SECTION...]
 
 Sections, all by default: shapes handoff drain palette helpers tour doctor
-step6 races fallback. The optional runtime section needs NAMEDROP_TEST_STANDALONE_BASELINE
+step6 races fallback. The optional runtime and updates sections need NAMEDROP_TEST_STANDALONE_BASELINE
 and NAMEDROP_TEST_ARCHIVE from build_standalone_upgrade.py. Each fixture has its own HOME, its
 own Rex server on a socket under /tmp, and `--autostart=false -S unix://...`
 on every Rex call. Herdr is the Herdr differential's script `herdr`. Agents
@@ -33,8 +33,8 @@ import threading
 import time
 
 binary, rex, out = (Path(p).resolve() for p in sys.argv[1:4])
-SECTIONS = ['shapes', 'handoff', 'drain', 'palette', 'helpers', 'tour', 'doctor', 'step6', 'races', 'fallback', 'runtime']
-chosen = sys.argv[4:] or [section for section in SECTIONS if section != 'runtime']
+SECTIONS = ['shapes', 'handoff', 'drain', 'palette', 'helpers', 'tour', 'doctor', 'step6', 'races', 'fallback', 'runtime', 'updates']
+chosen = sys.argv[4:] or [section for section in SECTIONS if section not in ('runtime', 'updates')]
 assert set(chosen) <= set(SECTIONS), chosen
 repo = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('runtime_cleanup', repo / 'scripts/runtime.py')
@@ -1095,6 +1095,152 @@ def section_runtime():
         say('U8 real Rex runtime preflight, tour, upgrade, cached-hook reinstall and removal race passed')
     finally:
         f.close()
+
+
+
+def section_updates():
+    import sqlite3
+    for mode in ('same', 'migrated', 'interrupted'):
+        migrated_failure = mode == 'migrated'
+        f = Fixture('updates-' + mode, b'-- U10 config\n')
+        try:
+            shutil.rmtree(f.state)
+            f.state.mkdir()
+            tools = f.root / 'tools'
+            tools.mkdir()
+            (tools / 'rex').symlink_to(rex)
+            f.env['PATH'] = str(tools) + ':/usr/bin:/bin'
+            roots = []
+            for key, label in [('NAMEDROP_TEST_STANDALONE_BASELINE', 'baseline'), ('NAMEDROP_TEST_ARCHIVE', 'incoming')]:
+                folder = f.root / label
+                with tarfile.open(os.environ[key]) as archive:
+                    archive.extractall(folder, filter='data')
+                roots.append(next(folder.iterdir()))
+            old, new = roots
+            schemas = [json.loads((root / 'runtime.json').read_text())['state_schema'] for root in roots]
+            assert schemas[0] != schemas[1], schemas
+
+            def publish(source, code=0):
+                result = subprocess.run(['/bin/sh', str(source / 'scripts/install.sh'), '--yes'],
+                                        env=f.env, input='', capture_output=True, text=True, timeout=90)
+                with (f.root / 'updates.jsonl').open('a') as log:
+                    log.write(json.dumps(dict(source=str(source), code=result.returncode,
+                                              stdout=result.stdout, stderr=result.stderr)) + '\n')
+                assert result.returncode == code, (result.returncode, result.stdout, result.stderr)
+                return result
+
+            def store():
+                with contextlib.closing(sqlite3.connect(f.state / 'namedrop.sqlite3')) as db:
+                    return (db.execute('PRAGMA user_version').fetchone()[0],
+                            db.execute('SELECT * FROM alias_claims ORDER BY 1,2,3').fetchall())
+
+            def doctor_runs_selected(session, block):
+                existing = {row[0] for row in processes_under(f.root)}
+                before = set(f.blocks(session))
+                f.rx('do', '-s', session, '-b', block, 'namedrop_doctor')
+                layer = next(iter(wait(lambda: set(f.blocks(session)) - before, bool, 'Doctor opens')))
+                executable = str((f.state / 'runtime/current/namedrop').resolve())
+                wait(lambda: processes_under(f.root),
+                     lambda rows: any(row[0] not in existing and os.path.realpath(row[1]) == executable
+                                      and all(word in row[2] for word in ('ui', 'run', 'doctor'))
+                                      for row in rows), 'Doctor runs the selected runtime')
+                f.rx('send-key', '-s', session, '-b', layer, 'escape')
+                wait(lambda: f.blocks(session), lambda rows: layer not in rows, 'Doctor closes')
+
+            publish(old)
+            session, block = f.session('u10-survivor')
+            f.in_block(session, block, 'name', 'survivor', '--type', 'terminal')
+            before = store()
+            assert 'survivor' in str(before[1]), before
+            if mode == 'interrupted':
+                publisher = new / 'scripts/runtime.py'
+                original = publisher.read_text()
+                anchor = 'def migrate_selected(runtime, target, gate):\n'
+                assert anchor in original
+                publisher.write_text(original.replace(anchor, anchor +
+                    "    if os.environ.get('NAMEDROP_U10_PAUSE'):\n"
+                    "        Path(os.environ['NAMEDROP_U10_PAUSE']).write_text(str(os.getpid()))\n"
+                    "        while True: time.sleep(1)\n", 1))
+                marker = f.root / 'migration-paused'
+                with (f.root / 'interrupted.log').open('w') as log:
+                    pending = subprocess.Popen([sys.executable, str(publisher), str(new), '--state-dir',
+                                                str(f.state), '--verify', 'install'],
+                                               env=dict(f.env, NAMEDROP_U10_PAUSE=str(marker)),
+                                               stdout=log, stderr=subprocess.STDOUT)
+                    with (f.root / 'pids.jsonl').open('a') as ledger:
+                        ledger.write(json.dumps(dict(pid=pending.pid, purpose='interrupted migration')) + '\n')
+                    try:
+                        wait(lambda: marker.exists() or pending.poll() is not None, bool, 'migration pauses')
+                        assert marker.exists() and pending.poll() is None
+                    finally:
+                        if pending.poll() is None:
+                            pending.kill()
+                        pending.wait(timeout=10)
+                publisher.write_text(original)
+                assert (f.state / 'runtime/migration.json').is_file()
+                refused = f.in_block(session, block, 'doctor', ok=False)
+                assert refused.returncode == 69 and 'Namedrop activation was interrupted.' in (refused.stdout + refused.stderr)
+                assert store() == before
+                publish(new)
+                assert not (f.state / 'runtime/migration.json').exists()
+                assert store() == (schemas[1], before[1]), store()
+                doctor_runs_selected(session, block)
+                say('U10 interrupted migration recovery passed')
+                continue
+            if not migrated_failure:
+                selected = os.readlink(f.state / 'runtime/current')
+                invalid = f.root / 'invalid-contract'
+                shutil.copytree(new, invalid)
+                contract = invalid / 'runtime.json'
+                value = json.loads(contract.read_text())
+                value['state_schema'] += 1
+                contract.write_text(json.dumps(value))
+                refused = publish(invalid, code=2)
+                assert 'Built runtime does not match' in refused.stderr
+                assert os.readlink(f.state / 'runtime/current') == selected and store() == before
+                version = re.search(r'^version\s*=\s*"([^"]+)"', (new / 'herdr-plugin.toml').read_text(), re.M)[1]
+                git = tools / 'git'
+                git.write_text('#!/bin/sh\nprintf "%s\\n" "' + 'b' * 40 + '\trefs/tags/v' + version + '"\n')
+                git.chmod(0o700)
+                checked = subprocess.run([sys.executable, str(repo / 'scripts/check-update.py'), str(f.state),
+                                          str(f.home / '.config/namedrop/settings.json')], env=f.env,
+                                         capture_output=True, text=True, timeout=20)
+                assert checked.returncode == 0, checked.stderr
+                notice = f.in_block(session, block, 'doctor').stdout
+                assert 'ND-UPDATE-001' in notice and ('download Namedrop ' + version) in notice, notice
+                publish(new)
+                assert store() == (schemas[1], before[1]), store()
+                before = store()
+                candidate = f.root / 'same-schema'
+                shutil.copytree(new, candidate)
+                executable = candidate / 'bin/namedrop'
+                if sys.platform == 'darwin':
+                    subprocess.run(['/usr/bin/codesign', '--force', '--sign', '-', '--identifier',
+                                    'namedrop-u10-failed-install', str(executable)], check=True, capture_output=True)
+                else:
+                    with executable.open('ab') as stream:
+                        stream.write(b'\nnamedrop-u10-failed-install\n')
+            else:
+                candidate = new
+            selected = os.readlink(f.state / 'runtime/current')
+            module = Path(registration(f)['module'])
+            contents = module.read_bytes()
+            module.write_text('-- foreign module: fixture install must refuse\n')
+            failed = publish(candidate, code=1)
+            module.write_bytes(contents)
+            after = os.readlink(f.state / 'runtime/current')
+            if migrated_failure:
+                assert after != selected
+                assert 'Activation failed after a possible state migration. The new runtime remains selected;' in failed.stderr
+                assert store() == (schemas[1], before[1]), store()
+            else:
+                assert after == selected
+                assert 'The previous runtime remains selected; existing sessions can continue.' in failed.stderr
+                assert store() == before
+            doctor_runs_selected(session, block)
+            say('U10 migrated failure' if migrated_failure else 'U10 detection, migration and same-schema rollback', 'passed')
+        finally:
+            f.close()
 
 
 for section in chosen:

@@ -16,7 +16,7 @@ def build(output):
     archives = []
     try:
         for revision in (1, 2):
-            version = f'{original_version}-u8.{revision}'
+            version = f'{original_version}-exp.{revision}'
             for name in ('Cargo.toml', 'herdr-plugin.toml', 'Cargo.lock'):
                 path = source / name
                 before = path.read_text()

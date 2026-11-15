@@ -24,7 +24,29 @@ fn enabled() -> bool {
     true
 }
 
-pub(crate) fn settings_path() -> Result<PathBuf, String> {
+fn standalone(state: &Path) -> Result<bool, String> {
+    match fs::read_to_string(state.join("runtime/owner")) {
+        Ok(owner) => match owner.trim() {
+            "standalone" => Ok(true),
+            "herdr" => Ok(false),
+            _ => Err("Invalid Namedrop runtime owner".into()),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+pub(crate) fn settings_path(state: &Path) -> Result<PathBuf, String> {
+    if standalone(state)? {
+        return env::var_os("HOME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .map(|home| home.join(".config/namedrop/settings.json"))
+            .ok_or(
+                "Namedrop cannot locate its standalone update settings without an absolute HOME"
+                    .into(),
+            );
+    }
     let directory = env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
@@ -45,8 +67,8 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
     serde_json::from_slice(&data).map_err(|error| error.to_string())
 }
 
-pub(crate) fn settings() -> Result<bool, String> {
-    let path = settings_path()?;
+pub(crate) fn settings(state: &Path) -> Result<bool, String> {
+    let path = settings_path(state)?;
     if !path.try_exists().map_err(|error| error.to_string())? {
         return Ok(true);
     }
@@ -107,10 +129,24 @@ pub(crate) struct AvailableUpdate {
     pub checked_at: u64,
     pub last_success_at: Option<u64>,
     pub last_error: Option<String>,
+    pub standalone: bool,
+}
+
+impl AvailableUpdate {
+    pub fn instruction(&self) -> String {
+        if self.standalone {
+            format!(
+                "download Namedrop {} and run sh scripts/install.sh",
+                self.version
+            )
+        } else {
+            UPDATE_COMMAND.to_owned()
+        }
+    }
 }
 
 pub(crate) fn available(state: &Path) -> Option<AvailableUpdate> {
-    settings().ok().filter(|enabled| *enabled)?;
+    settings(state).ok().filter(|enabled| *enabled)?;
     let cache = cache(state)?;
     let remote = cache.remote_version?;
     (version(&remote)? > version(env!("CARGO_PKG_VERSION"))?).then_some(AvailableUpdate {
@@ -118,6 +154,7 @@ pub(crate) fn available(state: &Path) -> Option<AvailableUpdate> {
         checked_at: cache.checked_at,
         last_success_at: cache.last_success_at,
         last_error: cache.last_error,
+        standalone: standalone(state).ok()?,
     })
 }
 
@@ -125,10 +162,10 @@ pub(crate) fn available(state: &Path) -> Option<AvailableUpdate> {
 /// owns the lock and all subprocess/network work, so pane handling never waits.
 #[doc(hidden)]
 pub fn start(state: &Path, now: u64) {
-    let Ok(path) = settings_path() else {
+    let Ok(path) = settings_path(state) else {
         return;
     };
-    if settings() != Ok(true)
+    if settings(state) != Ok(true)
         || cache(state)
             .is_some_and(|cache| now >= cache.checked_at && now - cache.checked_at < DAY_MS)
     {
@@ -205,9 +242,10 @@ pub fn session_notice(
         return output;
     }
     let message = format!(
-        "Namedrop {} is available (you have {}). Update: {UPDATE_COMMAND}",
+        "Namedrop {} is available (you have {}). Update: {}",
         update.version,
-        env!("CARGO_PKG_VERSION")
+        env!("CARGO_PKG_VERSION"),
+        update.instruction()
     );
     let output = output.get_or_insert_with(|| serde_json::json!({}));
     output["systemMessage"] = match output["systemMessage"].as_str() {
