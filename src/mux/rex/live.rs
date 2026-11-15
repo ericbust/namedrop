@@ -22,6 +22,7 @@ fn ws_reads_the_welcome_of_a_real_server() {
     let stream = UnixStream::connect(socket()).unwrap();
     let mut socket = WebSocket::connect(stream, "/api/control", "rex.control.v1", 1 << 20).unwrap();
     socket.upgrade().unwrap();
+    // Offer 13 to check negotiation with a server whose maximum is newer.
     socket
         .send_text(r#"{"type":"hello","api_revision":13,"api_min_revision":12,"client":{"kind":"other","name":"namedrop-live"}}"#)
         .unwrap();
@@ -43,7 +44,8 @@ fn ws_reads_the_welcome_of_a_real_server() {
     };
     let status: serde_json::Value = serde_json::from_str(&status).unwrap();
     assert_eq!(
-        welcome["api_revision"], status["payload"]["api_revision"],
+        welcome["api_revision"].as_u64(),
+        Some(status["payload"]["api_revision"].as_u64().unwrap().min(13)),
         "{status}"
     );
     socket.close(1000).unwrap();
@@ -353,8 +355,8 @@ fn mux_connect_surveys_a_scratch_server_through_a_rex_endpoint() {
     }
 }
 
-/// The bridge's stream on a real server sees a session's first block start
-/// its shell, and its kill close the block and then the session. Set
+/// The bridge's stream on a real server resyncs a new session, and its kill
+/// closes the block and then the session. Set
 /// `NAMEDROP_REX_LIVE_HOME` to the scratch server's `HOME`, which the `rex`
 /// client runs with.
 #[test]
@@ -401,6 +403,10 @@ fn the_bridge_stream_follows_a_real_session_from_start_to_kill() {
     while let Next::Event(event) = stream.next(Duration::from_millis(500)) {
         seen.push(event);
     }
+    assert!(
+        seen.contains(&MuxEvent::Resync(crate::SpaceId::new(&session))),
+        "{seen:?}"
+    );
     rex(&["kill", &session]);
     while let Next::Event(event) = stream.next(Duration::from_millis(500)) {
         seen.push(event);
@@ -410,10 +416,6 @@ fn the_bridge_stream_follows_a_real_session_from_start_to_kill() {
         pane: crate::mux::PaneId::new(&block),
         tab: None,
     };
-    assert!(
-        seen.contains(&MuxEvent::AgentStatusChanged(slot.clone())),
-        "{seen:?}"
-    );
     assert_eq!(
         seen[seen.len() - 2..],
         [

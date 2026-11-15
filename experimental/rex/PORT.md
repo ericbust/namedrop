@@ -1354,6 +1354,14 @@ Evidence for the mixed-build round:
 - **Full suite** at `7c89d9af`, run without the Rex claim. With the default `TMPDIR`, 2,404 tests passed and 29 failed. With `TMPDIR` under `/private/tmp`, 2,401 passed and 32 failed. The failures were in the timing files `channel_*`, `dashboard_*`, and `seamless_updates.rs`, under the suite's load, and in the first run in one `shown_roster` test. With `--test-threads=1`, every `dashboard_*` file passed, and the channel files and `seamless_updates.rs` failed only their known tests, `fixture_executable_can_be_replaced_while_its_previous_version_runs` and `runtime_replacement_preserves_cached_tools_and_running_commands`, as in the earlier rounds. The round changes no file under `tests/` and none of the code those files drive. The release build and `cargo package` passed.
 - **Lanes** at `3c18cb9`, this record's first commit, with a clean tree: the Herdr lane `PASS 10/10 in 2m40s` and the Herdr-in-Rex lane `PASS 10/10 in 2m31s`. Each log names `3c18cb9` and says Claude Code signed in with the testbed token, and the Herdr-in-Rex lane found no Namedrop client of its Rex server. Only this line follows that commit.
 
+## Control API revisions 12 through 14
+
+The Rex adapter advertises revision 14 with minimum 12. The welcome selects the connection's revision; `server.status` reports the server's maximum. The raw WebSocket live test deliberately offers 13 and checks the negotiated revision against the lower of 13 and that maximum.
+
+The bridge resyncs a newly created session from `payload.session.session_id`, including when no startup process event arrives. Existing terminal status and closure decoders stay in place. The filtered lifecycle replay keeps creation and closure events from the captured revision 12 fixture and omits process events. It does not claim to be a captured revision 14 stream.
+
+Revision 14's tunnel blocks remain outside the terminal-only survey. The embedded block event schemas match preview.18. Live qualification on preview.14, preview.18, and preview.19 is pending, including ongoing root status delivery on preview.19. See [Control API revisions](ADAPTER.md#control-api-revisions).
+
 ## Next implementation step
 
 Steps 3, 4, and 5 are done (see [Step 3: neutral names](#step-3-neutral-names), [Step 4 commits](#step-4-commits), and [Step 5 commits](#step-5-commits)), and so is the relay of ADAPTER.md's Part 2 (see [Relay commits](#relay-commits), its fix round, its rebase onto step 5's second fix round, its second and third fix rounds, its follow-up round, and its mixed-build round). Next is step 6 of the [plan](PLAN.md): the Lua module, its palette actions and screens, and the installer.

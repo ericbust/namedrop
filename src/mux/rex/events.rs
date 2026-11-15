@@ -285,6 +285,9 @@ impl<'a> RexEvents<'a> {
     fn decode(&self, payload: &Value) -> Option<MuxEvent> {
         let fields = &payload["payload"];
         match payload["type"].as_str()? {
+            "session_created" => Some(MuxEvent::Resync(SpaceId::new(
+                fields["session"]["session_id"].as_str()?,
+            ))),
             "session_destroyed" => Some(MuxEvent::SpaceClosed(SpaceId::new(
                 fields["session_id"].as_str()?,
             ))),

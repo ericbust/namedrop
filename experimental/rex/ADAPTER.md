@@ -10,6 +10,16 @@ The evidence comes from live probes on 2026-11-12 and 2026-11-13 with Rex `0.1.0
 
 The design branch is `exp/rex-adapter-design`, cut from `origin/exp/mux-delete-bridge` (`013c129`). Step 3 is final at `e68deeb`, whose last code change is `17c580d`, and it merged into `experimental` in PR #195 (`f71ca69`). This revision designs against that head. Commits 0a to 6 merged after it in PR #196 (`280779db`), so commit 6a and every later commit start from `experimental`, which holds both.
 
+## Control API revisions
+
+The adapter advertises revisions 12 through 14. Rex preview.14 reports revision 12, preview.18 reports 13, and preview.19 reports 14. A welcome's `api_revision` is the revision negotiated for that connection. `server.status.api_revision` is the server's maximum, so the two can differ when the client offers an older revision.
+
+Revision 14 adds the `com.superlogical.tunnel` block creator. The adapter surveys only `com.superlogical.terminal` blocks. Unknown block events remain ignored. The embedded schemas in preview.18 and preview.19 keep the same nested `session_event`, `block_event`, and terminal status fields.
+
+The bridge maps `session_created` to `Resync` using `payload.session.session_id`. Session lifecycle coverage no longer requires an incidental startup `process_changed`. Root program status changes, process changes, and child exits retain their existing decode rules. A creation resync does not activate a session.
+
+Scripted tests cover negotiation and the captured lifecycle with startup process events omitted. These are not a raw preview.19 stream capture. Live checks on all three builds, including deliberate root status changes on preview.19, remain required before runtime compatibility is qualified.
+
 ## The patch review and how it was answered
 
 The review of `b6b96e1e` asked for four fixes before push and several small ones. This patch ran no probes. Its counts come from `git grep` on `origin/experimental` (`280779db`), and its Claude Code and macOS facts are the review's measures.
@@ -874,7 +884,8 @@ run(state, endpoint):
 | `block_event program_status_removed`, root record | `AgentStatusChanged` |
 | `block_event process_changed` | `AgentStatusChanged`. The first block of a new session sends this and no `block_created` (measured) |
 | `block_event child_exited` | `AgentStatusChanged`. `block_closed` follows when the program's exit closes the block (measured) |
-| `session_created`, `title_changed`, `pwd_changed`, `bell`, `size_changed`, `client_*`, `session_view_changed`, anything unknown | Nothing |
+| `session_created` (top level) | `Resync(space)`, using `payload.session.session_id` |
+| `title_changed`, `pwd_changed`, `bell`, `size_changed`, `client_*`, `session_view_changed`, anything unknown | Nothing |
 
 `pending` holds at most one `AgentStatusChanged` per pane. A `Resync` absorbs the queued `AgentStatusChanged` markers for its space, and a `SpaceClosed` absorbs every marker for its space. `PaneAppeared` and `PaneClosed` keep their order. So the queue is bounded by the number of blocks on the server. The bridge flushes only for spaces with an activated worktree, which a read-only store query lists.
 
@@ -1314,7 +1325,7 @@ The Rex conformance suite (revision 1's commit 8), backward `blob_read` windowin
 - An agent can report `done` while a dialog Namedrop does not recognize holds the screen, and a screen that reads `Unseen` then delivers. Review 4 saw Claude Code report `done` with a modal dialog showing whose Enter confirms its option 1. Herdr has the same rule, so this is not a regression. Only a Rex screen fault holds the mail.
 - On B, the pointer names a relayed sender `@bob@laptop`, with `laptop` taken from A's self-reported `from.host`. B's agent may copy that into a `send`. It parses as a remote recipient only when B lists a host labelled `laptop`, and that label may name another machine, which would then receive the mention. It stays open for Part 2.
 - A Linux B is unmeasured live. The stand-in is macOS to macOS.
-- Rex is a preview. The adapter refuses a welcome whose `api_revision` is not 12 until a newer revision is checked, and Doctor reports it.
+- Rex is a preview. The adapter accepts negotiated revisions 12 through 14 and refuses others. Runtime qualification of preview.19 remains pending as described in [Control API revisions](#control-api-revisions).
 - A crashed agent leaves its terminal modes behind, so a terminal line or key sent to such a block may not act as it would in a clean shell. Herdr panes have the same exposure (inferred).
 - Does Doctor's issue 003 find a daemon-mode Codex in a Rex block through the port? It reads the panes the survey reports (inferred), and commit 17's live check confirms it.
 
