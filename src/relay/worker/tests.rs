@@ -1746,61 +1746,70 @@ fn a_server_that_reports_another_s_host_id_cannot_answer_for_its_label() {
 
 /// What a server did as one label is of that label's server alone: one
 /// that reported another's `host_id` first, and moved a cursor for it,
-/// moves nothing of the server that reports it next once it reports its
-/// own again.
+/// moves nothing of the server that reports it next, once it reports its
+/// own again or its label leaves `rex hosts`.
 #[test]
 fn a_server_s_cursor_is_its_own_after_another_answered_as_it() {
-    let space = Space::new(REX);
-    let rex = rex(&["devbox", "studio"]);
-    crate::rex_bridge::remember_host_id(&space.state, &Endpoint::parse(REX), "host-a");
-    let id = |sent: Result<Value, String>| sent.unwrap()["message_id"].as_str().unwrap().to_owned();
-    reports(&rex, "devbox", "host-s");
-    rex.run(|| space.send("request-1", "@bob@devbox hello"))
-        .unwrap();
-    rex.answer_with(
-        json!({"host_id": "host-s", "can_reply": true, "epoch": "e-studio",
-        "result": {"id": "x", "to": "bob", "status": "accepted"},
-        "outbox": [{"seq": 1_000_000, "re": "nothing", "thread": "t", "from": "eve",
-            "message_id": "f-1", "text": ""}], "more": false}),
-    );
-    run_label(&space, &rex, "devbox");
-    let store = crate::relay::tests_support::store(&space.state);
-    assert_eq!(
-        store.ack_through(REX, "devbox", "host-s").unwrap(),
-        ("e-studio".to_owned(), 1_000_000)
-    );
+    for then in ["reports its own", "is no longer listed"] {
+        let space = Space::new(REX);
+        let rex = rex(&["devbox", "studio"]);
+        crate::rex_bridge::remember_host_id(&space.state, &Endpoint::parse(REX), "host-a");
+        let id =
+            |sent: Result<Value, String>| sent.unwrap()["message_id"].as_str().unwrap().to_owned();
+        reports(&rex, "devbox", "host-s");
+        rex.run(|| space.send("request-1", "@bob@devbox hello"))
+            .unwrap();
+        rex.answer_with(
+            json!({"host_id": "host-s", "can_reply": true, "epoch": "e-studio",
+            "result": {"id": "x", "to": "bob", "status": "accepted"},
+            "outbox": [{"seq": 1_000_000, "re": "nothing", "thread": "t", "from": "eve",
+                "message_id": "f-1", "text": ""}], "more": false}),
+        );
+        run_label(&space, &rex, "devbox");
+        let store = crate::relay::tests_support::store(&space.state);
+        assert_eq!(
+            store.ack_through(REX, "devbox", "host-s").unwrap(),
+            ("e-studio".to_owned(), 1_000_000)
+        );
 
-    reports(&rex, "devbox", "host-d");
-    reports(&rex, "studio", "host-s");
-    let studio = id(rex.run(|| space.send("request-2", "@eve@studio studio only")));
-    rex.answer_with(
-        json!({"host_id": "host-s", "can_reply": true, "epoch": "e-studio",
-        "result": {"id": "x", "to": "eve", "status": "accepted"},
-        "outbox": [{"seq": 1, "re": studio, "thread": "t", "from": "eve",
-            "message_id": "s-1", "text": "eve 1"}], "more": false}),
-    );
-    run_label(&space, &rex, "studio");
-    let to_studio = rex.requests().pop().unwrap();
-    assert_eq!(to_studio["item"]["id"], studio.as_str());
-    assert_eq!(to_studio["ack_through"], 0);
-    assert!(to_studio.get("epoch").is_none(), "{to_studio}");
-    assert_eq!(
-        space.main(
-            "SELECT author_alias_snapshot, body FROM collaboration_messages
-             WHERE request_id LIKE 'relay-reply:%' ORDER BY rowid"
-        ),
-        [["eve@studio", "eve 1"]]
-    );
-    assert_eq!(
-        store.ack_through(REX, "studio", "host-s").unwrap(),
-        ("e-studio".to_owned(), 1)
-    );
-    assert!(
-        crate::relay::conditions(&space.state, REX)
-            .unwrap()
-            .is_empty(),
-        "devbox now reports its own host_id"
-    );
+        reports(&rex, "studio", "host-s");
+        let studio = id(rex.run(|| space.send("request-2", "@eve@studio studio only")));
+        if then == "reports its own" {
+            reports(&rex, "devbox", "host-d");
+        } else {
+            listed_at(&rex, &[("studio", &[])]);
+        }
+        rex.answer_with(
+            json!({"host_id": "host-s", "can_reply": true, "epoch": "e-studio",
+            "result": {"id": "x", "to": "eve", "status": "accepted"},
+            "outbox": [{"seq": 1, "re": studio, "thread": "t", "from": "eve",
+                "message_id": "s-1", "text": "eve 1"}], "more": false}),
+        );
+        run_label(&space, &rex, "studio");
+        let to_studio = rex.requests().pop().unwrap();
+        assert_eq!(to_studio["item"]["id"], studio.as_str(), "{then}");
+        assert_eq!(to_studio["ack_through"], 0, "{then}");
+        assert!(to_studio.get("epoch").is_none(), "{then}: {to_studio}");
+        assert_eq!(
+            space.main(
+                "SELECT author_alias_snapshot, body FROM collaboration_messages
+                 WHERE request_id LIKE 'relay-reply:%' ORDER BY rowid"
+            ),
+            [["eve@studio", "eve 1"]],
+            "{then}"
+        );
+        assert_eq!(
+            store.ack_through(REX, "studio", "host-s").unwrap(),
+            ("e-studio".to_owned(), 1),
+            "{then}"
+        );
+        assert!(
+            crate::relay::conditions(&space.state, REX)
+                .unwrap()
+                .is_empty(),
+            "{then}"
+        );
+    }
 }
 
 /// Two labels whose addresses Rex dials the same way, however each is
