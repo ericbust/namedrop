@@ -1372,10 +1372,19 @@ What the design did not say, found in this round:
 
 - **Rex keeps an endpoint as typed.** `rex hosts list` prints each spelling byte for byte, and Rex normalizes only when it dials, so the comparison had to be Namedrop's.
 - **The principal names no machine but on Tailscale.** A peer principal through a forward is the forwarder's uid and pid, so for the stand-in and `ssh -L` the sender's host stays its own word.
-- **A marker in the sender's name breaks replies.** B's agent addresses a relayed sender as `@alice@laptop`, and a reply that names it as a participant must parse, so the marker is a line in the thread's first message, not part of the name.
+- **A marker in the sender's name breaks replies.** B's agent addresses a relayed sender as `@alice@laptop`, and a reply that names it as a participant must parse, so the marker is not part of the name. After review it is not part of the body either, since a terminal runs the body: an agent gets it as a separate `relay-notice/v1` message before the thread's first message, and a terminal gets none.
 - **The layout check covers indexes.** B's page relies on the `(host_id, seq)` index, so a database without it is not this schema's, even at version 3.
 
 Evidence for the hardening round: see below, recorded after the round's verification.
+
+### Queued from the hardening round's review
+
+These stay unfixed for now.
+
+- **An open database moved aside (Opus L2).** A database set aside while another process still has it open keeps being written there, and that process's journal gets a name beside the new database. Consider `VACUUM INTO` a new file instead of a rename.
+- **Marker coverage (L5).** The host notice reaches only an agent, and only before a thread's first message, and a sender's own text can contain a line that looks like it. It informs; it does not authenticate.
+- **Tailscale names and access (L6).** A MagicDNS FQDN node does not pass the label rule, so such a sender is named by its own word. An owner who widened tailnet access admits more callers than the device owner. Neither is qualified on a real tailnet.
+- **Layout check fidelity (L7).** The layout comparison ignores SQLite autoindexes, column defaults, and CHECK constraints. A database that differs only there migrates, or, if a migration statement then fails, returns the error at each open instead of being set aside.
 
 ## Next implementation step
 

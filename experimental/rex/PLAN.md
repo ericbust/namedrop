@@ -100,7 +100,7 @@ This is the one list of what the first Rex release still needs. Each item names 
 7. **One outbox row for two relay authors.** **Decided: unreachable today.** No B reply names two relay authors of one A host, since a reply names only the answered message's relay author and one that names another is refused. A test pins it, and ADAPTER.md's open questions say what a change must do.
 8. **Trust the home that lists hosts.** **Documented.** A home is a routing authority that the person must trust (ADAPTER.md, "Open questions and risks").
 9. **Package Namedrop for a Rex host without Herdr** (step 6). Ship the Lua module, its palette actions and screens, and the installer, and move `scripts/runtime.py` there. Done when a machine with Rex and no Herdr can install Namedrop, activate it, and name a pane from the palette.
-10. **Write the docs** (step 7). A Rex driver for the testbed, a Rex checklist for `/verify`, the supported Rex API revision in `docs/compatibility.md`, and user docs for remote hosts: `rex hosts`, `relay/allow-terminals`, the Automatic Reply Limit across hosts, and Doctor's `ND-RELAY-001` to `ND-RELAY-004`.
+10. **Write the docs** (step 7). A Rex driver for the testbed, a Rex checklist for `/verify`, the supported Rex API revision in `docs/compatibility.md`, and user docs for remote hosts: `rex hosts`, `relay/allow-terminals`, the Automatic Reply Limit across hosts, and Doctor's `ND-RELAY-001` to `ND-RELAY-005`.
 11. **Test what the stand-in cannot.** TLS to a real remote server, a Linux B, the operator's own hosts, a Tailscale caller's `node` as B shows it, and that Rex does not answer `not_found` for an away host's blocks.
 
 ## What is not yet verified
