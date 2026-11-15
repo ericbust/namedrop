@@ -11,6 +11,7 @@ pub(crate) mod events;
 #[cfg(test)]
 mod live;
 mod local;
+mod popup;
 pub(crate) mod wire;
 mod ws;
 
@@ -762,7 +763,7 @@ impl<W: Wire> RexMux<W> {
 
 impl<W: Wire> MuxAct for RexMux<W> {
     /// `Identify` labels the block `@alias`, and `RenameTab` labels the
-    /// window. Rex shows no badges, notifications, or popups yet, and has no
+    /// window. Popups open as layers. Rex shows no badges or notifications, and has no
     /// keybindings to reload.
     fn apply(&self, effect: &Effect) -> Result<Applied, MuxError> {
         match effect {
@@ -788,10 +789,19 @@ impl<W: Wire> MuxAct for RexMux<W> {
                 call.request("session.set_window_label", label, Gone::Tab)?;
                 Ok(Applied::Done)
             }
-            Effect::Badges { .. }
-            | Effect::Notify { .. }
-            | Effect::OpenPopup(_)
-            | Effect::ReloadKeybindings => Ok(Applied::Unsupported),
+            Effect::OpenPopup(popup) => {
+                let launcher =
+                    match crate::installed_runtime::directory().map_err(MuxError::Unavailable)? {
+                        Some(runtime) => runtime.join("namedrop"),
+                        None => PathBuf::from(
+                            crate::collaboration_executable().map_err(MuxError::Unavailable)?,
+                        ),
+                    };
+                self.open_popup(popup, &launcher)
+            }
+            Effect::Badges { .. } | Effect::Notify { .. } | Effect::ReloadKeybindings => {
+                Ok(Applied::Unsupported)
+            }
         }
     }
 }

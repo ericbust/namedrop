@@ -70,7 +70,11 @@ pub(super) fn run(
         Err(error) => {
             // Keep actionable errors visible instead of closing immediately.
             eprintln!("\nNamedrop: {}", error.escape_debug());
-            if io::stdin().is_terminal() {
+            if super::popup_input::is_rex(options, inherited) {
+                if super::popup_input::wait_for_key().is_ok() {
+                    return ExitCode::SUCCESS;
+                }
+            } else if io::stdin().is_terminal() {
                 eprint!("\nEnter or Esc closes: ");
                 let _ = io::stderr().flush();
                 let mut byte = [0];
