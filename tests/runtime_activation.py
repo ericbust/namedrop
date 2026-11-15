@@ -5,6 +5,7 @@ update_lifecycle.py --upgrade-from TAG and uses NAMEDROP_TEST_PREVIOUS_BINARY
 and NAMEDROP_TEST_BINARY built from that tag and this checkout respectively.
 """
 import contextlib
+import fcntl
 import hashlib
 import io
 import json
@@ -13,6 +14,7 @@ from pathlib import Path
 import shutil
 import socket as socketlib
 import sqlite3
+import stat
 import subprocess
 import sys
 import tarfile
@@ -110,6 +112,19 @@ def archive(ref, destination):
     contents = subprocess.check_output(['git', '-C', repository, 'archive', ref])
     with tarfile.open(fileobj=io.BytesIO(contents)) as source:
         source.extractall(destination, filter='data')
+
+
+def git(*args):
+    repository = os.environ.get('NAMEDROP_TEST_REPOSITORY', str(REPO))
+    result = subprocess.run(['git', '-C', repository, *args], capture_output=True, text=True)
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def before_this_file():
+    """The parent of the commit that added this file: the scripts as U4
+    found them. None in a clone without it, such as a shallow one."""
+    added = (git('log', '--diff-filter=A', '--format=%H', '--', 'tests/runtime_activation.py') or '').split()
+    return added and git('rev-parse', '--verify', '--quiet', added[-1] + '^{commit}^') or None
 
 
 def release_tags():
@@ -230,6 +245,42 @@ class ActivationChecks(unittest.TestCase):
                              '--verify install belongs to U8')
             self.assertEqual(os.readlink(chosen / 'runtime/current'), selected)
             self.assertFalse(owner.exists())
+
+    def test_owner_is_written_under_the_lease_after_the_switch(self):
+        with tempfile.TemporaryDirectory(prefix='namedrop-u4-') as directory:
+            base = Path(directory)
+            env = environment(base)
+            root = base / 'checkout'
+            shutil.copytree(REPO / 'scripts', root / 'scripts')
+            fixture_release(root)
+            runtime_directory = base / 'state/runtime'
+            owner = runtime_directory / 'owner'
+            # A publish that stops at the switch leaves no owner.
+            runtime_directory.mkdir(mode=0o700)
+            (runtime_directory / 'next').symlink_to('releases/foreign')
+            refused = invoke(root, env, explicit=False)
+            self.assertEqual(refused.returncode, 2, refused.stderr)
+            self.assertIn('A foreign runtime publication entry needs inspection', refused.stderr)
+            self.assertFalse(owner.exists() or owner.is_symlink())
+            (runtime_directory / 'next').unlink()
+            held = []
+            write_owned = runtime.write_owned
+            def checked(path, contents, mode):
+                if path == owner:
+                    with open(runtime_directory / 'packages.lock') as other:
+                        try:
+                            fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            held.append(False)
+                        except BlockingIOError:
+                            held.append(True)
+                    held.append(os.readlink(runtime_directory / 'current'))
+                write_owned(path, contents, mode)
+            with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(runtime, 'write_owned', checked), \
+                    contextlib.redirect_stdout(io.StringIO()) as shown:
+                self.assertEqual(runtime.activate(root.resolve(), ['activate']), 0)
+            self.assertEqual(json.loads(shown.getvalue())['status'], 'ok')
+            self.assertEqual(held, [True, os.readlink(runtime_directory / 'current')])
+            self.assertEqual((owner.read_text(), stat.S_IMODE(owner.stat().st_mode)), ('herdr\n', 0o600))
 
     def test_run_sh_shape_means_herdr_state_and_activate(self):
         with tempfile.TemporaryDirectory(prefix='namedrop-u4-') as directory:
@@ -389,7 +440,9 @@ class ActivationChecks(unittest.TestCase):
                              'schema; use the matching Namedrop release to inspect unfinished work.\n')
 
     def test_fixture_differential(self):
-        ref = os.environ.get('NAMEDROP_TEST_BASE_REF', 'cca00814')
+        ref = os.environ.get('NAMEDROP_TEST_BASE_REF') or before_this_file()
+        if ref is None:
+            self.skipTest('no commit before this file in this clone; set NAMEDROP_TEST_BASE_REF')
         with tempfile.TemporaryDirectory(prefix='namedrop-u4-diff-') as directory:
             base = Path(directory)
             old = base / 'old'
