@@ -1,7 +1,22 @@
 use std::{
-    io::{self, IsTerminal},
+    io::{self, IsTerminal, Read, Write},
     process::{Command, Stdio},
 };
+
+pub(crate) fn is_rex(
+    options: &namedrop::cli::RuntimeOptions,
+    inherited: &dyn namedrop::mux::home::Inherited,
+) -> bool {
+    namedrop::mux::home::resolve(&options.flags(), inherited)
+        .is_ok_and(|home| home.kind() == namedrop::mux::MuxKind::Rex)
+}
+
+pub(crate) fn wait_for_key() -> Result<(), String> {
+    eprint!("\nPress any key to close: ");
+    io::stderr().flush().map_err(|e| e.to_string())?;
+    let _mode = InputMode::enter()?;
+    io::stdin().read_exact(&mut [0]).map_err(|e| e.to_string())
+}
 
 /// Restore the popup's terminal settings on every normal or error return.
 pub(crate) struct InputMode(Option<String>);
