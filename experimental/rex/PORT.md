@@ -1436,10 +1436,36 @@ Evidence for the second fix round:
 
 ### Queued from the second fix round
 
-- **A purge can make SQLite reuse message rowids.** A space's purge deletes its main-database messages, and `collaboration_messages` has no `INTEGER PRIMARY KEY`, so a message written after a purge of the newest messages can take a rowid at or below a capture cursor and is not captured until rowids pass it. The cursor at the last relay message had this already. This round's cursor at the endpoint's last message widens it to a purge of that endpoint's newest messages. A fix needs the capture to notice that its cursor's message is gone, and to read by time, or a main-database sequence, from there.
+- **A purge can make SQLite reuse message rowids.** Fixed in the third fix round below.
 - **Two labels of one server by other addresses.** They are refused as one server answering as another, so a person must list both with the same addresses. A refused label's items already pinned to that `host_id` stay queued until they expire.
-- **An answer to the host notice counts as an expired reply (found live).** B's Codex answered the self-named host's `relay-notice/v1` in each new B thread, in reply to the notice. The notice is no A message, so capture keeps no reply for it and counts it with the expired replies, and B's Doctor said `These expired: 2 for @lead@Erics-MacBook-Pro`. Such an answer should be neither kept nor counted, or the notice should not invite one.
+- **An answer to the host notice counts as an expired reply (found live).** Fixed in the third fix round below.
+
+### The relay's third hardening fix round
+
+Fable reviewed the whole branch, `329c278b..41751289`, and found what the two fix rounds left (`rvfh_*`). Each finding it asked to fix is one commit, and each probe became a regression test.
+
+- **A B that makes up losses** (`fix(relay): tell a sender once per agent and message what B lost, a few an hour`). A B that named new losses in each answer, with a new alias or a new start, made A write a notice and a relay author for each, without bound: A kept what it told on the `lost` rows, which it keeps 32 of, so an evicted loss named again was new. Fable's probe made 128 notices, 129 relay authors, and 131 queued deliveries in four answers. A now records each (label, message, alias) it told in `lost_told`, which outlives the rows for as long as the item, and tells it once, at most 4 new losses of one server an hour, from the relay author of the message's recipient.
+- **A reply made after a purge** (`fix(relay): capture a message made after a purge of the newest ones`). The second round queued it: since the cursor moved to the endpoint's last message, a purge of a newer space let the next reply take a rowid at or below the cursor, and capture never read it. The cursor now keeps its message's id, each space keeps the last relay message capture read there, and a capture whose cursor's message is gone reads again from the latest mark still there, under `relay/capture.lock`.
+- **This machine's hosts missing** (`fix(relay): keep an item while rex hosts list warns that hosts may be missing`). Only an unreached home kept an item. A list that warned that this machine's own server, and so its hosts, were missing failed the item at once. Any warning now keeps it.
+- **Supervision's `rex hosts list`** (`fix(relay): read the host list only for a label whose worker stopped`). The bridge's look every 10 s ran `rex hosts list` while the worker ran, 3 s each time the home does not answer. It asks the locks first.
+- **The pause flag** (`fix(relay): clear an item's pause when B answers otherwise, and expire those behind it`). It was never cleared, so an item paused once, then answered `retry`, then unreachable expired as paused by B's limit, and an item that waited behind a paused one expired as unreachable.
+- **The lock in `note_lost`** (`fix(relay): note B's losses in a transaction that takes the write lock first`). It read and then wrote in a deferred transaction, so it failed at once with `database is locked` when it met another relay writer.
+- **An answer to the host notice** (`fix(relay): neither keep nor count B's answer to the relay's own notice`). The second round found it live: B's Codex answers the self-named host's notice, and capture counted the answer as an expired reply for A.
+- **Four surviving mutations** (`test(relay): pin the refusal's silent holder, pinned items, and back-off, and a paused item's order`).
+
+What the design did not say, found in this round:
+
+- **A told record must outlive the counts.** What B names is B's to make up, so a bound on what A keeps bounds nothing that A tells unless the record of telling is kept apart, for as long as a loss can be noted.
+- **A rowid cursor needs its message.** A rowid table's rowids go back down after the newest rows are deleted, so a cursor is good only while the row at it is the one it read.
+- **`rex hosts list` leaves out this machine's hosts with a warning.** With this machine's own server not running, the list reaches the home, prints its hosts, and warns.
+
+### Queued from the third fix round
+
+These stay unfixed for now.
+
+- **The `host_id` refusal can stop legitimate labels (Fable's finding 4).** A database from `329c278b` that holds two labels of one server, reached by other addresses, keeps both in `peers` with that server's `host_id`, so after the upgrade each label's worker refuses its server as answering as the other's, and both stop (probe `rvfh_a`). A listed label whose server reported a `host_id` holds it while it no longer answers (`rvfh_b`), and the first label to report one holds it, so the real one, contacted second, is refused (`rvfh_c`). Doctor's `ND-RELAY-003` names both labels. A person gives both labels the same addresses with `rex hosts edit`, so they are one server's labels, or removes the one they do not use with `rex hosts remove`, after which the other's next item is accepted. Items already sent and pinned stay queued until they expire.
+- **A version 1 A waits silently (Fable's finding 9).** Against this B, an item into a B thread that B's limit paused gets `retry` for 24 hours, and then expires as `unreachable for 24 hours`. At `329c278b` it failed at once with the limit's reason. A version 1 A tells its sender nothing in between.
 
 ## Next implementation step
 
-Steps 3, 4, and 5 are done (see [Step 3: neutral names](#step-3-neutral-names), [Step 4 commits](#step-4-commits), and [Step 5 commits](#step-5-commits)), and so is the relay of ADAPTER.md's Part 2 (see [Relay commits](#relay-commits), its fix round, its rebase onto step 5's second fix round, its second and third fix rounds, its follow-up round, its mixed-build round, its hardening round, and its second fix round). Next is step 6 of the [plan](PLAN.md): the Lua module, its palette actions and screens, and the installer.
+Steps 3, 4, and 5 are done (see [Step 3: neutral names](#step-3-neutral-names), [Step 4 commits](#step-4-commits), and [Step 5 commits](#step-5-commits)), and so is the relay of ADAPTER.md's Part 2 (see [Relay commits](#relay-commits), its fix round, its rebase onto step 5's second fix round, its second and third fix rounds, its follow-up round, its mixed-build round, its hardening round, and that round's second and third fix rounds). Next is step 6 of the [plan](PLAN.md): the Lua module, its palette actions and screens, and the installer.
