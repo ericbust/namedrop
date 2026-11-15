@@ -117,9 +117,6 @@ fn expected(number: usize, kind: &str) -> MuxEvent {
         "closed" => MuxEvent::PaneClosed(slot()),
         "status" => MuxEvent::AgentStatusChanged(slot()),
         "resync" => MuxEvent::Resync(session(line)),
-        "created" => MuxEvent::Resync(SpaceId::new(
-            line["payload"]["session"]["session_id"].as_str().unwrap(),
-        )),
         "space" => MuxEvent::SpaceClosed(session(line)),
         _ => unreachable!(),
     }
@@ -127,7 +124,7 @@ fn expected(number: usize, kind: &str) -> MuxEvent {
 
 /// Every fixture line goes over the wire, and only the decode table's rows
 /// come out, in order. `title_changed`, `pwd_changed`, `bell`, view and
-/// owner changes and client events yield nothing.
+/// owner changes, client events, and `session_created` yield nothing.
 #[test]
 fn each_row_of_the_decode_table_yields_its_event_and_every_other_line_none() {
     let state = State::new();
@@ -143,7 +140,6 @@ fn each_row_of_the_decode_table_yields_its_event_and_every_other_line_none() {
         decoded.push(event);
     }
     let rows = [
-        (1, "created"),
         (2, "status"),
         (4, "appeared"),
         (6, "status"),
@@ -160,7 +156,6 @@ fn each_row_of_the_decode_table_yields_its_event_and_every_other_line_none() {
         (48, "resync"),
         (53, "closed"),
         (55, "space"),
-        (56, "created"),
         (57, "status"),
         (67, "closed"),
         (69, "space"),
@@ -181,13 +176,16 @@ fn each_row_of_the_decode_table_yields_its_event_and_every_other_line_none() {
 }
 
 /// Real event lines from a preview.19 scratch server, client events left out.
-/// Rex sent no `process_changed` and no `block_created` for the new
-/// session's block, so its `session_created` is all that announces it. Then
-/// the shell set the root status, reset the terminal, and was killed.
+/// The connection negotiated revision 13. Rex sent no `process_changed` and
+/// no `block_created` for the new session's block, so only `session_created`
+/// announces it. Then the shell set the root status, reset the terminal, and
+/// was killed.
 const STARTUP_GAP: &str = include_str!("../fixtures/events/startup-gap.jsonl");
 
+/// `session_created` yields nothing: the bridge flushes only activated
+/// spaces, and activation surveys the space itself.
 #[test]
-fn a_session_whose_startup_events_never_came_resyncs_and_follows_its_status() {
+fn after_a_missed_startup_the_block_s_later_status_and_closure_still_decode() {
     let state = State::new();
     let wake = Wake::new().unwrap();
     let (client, server) = serve("host-a", |server| {
@@ -212,7 +210,6 @@ fn a_session_whose_startup_events_never_came_resyncs_and_follows_its_status() {
     assert_eq!(
         decoded,
         [
-            MuxEvent::Resync(space.clone()),
             MuxEvent::AgentStatusChanged(slot.clone()),
             MuxEvent::AgentStatusChanged(slot.clone()),
             MuxEvent::PaneClosed(slot),

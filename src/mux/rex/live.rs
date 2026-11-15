@@ -43,10 +43,16 @@ fn ws_reads_the_welcome_of_a_real_server() {
         panic!("the status is a text message");
     };
     let status: serde_json::Value = serde_json::from_str(&status).unwrap();
+    // The welcome names the server's maximum apart from the negotiated
+    // revision, and the status reports that maximum.
+    assert_eq!(
+        welcome["api_server_revision"], status["payload"]["api_revision"],
+        "{welcome} {status}"
+    );
     assert_eq!(
         welcome["api_revision"].as_u64(),
         Some(status["payload"]["api_revision"].as_u64().unwrap().min(13)),
-        "{status}"
+        "{welcome} {status}"
     );
     socket.close(1000).unwrap();
 }
@@ -355,9 +361,9 @@ fn mux_connect_surveys_a_scratch_server_through_a_rex_endpoint() {
     }
 }
 
-/// The bridge's stream on a real server resyncs a new session, sees its
-/// shell set and then reset the root status, and its kill closes the block
-/// and then the session. Rex may send no event at all for the new block's
+/// The bridge's stream on a real server sees a new session's shell set and
+/// then reset the root status, and its kill closes the block and then the
+/// session. Rex may send no event at all for the new block's
 /// startup, so the status changes come from shell builtins typed after
 /// attachment, which start no process. Set `NAMEDROP_REX_LIVE_HOME` to the
 /// scratch server's `HOME`, which the `rex` client runs with.
@@ -405,10 +411,6 @@ fn the_bridge_stream_follows_a_real_session_from_start_to_kill() {
     while let Next::Event(event) = stream.next(Duration::from_millis(500)) {
         seen.push(event);
     }
-    assert!(
-        seen.contains(&MuxEvent::Resync(crate::SpaceId::new(&session))),
-        "{seen:?}"
-    );
     let slot = crate::mux::PaneSlot {
         space: crate::SpaceId::new(&session),
         pane: crate::mux::PaneId::new(&block),
