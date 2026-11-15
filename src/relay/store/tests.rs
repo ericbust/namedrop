@@ -1051,6 +1051,63 @@ fn a_label_holds_at_most_100_replies_and_a_thread_20() {
     assert!(store.hold(&held("studio", "host-0", "t5", 0), NOW).unwrap());
 }
 
+/// A reply one server's labels hold or refused is no reply of another
+/// server's that reports the same `host_id` and message id: the other's
+/// is not found placed, and is held only when its own thread has room.
+#[test]
+fn what_one_server_held_or_refused_is_not_another_s() {
+    let state = State::new();
+    let store = state.open(NOW);
+    let held = |peer: &str, thread: &str, message_id: String| Held {
+        endpoint: "rex:/tmp/a.sock".to_owned(),
+        peer: peer.to_owned(),
+        host_id: "host-s".to_owned(),
+        epoch: "e1".to_owned(),
+        label: peer.to_owned(),
+        space: "session:a".to_owned(),
+        thread: thread.to_owned(),
+        reply: Reply {
+            seq: 1,
+            re: "message-a".to_owned(),
+            thread: "t".to_owned(),
+            from: "eve".to_owned(),
+            message_id,
+            text: "x".to_owned(),
+        },
+    };
+    for n in 0..HELD_PER_THREAD {
+        assert!(
+            store
+                .hold(&held("studio", "full", format!("s-{n}")), NOW)
+                .unwrap()
+        );
+    }
+    assert!(
+        store
+            .hold(&held("devbox", "other", "x-1".to_owned()), NOW)
+            .unwrap()
+    );
+    assert!(
+        !store
+            .hold(&held("studio", "full", "x-1".to_owned()), NOW)
+            .unwrap(),
+        "studio's thread has no room, whatever devbox holds"
+    );
+    store
+        .refused(&held("devbox", "other", "x-2".to_owned()), "refused", NOW)
+        .unwrap();
+    assert!(
+        store
+            .placed(&held("devbox", "other", "x-2".to_owned()))
+            .unwrap()
+    );
+    assert!(
+        !store
+            .placed(&held("studio", "full", "x-2".to_owned()))
+            .unwrap()
+    );
+}
+
 fn loss(re: &str, from: &str, since: i64) -> Lost {
     Lost {
         re: re.into(),

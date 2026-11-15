@@ -1757,13 +1757,15 @@ fn a_server_s_cursor_is_its_own_after_another_answered_as_it() {
         let id =
             |sent: Result<Value, String>| sent.unwrap()["message_id"].as_str().unwrap().to_owned();
         reports(&rex, "devbox", "host-s");
-        rex.run(|| space.send("request-1", "@bob@devbox hello"))
-            .unwrap();
+        let devbox = id(rex.run(|| space.send("request-1", "@bob@devbox hello")));
         rex.answer_with(
             json!({"host_id": "host-s", "can_reply": true, "epoch": "e-studio",
             "result": {"id": "x", "to": "bob", "status": "accepted"},
-            "outbox": [{"seq": 1_000_000, "re": "nothing", "thread": "t", "from": "eve",
-                "message_id": "f-1", "text": ""}], "more": false}),
+            "outbox": [
+                {"seq": 1, "re": devbox, "thread": "t", "from": "bob",
+                    "message_id": "d-1", "text": "bob 1"},
+                {"seq": 1_000_000, "re": "nothing", "thread": "t", "from": "eve",
+                    "message_id": "f-1", "text": ""}], "more": false}),
         );
         run_label(&space, &rex, "devbox");
         let store = crate::relay::tests_support::store(&space.state);
@@ -1795,8 +1797,8 @@ fn a_server_s_cursor_is_its_own_after_another_answered_as_it() {
                 "SELECT author_alias_snapshot, body FROM collaboration_messages
                  WHERE request_id LIKE 'relay-reply:%' ORDER BY rowid"
             ),
-            [["eve@studio", "eve 1"]],
-            "{then}"
+            [["bob@devbox", "bob 1"], ["eve@studio", "eve 1"]],
+            "{then}: devbox's seq 1 of that epoch is not studio's"
         );
         assert_eq!(
             store.ack_through(REX, "studio", "host-s").unwrap(),
