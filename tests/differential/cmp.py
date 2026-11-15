@@ -6,6 +6,7 @@ SCRUB = {"REX_BLOCK","REX_SESSION","REX_CLIENT","REX_SERVER","CLAUDE_SESSION_ID"
  "CLAUDE_CODE_MESSAGING_SOCKET","CLAUDE_CODE_MESSAGING_TOKEN","CLAUDE_CODE_EXECPATH","CLAUDE_PID","CLAUDECODE","CLAUDE_EFFORT"}
 def clean(line, drop):
     line = re.sub(r"127\.0\.0\.1:[0-9]+", "127.0.0.1:<PORT>", line)
+    line = re.sub(r'\\"port\\":[0-9]+', r'\\"port\\":<PORT>', line)
     if line.startswith('{"env"') or line.startswith('{"args"'):
         r = json.loads(line); r["env"] = [p for p in r["env"] if p[0] not in drop]
         return json.dumps({"args": r["args"], "env": r["env"]})

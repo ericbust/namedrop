@@ -32,6 +32,14 @@ class Comparison(unittest.TestCase):
             self.assertEqual(self.compare(prefix + 'same\n', prefix + 'same\n'), 0)
             self.assertNotEqual(self.compare(prefix + 'before\n', prefix + 'after\n'), 0)
 
+    def test_a_file_s_loopback_port_is_normalized(self):
+        prefix='## files (set)\n'
+        def row(port,pid):
+            text=json.dumps({"pid":pid,"port":port},separators=(",",":"))
+            return json.dumps({"path":"<STATE>/dashboard/server.json","text":text},sort_keys=True)+'\n'
+        self.assertEqual(self.compare(prefix+row(52285,"<PID>"),prefix+row(53111,"<PID>")),0)
+        self.assertNotEqual(self.compare(prefix+row(52285,"<PID>"),prefix+row(52285,"other")),0)
+
     def test_package_lock_pin_is_explicit_and_exact(self):
         prefix='## files (set)\n'
         def row(path,text):
