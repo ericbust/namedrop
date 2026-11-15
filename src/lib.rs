@@ -101,8 +101,8 @@ pub use installed_runtime::reexec_if_replaced as runtime_reexec_if_replaced;
 pub use installed_runtime::validate_update_manifest;
 pub use installed_runtime::{
     Retirement, begin_removal as runtime_begin_removal,
-    command_guard_allow_removed as runtime_removal_guard, retirement,
-    standalone as runtime_standalone,
+    command_guard_allow_removed as runtime_removal_guard, own_state as runtime_own_state,
+    retirement, standalone as runtime_standalone,
 };
 pub use integration::{
     AgentRuntime, AttachedContext, CONTEXT_DELIVERY_OPERATIONS, CatalogExample, CatalogOperation,

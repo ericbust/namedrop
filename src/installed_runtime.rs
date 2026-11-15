@@ -121,6 +121,15 @@ pub(crate) fn replacement(state: &std::path::Path) -> Option<std::process::Comma
     })
 }
 
+/// The state directory this installed runtime belongs to, or `None` for a
+/// build that runs outside a runtime directory.
+pub fn own_state() -> Option<PathBuf> {
+    directory()
+        .ok()
+        .flatten()
+        .and_then(|runtime| runtime.parent().map(std::path::Path::to_path_buf))
+}
+
 pub(crate) fn directory() -> Result<Option<PathBuf>, String> {
     let executable = std::env::current_exe()
         .and_then(fs::canonicalize)

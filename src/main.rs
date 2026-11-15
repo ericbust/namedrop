@@ -215,8 +215,20 @@ fn main() -> ExitCode {
         }
     };
     let selected_state = cli.explicit_state().map(Path::to_path_buf).or_else(|| {
-        if cli.rex_ensure_from_server() || cli.install_options().is_some() {
-            locator::state_directory(None, namedrop::mux::MuxKind::Rex, |n| inherited.var(n))
+        let rex =
+            || locator::state_directory(None, namedrop::mux::MuxKind::Rex, |n| inherited.var(n));
+        if cli.install_options().is_some() {
+            // `install` acts on the state it runs from. Without a named one,
+            // an installed runtime's is its own: Herdr's launcher must not
+            // reach a standalone state through the record.
+            inherited
+                .var("NAMEDROP_STATE_DIR")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .or_else(namedrop::runtime_own_state)
+                .or_else(rex)
+        } else if cli.rex_ensure_from_server() {
+            rex()
         } else {
             state_directory(&cli.runtime, inherited)
         }
