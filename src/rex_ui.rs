@@ -283,12 +283,22 @@ pub fn error_line(error: &str) -> String {
 mod tests;
 
 /// A config start is accepted only when its socket peer is its parent.
-/// Refusal performs no protocol request or state lookup.
+/// Refusal performs no protocol request or state lookup. An accepted start
+/// is keyed by the endpoint the server names itself by, which `prove` reads,
+/// as each action's `endpoint()` is, however `REX_SERVER` spells the socket.
 pub fn server_start_endpoint(
     inherited: &dyn crate::mux::home::Inherited,
     parent: u32,
+    prove: impl FnOnce(&Path) -> Option<Endpoint>,
 ) -> Option<Endpoint> {
     let socket = crate::mux::home::rex_socket(inherited)?;
     let peer = inherited.peer(&socket).ok()?;
-    (peer == parent && parent > 1).then(|| Endpoint::parse(&format!("rex:{}", socket.display())))
+    (peer == parent && parent > 1)
+        .then(|| prove(&socket))
+        .flatten()
+}
+
+/// The endpoint the local Rex server at `socket` names itself by.
+pub fn local_endpoint(socket: &Path) -> Option<Endpoint> {
+    crate::mux::rex::local_endpoint(socket).ok()
 }

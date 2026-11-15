@@ -195,27 +195,41 @@ fn load_start_guard_accepts_only_the_server_parent() {
         peer: Some(123),
         calls: RefCell::default(),
     };
+    // The server names itself by its listener, which the bridge is keyed by.
+    let proved = RefCell::new(Vec::new());
+    let prove = |socket: &Path| {
+        proved.borrow_mut().push(socket.to_owned());
+        Some(Endpoint::parse("rex:/private/tmp/rex guard.sock"))
+    };
     assert_eq!(
-        server_start_endpoint(&start, 123).unwrap().key,
-        "rex:/tmp/rex guard.sock"
+        server_start_endpoint(&start, 123, prove).unwrap().key,
+        "rex:/private/tmp/rex guard.sock"
     );
-    assert!(server_start_endpoint(&start, 456).is_none());
+    assert_eq!(
+        proved.borrow().as_slice(),
+        [Path::new("/tmp/rex guard.sock")]
+    );
+    assert!(server_start_endpoint(&start, 123, |_| None).is_none());
+    assert!(server_start_endpoint(&start, 456, prove).is_none());
     assert_eq!(
         start.calls.borrow().as_slice(),
         [
+            Path::new("/tmp/rex guard.sock"),
             Path::new("/tmp/rex guard.sock"),
             Path::new("/tmp/rex guard.sock")
         ]
     );
     start.peer = None;
-    assert!(server_start_endpoint(&start, 123).is_none());
+    assert!(server_start_endpoint(&start, 123, prove).is_none());
     start.server = Some("tcp://remote:7000".into());
     start.calls.borrow_mut().clear();
-    assert!(server_start_endpoint(&start, 123).is_none());
+    assert!(server_start_endpoint(&start, 123, prove).is_none());
     assert!(start.calls.borrow().is_empty());
     start.server = None;
-    assert!(server_start_endpoint(&start, 123).is_none());
+    assert!(server_start_endpoint(&start, 123, prove).is_none());
     assert!(start.calls.borrow().is_empty());
+    // A refused start makes no protocol request.
+    assert_eq!(proved.borrow().len(), 1);
 }
 
 #[test]

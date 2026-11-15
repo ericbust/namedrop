@@ -57,6 +57,26 @@ fn refused_config_start_and_unknown_action_write_nothing_and_call_no_host() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// The U6 review's F1 and F3: the guard's accept path, at the binary, with
+/// a scripted server that starts the command as Rex's server does.
+#[test]
+fn the_server_started_load_time_start_runs_one_bridge_keyed_by_the_proven_endpoint() {
+    let output = binary::command("python3")
+        .args([
+            "-I",
+            concat!(env!("CARGO_MANIFEST_DIR"), "/tests/rex_ensure.py"),
+            binary::namedrop_path(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[cfg(feature = "test-support")]
 #[test]
 fn owner_activation_refreshes_only_a_registered_module_and_keeps_config_bytes() {

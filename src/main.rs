@@ -253,7 +253,11 @@ fn main() -> ExitCode {
     }
     if cli.rex_ensure_from_server() {
         let parent = unsafe { libc::getppid() } as u32;
-        let Some(endpoint) = namedrop::rex_ui::server_start_endpoint(inherited, parent) else {
+        let Some(endpoint) = namedrop::rex_ui::server_start_endpoint(
+            inherited,
+            parent,
+            namedrop::rex_ui::local_endpoint,
+        ) else {
             return ExitCode::SUCCESS;
         };
         let state = selected_state;
