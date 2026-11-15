@@ -86,11 +86,19 @@ with tempfile.TemporaryDirectory(prefix="nd-words-", dir="/tmp") as folder:
         if method == "target.resolve":
             return {"results": [{"status": "resolved", "target": {"kind": "block", "id": "p1", "session_id": "s1"}}]}
         raise AssertionError("unhandled scripted method " + method)
-    # Hold the bridge's lock so screen commands start no background process.
-    bridge = state / "rex-bridge"
-    bridge.mkdir()
-    lock = (bridge / (hashlib.sha256(("rex:" + str(sock)).encode()).hexdigest() + ".lock")).open("w")
-    fcntl.flock(lock, fcntl.LOCK_EX)
+    held = []
+
+    def hold_bridge(at):
+        """Holds `at`'s bridge lock, so its commands start no bridge. A
+        bridge would register its relay with `client.keymap` and keep the
+        scripted server, which serves one connection at a time, from the
+        command under test."""
+        bridge = at / "rex-bridge"
+        bridge.mkdir()
+        lock = (bridge / (hashlib.sha256(("rex:" + str(sock)).encode()).hexdigest() + ".lock")).open("w")
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        held.append(lock)
+    hold_bridge(state)
     server = scripted.Server(sock, answer)
     print("scripted server pid " + str(os.getpid()))
     try:
@@ -137,6 +145,7 @@ with tempfile.TemporaryDirectory(prefix="nd-words-", dir="/tmp") as folder:
         herdr_state, rex_state = root / "herdr-state", root / "rex-state"
         installed(herdr_state, "herdr")
         selected = installed(rex_state, "standalone")
+        hold_bridge(rex_state)
         record = home / ".config/namedrop/state-directory"
         record.parent.mkdir(parents=True)
         record.write_text(str(herdr_state) + "\n")
