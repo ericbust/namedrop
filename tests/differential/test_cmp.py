@@ -66,5 +66,18 @@ class Comparison(unittest.TestCase):
         self.assertEqual(self.compare(prefix + row("0o755"), prefix + row("0o755")), 0)
         self.assertNotEqual(self.compare(prefix + row("0o755"), prefix + row("0o644")), 0)
 
+    def test_runtime_owner_pin_is_explicit_and_exact(self):
+        prefix='## files (set)\n'
+        def row(path,text,mode="0o600"):
+            return json.dumps({"mode":mode,"path":path,"text":text},sort_keys=True)+'\n'
+        pin=row("<STATE>-runtime/runtime/owner", "herdr\n")
+        self.assertNotEqual(self.compare(prefix,prefix+pin),0)
+        self.assertEqual(self.compare(prefix,prefix+pin,["--allow-runtime-owner"]),0)
+        self.assertNotEqual(self.compare(prefix,prefix,["--allow-runtime-owner"]),0)
+        self.assertNotEqual(self.compare(prefix+pin,prefix+pin,["--allow-runtime-owner"]),0)
+        self.assertNotEqual(self.compare(prefix,prefix+row("<STATE>-runtime/runtime/owner", "standalone\n"),["--allow-runtime-owner"]),0)
+        self.assertNotEqual(self.compare(prefix,prefix+row("<STATE>/runtime/owner", "herdr\n"),["--allow-runtime-owner"]),0)
+        self.assertNotEqual(self.compare(prefix,prefix+row("<STATE>-runtime/runtime/owner", "herdr\n", "0o644"),["--allow-runtime-owner"]),0)
+
 if __name__ == '__main__':
     unittest.main()

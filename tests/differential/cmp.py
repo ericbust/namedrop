@@ -49,16 +49,23 @@ def load(path, drop):
                 continue
         sets.add((section, cleaned))
     return steps, sets
+OWNER = ("## files (set)", json.dumps({"mode": "0o600", "path": "<STATE>-runtime/runtime/owner", "text": "herdr\n"}, sort_keys=True))
 def show(row):
     return " | ".join(part[:28] if index < len(row) - 1 else part[:330] for index, part in enumerate(row))
 MARKERS = SCRUB - {"NAMEDROP_HERDR_TIMEOUT_MS", "NAMEDROP_REX_TIMEOUT_MS"}
 for title, drop in (("with the scrub's names removed and both timeouts kept", MARKERS),):
     (steps_a, sa), (steps_b, sb) = load(sys.argv[1], drop), load(sys.argv[2], drop)
+    missing = "--allow-runtime-owner" in sys.argv and OWNER not in sb
+    if "--allow-runtime-owner" in sys.argv:
+        # U4's pin for a base from before U4: the right report must write the
+        # file, and the left one, which is compared as usual, must not.
+        sb.discard(OWNER)
     print("== steps in order:", "equal" if steps_a == steps_b else "differ")
     for line in difflib.unified_diff([show(row) for row in steps_a], [show(row) for row in steps_b], "left", "right", n=1, lineterm=""):
         print(line)
     print("== sets", title, ": only-left", len(sa - sb), "only-right", len(sb - sa))
     for sec, line in sorted(sa - sb): print("<", sec[:28], "|", line[:330])
     for sec, line in sorted(sb - sa): print(">", sec[:28], "|", line[:330])
+    if missing: print("> missing the pinned", OWNER[1])
 
-raise SystemExit(1 if sa != sb or steps_a != steps_b else 0)
+raise SystemExit(1 if sa != sb or steps_a != steps_b or missing else 0)
