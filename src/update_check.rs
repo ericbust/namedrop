@@ -24,20 +24,15 @@ fn enabled() -> bool {
     true
 }
 
-fn standalone(state: &Path) -> Result<bool, String> {
-    match fs::read_to_string(state.join("runtime/owner")) {
-        Ok(owner) => match owner.trim() {
-            "standalone" => Ok(true),
-            "herdr" => Ok(false),
-            _ => Err("Invalid Namedrop runtime owner".into()),
-        },
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error.to_string()),
-    }
+/// Whether the state's owner is a standalone install. Any other owner, an
+/// unreadable one included, keeps Herdr's settings and notice, as every state
+/// did before owners existed.
+fn standalone(state: &Path) -> bool {
+    crate::installed_runtime::standalone(state) == Ok(true)
 }
 
 pub(crate) fn settings_path(state: &Path) -> Result<PathBuf, String> {
-    if standalone(state)? {
+    if standalone(state) {
         return env::var_os("HOME")
             .map(PathBuf::from)
             .filter(|path| path.is_absolute())
@@ -154,7 +149,7 @@ pub(crate) fn available(state: &Path) -> Option<AvailableUpdate> {
         checked_at: cache.checked_at,
         last_success_at: cache.last_success_at,
         last_error: cache.last_error,
-        standalone: standalone(state).ok()?,
+        standalone: standalone(state),
     })
 }
 

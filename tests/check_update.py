@@ -115,19 +115,29 @@ class UpdateCheck(unittest.TestCase):
         def guarded_run(command, **kwargs):
             self.assertEqual(command, ['xcode-select', '-p'], 'Git must never start')
             return original_run(command, **kwargs)
-        for owner in ('standalone', 'herdr'):
+        def checked(owner, now):
             (self.state / 'runtime/owner').write_text(owner)
             with patch.object(worker.sys, 'platform', 'darwin'), \
                     patch.dict(os.environ, PATH=str(tools) + ':/usr/bin:/bin'), \
                     patch.object(worker, 'run', side_effect=guarded_run) as run:
                 self.assertEqual(worker.shutil.which('git'), '/usr/bin/git')
-                self.check(now=(1 if owner == 'standalone' else 2) * worker.DAY_MS)
-            self.assertEqual(run.call_args_list[0].args[0], ['xcode-select', '-p'])
-            self.assertEqual(run.call_count, 1)
-            self.assertEqual(self.cache()['status'], 'skipped')
-            self.assertEqual(self.cache()['reason'], 'developer_tools_missing')
-            self.assertIsNone(self.cache()['remote_version'])
-            self.assertNotIn('git', self.calls)
+                self.check(now=now)
+            return run
+        run = checked('standalone', worker.DAY_MS)
+        self.assertEqual(run.call_args_list[0].args[0], ['xcode-select', '-p'])
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(self.cache()['status'], 'skipped')
+        self.assertEqual(self.cache()['reason'], 'developer_tools_missing')
+        self.assertIsNone(self.cache()['remote_version'])
+        self.assertNotIn('git', self.calls)
+        # Herdr's check is as it was before standalone installs: it never
+        # runs xcode-select, and asks Git as always.
+        run = checked('herdr', 2 * worker.DAY_MS)
+        run.assert_not_called()
+        self.assertEqual(self.calls, ['registration', 'git', 'manifest'])
+        self.assertNotIn('status', self.cache())
+        self.assertNotIn('reason', self.cache())
+        self.assertEqual(self.cache()['remote_version'], self.remote)
 
     def test_a_missing_or_tampered_source_runs_no_git_and_records_a_bounded_error(self):
         self.standalone()
@@ -166,6 +176,42 @@ class UpdateCheck(unittest.TestCase):
                 self.assertTrue(cache['last_error'])
                 self.assertLessEqual(len(cache['last_error']), 512)
                 self.assertTrue(cache['last_error'].isprintable())
+
+    def test_only_a_standalone_owner_reads_its_source_and_any_other_is_checked_as_herdr(self):
+        self.standalone()
+        owner = self.state / 'runtime/owner'
+        for label, write in [
+                ('Herdr', lambda: owner.write_text('Herdr\n')),
+                ('empty', lambda: owner.write_text('')),
+                ('standalone-ish', lambda: owner.write_text('standalone-ish\n')),
+                ('not UTF-8', lambda: owner.write_bytes(b'\xffstandalone')),
+                ('a directory', lambda: owner.mkdir()),
+                ('herdr', lambda: owner.write_text('herdr\n')),
+                ('missing', lambda: None)]:
+            with self.subTest(label):
+                if owner.is_dir():
+                    owner.rmdir()
+                owner.unlink(missing_ok=True)
+                write()
+                self.calls.clear()
+                (self.state / 'update-check.json').unlink(missing_ok=True)
+                self.now = getattr(self, 'now', 0) + worker.DAY_MS
+                with patch.object(worker, 'latest_tag', side_effect=AssertionError('the tag listing ran')), \
+                        patch.object(worker, 'developer_tools_missing', side_effect=AssertionError('xcode-select ran')):
+                    self.check(now=self.now)
+                self.assertEqual(self.calls, ['registration', 'git', 'manifest'])
+                self.assertEqual(self.cache()['source']['requested_ref'], 'main')
+                self.assertEqual(self.cache()['remote_version'], self.remote)
+                self.assertIsNone(self.cache()['last_error'])
+        if owner.is_dir():
+            owner.rmdir()
+        owner.write_text(' standalone \n')
+        self.calls.clear()
+        with patch.object(worker, 'run', return_value=subprocess.CompletedProcess([], 0, 'a' * 40 + '\trefs/tags/v2.0.0\n', '')):
+            self.check(now=self.now + worker.DAY_MS)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.cache()['source']['kind'], 'archive')
+        self.assertEqual(self.cache()['remote_version'], '2.0.0')
 
     def test_other_git_binaries_and_working_developer_tools_are_allowed(self):
         with patch.object(worker.sys, 'platform', 'darwin'), \

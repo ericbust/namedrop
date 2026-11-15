@@ -356,6 +356,55 @@ fn standalone_owner_selects_its_home_settings_and_download_notice() {
     );
 }
 
+/// The U10 review's F5: only `standalone` picks the standalone settings and
+/// text. Any other owner, an invalid or unreadable one included, keeps
+/// Herdr's settings file and notice, as every state did before owners.
+#[test]
+fn an_owner_other_than_standalone_keeps_herdrs_settings_and_notice() {
+    let f = Fixture::new();
+    if update_profile::isolate(&f.root, &f.home) {
+        return;
+    }
+    f.seed("9.10.0");
+    let owner = f.state.join("runtime/owner");
+    fs::create_dir_all(owner.parent().unwrap()).unwrap();
+    let standalone = f.home.join(".config/namedrop/settings.json");
+    fs::create_dir_all(standalone.parent().unwrap()).unwrap();
+    fs::write(&standalone, "{\"check_for_updates\":false}").unwrap();
+    let herdr = format!(
+        "Namedrop 9.10.0 is available (you have {}). Update: herdr plugin action invoke update --plugin namedrop",
+        env!("CARGO_PKG_VERSION")
+    );
+    let mut now = 1000;
+    for (label, contents) in [
+        ("Herdr", Some(&b"Herdr\n"[..])),
+        ("empty", Some(&b""[..])),
+        ("standalone-ish", Some(&b"standalone-ish\n"[..])),
+        ("not UTF-8", Some(&b"\xffstandalone"[..])),
+        ("a directory", None),
+        ("herdr", Some(&b"herdr\n"[..])),
+    ] {
+        let _ = fs::remove_file(&owner);
+        let _ = fs::remove_dir(&owner);
+        match contents {
+            Some(contents) => fs::write(&owner, contents).unwrap(),
+            None => fs::create_dir(&owner).unwrap(),
+        }
+        let _ = fs::remove_file(f.state.join("update-notice.json"));
+        f.settings("{\"check_for_updates\":true}");
+        now += DAY_MS;
+        assert_eq!(
+            f.notice(now).map(|notice| notice["systemMessage"].clone()),
+            Some(Value::from(herdr.clone())),
+            "{label}"
+        );
+        let _ = fs::remove_file(f.state.join("update-notice.json"));
+        f.settings("{\"check_for_updates\":false}");
+        now += DAY_MS;
+        assert_eq!(f.notice(now), None, "{label}: Herdr's opt-out was not read");
+    }
+}
+
 #[test]
 fn standalone_tag_check_reaches_the_real_session_hook() {
     let f = Fixture::new();

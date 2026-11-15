@@ -90,6 +90,16 @@ def registration():
     return json.loads(output.stdout)
 
 
+def standalone(state):
+    """Whether `runtime/owner` names a standalone install, as
+    `installed_runtime::packages::owner` reads it. Any other owner, or none,
+    is checked as Herdr's, as every state was before owners existed."""
+    try:
+        return (state / 'runtime/owner').read_text().strip() == 'standalone'
+    except (OSError, ValueError):
+        return False
+
+
 def standalone_source(state):
     source = read_json(state / 'runtime/source.json')
     if not version(source['version']):
@@ -245,15 +255,11 @@ def check(state, settings, now=None, lookup_registration=registration,
         cache = dict(schema_version=1, checked_at=now, source=None,
                      remote_commit=None, remote_version=None, last_success_at=None, last_error=None)
         try:
-            owner_path = state / 'runtime/owner'
-            owner = owner_path.read_text().strip() if owner_path.exists() else 'herdr'
-            if owner not in ('herdr', 'standalone'):
-                raise ValueError('Invalid runtime owner')
-            source = (standalone_source(state) if owner == 'standalone'
-                      else source_from_registration(lookup_registration()))
+            owned = standalone(state)
+            source = standalone_source(state) if owned else source_from_registration(lookup_registration())
             cache['source'] = source
             if source is not None:
-                if developer_tools_missing():
+                if owned and developer_tools_missing():
                     cache.update(status='skipped', reason='developer_tools_missing')
                     atomic_write(path, cache)
                     return
@@ -263,7 +269,7 @@ def check(state, settings, now=None, lookup_registration=registration,
                         and type(previous.get('last_success_at')) is int):
                     for key in ('remote_commit', 'remote_version', 'last_success_at'):
                         cache[key] = previous.get(key)
-                if owner == 'standalone':
+                if owned:
                     commit, available = latest_tag(source)
                 else:
                     commit = lookup_commit(source)
