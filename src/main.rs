@@ -46,6 +46,23 @@ fn main() -> ExitCode {
         println!("{}", include_str!("../runtime.json").trim());
         return ExitCode::SUCCESS;
     }
+    // install.sh asks this before its confirmation. Like the contract query,
+    // it reads no state and writes nothing.
+    if env::args_os().skip(1).eq(["--install-preview"]) {
+        return match namedrop::rex_ui::install_preview(
+            &namedrop::InheritedDirectories::from_environment(),
+            inherited,
+        ) {
+            Ok(preview) => {
+                println!("{preview}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                ExitCode::from(69)
+            }
+        };
+    }
     let raw: Vec<_> = env::args_os().skip(1).collect();
     let raw_state = match raw.as_slice() {
         [mode, state, ..]
