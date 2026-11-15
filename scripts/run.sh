@@ -10,8 +10,7 @@ if [ -n "${HERDR_PANE_ID-}" ]; then
   set -- --herdr-pane "$HERDR_PANE_ID" "$@"
 fi
 if [ "$command" = activate ]; then
-  exec python3 "$namedrop_root/scripts/runtime.py" "$namedrop_root" \
-    --state-dir "$HERDR_PLUGIN_STATE_DIR" --verify activate "$@"
+  exec python3 "$namedrop_root/scripts/runtime.py" "$namedrop_root" "$@"
 fi
 if [ -n "${HERDR_PLUGIN_STATE_DIR-}" ] && [ -x "$HERDR_PLUGIN_STATE_DIR/runtime/namedrop" ]; then
   exec "$HERDR_PLUGIN_STATE_DIR/runtime/namedrop" "$@"

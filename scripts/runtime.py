@@ -929,12 +929,17 @@ if __name__ == '__main__':
         # No argparse: macOS's system Python caches each newly imported module
         # under HOME, and Herdr's activation writes nothing new there.
         root, *arguments = sys.argv[1:]
-        require(arguments[:1] == ['--state-dir'] and len(arguments) > 1 and arguments[1]
-                and arguments[2:3] == ['--verify'] and len(arguments) > 3,
-                'Usage: runtime.py ROOT --state-dir DIR --verify activate [ARGUMENT...]')
-        require(arguments[3] == 'activate', f'Unsupported runtime verification: {arguments[3]}')
-        os.environ['HERDR_PLUGIN_STATE_DIR'] = arguments[1]
-        sys.exit(activate(Path(root).resolve(), arguments[4:]))
+        if arguments[:1] == ['--state-dir']:
+            require(len(arguments) > 3 and arguments[1] and arguments[2] == '--verify',
+                    'Usage: runtime.py ROOT [--state-dir DIR --verify activate] [ARGUMENT...]')
+            require(arguments[3] == 'activate', f'Unsupported runtime verification: {arguments[3]}')
+            os.environ['HERDR_PLUGIN_STATE_DIR'] = arguments[1]
+            arguments = arguments[4:]
+        # Without them this is run.sh's `ROOT ARGUMENT...`, read as
+        # `--state-dir "$HERDR_PLUGIN_STATE_DIR" --verify activate`. run.sh
+        # keeps that shape because a released updater calls an update live
+        # only when the new run.sh is byte for byte the installed one.
+        sys.exit(activate(Path(root).resolve(), arguments))
     except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError, subprocess.SubprocessError) as error:
         print(f'Namedrop runtime activation stopped: {error}', file=sys.stderr)
         sys.exit(2)

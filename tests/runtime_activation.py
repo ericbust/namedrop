@@ -80,6 +80,56 @@ def archive(ref, destination):
         source.extractall(destination, filter='data')
 
 
+def release_tags():
+    repository = os.environ.get('NAMEDROP_TEST_REPOSITORY', str(REPO))
+    result = subprocess.run(['git', '-C', repository, 'tag', '--list', 'v*', '--sort=-v:refname'],
+                            capture_output=True, text=True)
+    return result.stdout.split() if result.returncode == 0 else []
+
+
+# Run in its own interpreter: the release's update.py and runtime.py, with an
+# installed checkout of that release, a published runtime, and a target ref
+# that holds the release's contract and manifest and the given run.sh.
+RELEASED_UPDATER = r'''
+import json, os, shutil, subprocess, sys
+from pathlib import Path
+old, run_sh, work = map(Path, sys.argv[1:4])
+def git(root, *args):
+    return subprocess.check_output(['git', '-C', str(root), *args], text=True).strip()
+installed = work / 'installed'
+shutil.copytree(old / 'scripts', installed / 'scripts')
+for name in ('runtime.json', 'herdr-plugin.toml'):
+    shutil.copyfile(old / name, installed / name)
+sys.path.insert(0, str(installed / 'scripts'))
+import update, runtime
+state = Path(os.environ['HERDR_PLUGIN_STATE_DIR'])
+release = state / 'runtime/releases' / ('a' * 64)
+release.mkdir(parents=True)
+shutil.copyfile(old / 'runtime.json', release / 'runtime.json')
+(release / 'namedrop').write_text('#!/bin/sh\nexit 0\n')
+(release / 'namedrop').chmod(0o700)
+(state / 'runtime/current').symlink_to(Path('releases') / ('a' * 64))
+(state / 'runtime/namedrop').write_text(runtime.LAUNCHER)
+(state / 'runtime/namedrop').chmod(0o700)
+source = work / 'source'
+(source / 'scripts').mkdir(parents=True)
+git(source, 'init', '--quiet')
+for name in ('runtime.json', 'herdr-plugin.toml'):
+    shutil.copyfile(old / name, source / name)
+shutil.copyfile(run_sh, source / 'scripts/run.sh')
+git(source, 'add', '.')
+git(source, '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--quiet', '-m', 'target')
+git(source, 'tag', 'target')
+git(work, 'clone', '--quiet', '--bare', str(source), str(work / 'origin.git'))
+git(work / 'origin.git', 'config', 'uploadpack.allowFilter', 'true')
+(work / 'inspect').mkdir()
+target = update.prepare_target({'plugin_root': str(installed), 'source': {
+    'owner': 'fixture', 'repo': 'source', 'requested_ref': 'target', 'managed_path': str(installed)}},
+    work / 'inspect')
+print(json.dumps(target['live']))
+'''
+
+
 def invoke(root, env, *, explicit=True):
     args = [sys.executable, str(root / 'scripts/runtime.py'), str(root)]
     if explicit:
@@ -140,9 +190,26 @@ class ActivationChecks(unittest.TestCase):
             self.assertIn('Runtime file has an unexpected type', failed.stderr)
             self.assertEqual(os.readlink(chosen / 'runtime/current'), selected)
             self.assertEqual(foreign.read_text(), 'preserve')
+            owner.unlink()
             args[args.index('activate')] = 'install'
             rejected = subprocess.run(args, env=env, cwd=base, capture_output=True, text=True, timeout=60)
-            self.assertNotEqual(rejected.returncode, 0, '--verify install belongs to U8')
+            self.assertEqual((rejected.returncode, rejected.stdout, rejected.stderr),
+                             (2, '', 'Namedrop runtime activation stopped: Unsupported runtime verification: install\n'),
+                             '--verify install belongs to U8')
+            self.assertEqual(os.readlink(chosen / 'runtime/current'), selected)
+            self.assertFalse(owner.exists())
+
+    def test_run_sh_shape_means_herdr_state_and_activate(self):
+        with tempfile.TemporaryDirectory(prefix='namedrop-u4-') as directory:
+            base = Path(directory)
+            env = environment(base)
+            root = base / 'checkout'
+            shutil.copytree(REPO / 'scripts', root / 'scripts')
+            fixture_release(root)
+            result = invoke(root, env, explicit=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout)['data']['state_directory'], env['HERDR_PLUGIN_STATE_DIR'])
+            self.assertEqual((base / 'state/runtime/owner').read_text(), 'herdr\n')
 
     def test_run_sh_forwards_state_and_pane(self):
         with tempfile.TemporaryDirectory(prefix='namedrop-u4-') as directory:
@@ -157,8 +224,40 @@ class ActivationChecks(unittest.TestCase):
                                     capture_output=True, text=True, timeout=60)
             self.assertEqual(result.returncode, 0, result.stderr)
             args = json.loads(result.stdout)
-            self.assertEqual(args[2:], ['--state-dir', env['HERDR_PLUGIN_STATE_DIR'], '--verify', 'activate',
-                                       '--herdr-pane', 'p', 'activate', '--input-json', '{"confirmed":true}'])
+            # The shape every release's run.sh passes; runtime.py reads it as
+            # --state-dir "$HERDR_PLUGIN_STATE_DIR" --verify activate.
+            self.assertEqual(args[1:], [str(REPO), '--herdr-pane', 'p', 'activate', '--input-json',
+                                        '{"confirmed":true}'])
+
+    def test_released_updaters_call_this_update_live(self):
+        # A released updater calls an update live only when the target's
+        # run.sh is byte for byte the installed one (scripts/update.py's
+        # prepare_target), so run.sh must not change.
+        refs = os.environ.get('NAMEDROP_TEST_RELEASE_REFS', '').split() or release_tags()[:1]
+        if not refs:
+            self.skipTest('no release tag in this clone')
+        for ref in refs:
+            with self.subTest(ref=ref), tempfile.TemporaryDirectory(prefix='namedrop-u4-live-') as directory:
+                base = Path(directory)
+                old = base / 'old'
+                archive(ref, old)
+                changed = base / 'changed-run.sh'
+                changed.write_text((REPO / 'scripts/run.sh').read_text() + '# changed\n')
+                verdicts = {}
+                for name, run_sh in (('head', REPO / 'scripts/run.sh'), ('changed', changed)):
+                    work = base / name
+                    profile = base / (name + '-profile')
+                    profile.mkdir()
+                    env = environment(profile)
+                    remote = work / 'origin.git'
+                    env.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull, GIT_ALLOW_PROTOCOL='file',
+                               GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0=f'url.{remote.as_uri()}.insteadOf',
+                               GIT_CONFIG_VALUE_0='https://github.com/fixture/source.git')
+                    result = subprocess.run([sys.executable, '-I', '-c', RELEASED_UPDATER, str(old), str(run_sh),
+                                             str(work)], env=env, capture_output=True, text=True, timeout=120)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    verdicts[name] = json.loads(result.stdout)
+                self.assertEqual(verdicts, {'head': True, 'changed': False})
 
     def test_rex_preflight(self):
         with tempfile.TemporaryDirectory(prefix='namedrop-u4-') as directory:
@@ -216,7 +315,8 @@ class ActivationChecks(unittest.TestCase):
             archive(ref, old)
             fixture = base / 'fixture'
             results = []
-            for source, explicit in ((old, False), (REPO, True)):
+            # Herdr runs run.sh's shape; the explicit options must mean the same.
+            for source, explicit in ((old, False), (REPO, False), (REPO, True)):
                 fixture.mkdir()
                 env = environment(fixture)
                 root = fixture / 'checkout'
@@ -233,20 +333,21 @@ class ActivationChecks(unittest.TestCase):
                             contents = os.readlink(path)
                         elif path.is_file():
                             if path.name == 'owner':
-                                self.assertTrue(explicit)
+                                self.assertIs(source, REPO)
                                 self.assertEqual(path.read_text(), 'herdr\n')
                                 continue
                             contents = path.read_bytes()
                         else:
                             continue
                         files[str(path.relative_to(fixture))] = contents
-                    if explicit:
+                    if source is REPO:
                         self.assertEqual((fixture / 'state/runtime/owner').read_text(), 'herdr\n')
                     snapshots.append((result.returncode, result.stdout, result.stderr, files,
                                       (fixture / 'calls').read_bytes()))
                 results.append(snapshots)
                 shutil.rmtree(fixture)
             self.assertEqual(results[0], results[1], 'publish/live/schema/rollback differ beyond owner')
+            self.assertEqual(results[1], results[2], 'the explicit options differ from run.sh\'s shape')
 
 
 def upgrade_from(ref):
@@ -285,7 +386,7 @@ def upgrade_from(ref):
         with sqlite3.connect(base / 'state/namedrop.sqlite3') as db:
             rows = db.execute('SELECT * FROM pane_addresses ORDER BY address_id').fetchall()
             claims = db.execute('SELECT * FROM alias_claims ORDER BY alias').fetchall()
-        result = invoke(new, env)
+        result = invoke(new, env, explicit=False)
         assert result.returncode == 0, (result.stdout, result.stderr)
         expected = 'releases/' + hashlib.sha256(binary.read_bytes()).hexdigest()
         assert os.readlink(base / 'state/runtime/current') == expected
