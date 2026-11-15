@@ -355,10 +355,12 @@ fn mux_connect_surveys_a_scratch_server_through_a_rex_endpoint() {
     }
 }
 
-/// The bridge's stream on a real server resyncs a new session, and its kill
-/// closes the block and then the session. Set
-/// `NAMEDROP_REX_LIVE_HOME` to the scratch server's `HOME`, which the `rex`
-/// client runs with.
+/// The bridge's stream on a real server resyncs a new session, sees its
+/// shell set and then reset the root status, and its kill closes the block
+/// and then the session. Rex may send no event at all for the new block's
+/// startup, so the status changes come from shell builtins typed after
+/// attachment, which start no process. Set `NAMEDROP_REX_LIVE_HOME` to the
+/// scratch server's `HOME`, which the `rex` client runs with.
 #[test]
 #[ignore = "run with NAMEDROP_REX_LIVE=unix://<scratch server socket>, NAMEDROP_REX_LIVE_HOME, and -- --ignored --test-threads=1"]
 fn the_bridge_stream_follows_a_real_session_from_start_to_kill() {
@@ -407,15 +409,31 @@ fn the_bridge_stream_follows_a_real_session_from_start_to_kill() {
         seen.contains(&MuxEvent::Resync(crate::SpaceId::new(&session))),
         "{seen:?}"
     );
-    rex(&["kill", &session]);
-    while let Next::Event(event) = stream.next(Duration::from_millis(500)) {
-        seen.push(event);
-    }
     let slot = crate::mux::PaneSlot {
         space: crate::SpaceId::new(&session),
         pane: crate::mux::PaneId::new(&block),
         tab: None,
     };
+    for line in [
+        r"printf '\e]7501;state=working:app=probe\e\\'",
+        r"printf '\ec'",
+    ] {
+        rex(&["send", "-s", &session, "-b", &block, line]);
+        rex(&["send-key", "-s", &session, "-b", &block, "enter"]);
+        let mut step = Vec::new();
+        while let Next::Event(event) = stream.next(Duration::from_millis(500)) {
+            step.push(event);
+        }
+        assert!(
+            step.contains(&MuxEvent::AgentStatusChanged(slot.clone())),
+            "{line}: {step:?}"
+        );
+        seen.extend(step);
+    }
+    rex(&["kill", &session]);
+    while let Next::Event(event) = stream.next(Duration::from_millis(500)) {
+        seen.push(event);
+    }
     assert_eq!(
         seen[seen.len() - 2..],
         [

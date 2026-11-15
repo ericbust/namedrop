@@ -180,35 +180,45 @@ fn each_row_of_the_decode_table_yields_its_event_and_every_other_line_none() {
     assert_eq!(server.join().unwrap(), Some(1000));
 }
 
+/// Real event lines from a preview.19 scratch server, client events left out.
+/// Rex sent no `process_changed` and no `block_created` for the new
+/// session's block, so its `session_created` is all that announces it. Then
+/// the shell set the root status, reset the terminal, and was killed.
+const STARTUP_GAP: &str = include_str!("../fixtures/events/startup-gap.jsonl");
+
 #[test]
-fn a_session_without_startup_process_events_still_resyncs_before_it_closes() {
+fn a_session_whose_startup_events_never_came_resyncs_and_follows_its_status() {
     let state = State::new();
     let wake = Wake::new().unwrap();
     let (client, server) = serve("host-a", |server| {
-        let captured = lines();
-        send_events(
-            server,
-            &[
-                captured[0].clone(),
-                captured[52].clone(),
-                captured[54].clone(),
-            ],
-        );
+        let captured: Vec<Value> = STARTUP_GAP
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        send_events(server, &captured);
         server.close_code()
     });
     let mut stream = events(client, &state, &wake, Liveness::REX);
-    let space = SpaceId::new("session:01a1d75e-a97c-7d46-b30c-ab30e1f760bb");
-    for wanted in [
-        MuxEvent::Resync(space.clone()),
-        MuxEvent::PaneClosed(PaneSlot {
-            space: space.clone(),
-            pane: PaneId::new("block:01a1d75e-a97c-7e40-8e9b-755d9d5ff542"),
-            tab: None,
-        }),
-        MuxEvent::SpaceClosed(space),
-    ] {
-        assert_eq!(stream.next(Duration::from_secs(1)), Next::Event(wanted));
+    let space = SpaceId::new("session:01a1dce4-961e-7df2-98c6-90e1826ec304");
+    let slot = PaneSlot {
+        space: space.clone(),
+        pane: PaneId::new("block:01a1dce4-9620-705d-9c6b-938795894fd0"),
+        tab: None,
+    };
+    let mut decoded = Vec::new();
+    while let Next::Event(event) = stream.next(Duration::from_millis(300)) {
+        decoded.push(event);
     }
+    assert_eq!(
+        decoded,
+        [
+            MuxEvent::Resync(space.clone()),
+            MuxEvent::AgentStatusChanged(slot.clone()),
+            MuxEvent::AgentStatusChanged(slot.clone()),
+            MuxEvent::PaneClosed(slot),
+            MuxEvent::SpaceClosed(space),
+        ]
+    );
     drop(stream);
     assert_eq!(server.join().unwrap(), Some(1000));
 }
