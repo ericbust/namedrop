@@ -5,7 +5,7 @@ use std::{
     io::{Read, Write},
     os::unix::{fs::OpenOptionsExt, process::CommandExt},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -153,20 +153,20 @@ pub(crate) fn available(state: &Path) -> Option<AvailableUpdate> {
     })
 }
 
-/// Called only by startup reconciliation and pane lifecycle events. The child
-/// owns the lock and all subprocess/network work, so pane handling never waits.
+/// Called by startup reconciliation and pane lifecycle events, and for a
+/// standalone install by its Rex bridge. The child owns the lock and all
+/// subprocess/network work, so pane handling never waits. Returns the child
+/// it started, for a long-lived caller to reap.
 #[doc(hidden)]
-pub fn start(state: &Path, now: u64) {
-    let Ok(path) = settings_path(state) else {
-        return;
-    };
+pub fn start(state: &Path, now: u64) -> Option<Child> {
+    let path = settings_path(state).ok()?;
     if settings(state) != Ok(true)
         || cache(state)
             .is_some_and(|cache| now >= cache.checked_at && now - cache.checked_at < DAY_MS)
     {
-        return;
+        return None;
     }
-    let _ = Command::new("python3")
+    Command::new("python3")
         .args(["-c", include_str!("../scripts/check-update.py")])
         .arg(state)
         .arg(path)
@@ -174,7 +174,15 @@ pub fn start(state: &Path, now: u64) {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn();
+        .spawn()
+        .ok()
+}
+
+/// Starts the update check of a standalone install, from its Rex bridge,
+/// which runs no `reconcile` or lifecycle event. A Herdr-owned state keeps
+/// its own triggers.
+pub(crate) fn start_standalone(state: &Path, now: u64) -> Option<Child> {
+    standalone(state).then(|| start(state, now)).flatten()
 }
 
 #[derive(Deserialize, Serialize)]

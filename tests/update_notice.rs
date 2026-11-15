@@ -559,6 +559,28 @@ fn only_background_triggers_launch_the_worker_and_events_do_not_wait_for_it() {
     assert!(!marker.exists(), "opt-out launched a worker");
 }
 
+/// The U10 review's F1: nothing on Rex runs `reconcile` or a lifecycle
+/// event, so a standalone install's bridge starts the check when it connects
+/// to its server. A bridge on a Herdr-owned, unowned, or invalidly owned
+/// state never does, nor one whose settings opt out or whose check ran today.
+#[test]
+fn only_a_standalone_states_rex_bridge_starts_the_update_check() {
+    let output = crate::binary::command("python3")
+        .args([
+            "-I",
+            concat!(env!("CARGO_MANIFEST_DIR"), "/tests/update_bridge.py"),
+            crate::binary::namedrop_path(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 fn both_wrappers_forward_only_composed_notices_and_reject_hostile_versions() {
     let f = Fixture::new();
