@@ -108,6 +108,11 @@ pub(super) fn run(
     if status.success() {
         Ok(stdout)
     } else {
-        Err(Failure::Exit(String::from_utf8_lossy(&stderr).into_owned()))
+        let stderr = String::from_utf8_lossy(&stderr).into_owned();
+        Err(Failure::Exit(if stderr.trim().is_empty() {
+            format!("rex exited with {status} and wrote no error")
+        } else {
+            stderr
+        }))
     }
 }

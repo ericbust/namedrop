@@ -485,6 +485,37 @@ fn an_item_whose_label_left_the_host_list_fails() {
     assert!(rex.requests().is_empty());
 }
 
+/// A host list that could not reach the home that keeps the hosts may
+/// lack a label still there, so an item for it stays queued, and fails
+/// only once the home is read without it.
+#[test]
+fn an_item_stays_queued_while_rex_hosts_list_cannot_reach_your_home() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    sent(&space, &rex);
+    fs::write(
+        rex.directory.join("hosts.json"),
+        json!({"home": {"label": "studio-home", "reached": false}, "hosts": [],
+            "warnings": [{"server": "this machine", "message": "its hosts are missing"}]})
+        .to_string(),
+    )
+    .unwrap();
+    let (waits, _) = work_for(&space, &rex, 1);
+    assert_eq!(waits, [BACKOFF[0]]);
+    assert_eq!(outbound(&space)[0].0, "queued");
+    assert!(rex.requests().is_empty());
+    fs::write(
+        rex.directory.join("hosts.json"),
+        json!({"home": {"label": "studio-home", "reached": true}, "hosts": []}).to_string(),
+    )
+    .unwrap();
+    work_for(&space, &rex, 1);
+    assert_eq!(
+        outbound(&space)[0].1.as_deref(),
+        Some("devbox is no longer in your Rex hosts")
+    );
+}
+
 #[test]
 fn an_item_pinned_to_one_host_id_is_sent_to_it_after_the_label_moved() {
     let space = Space::new(REX);

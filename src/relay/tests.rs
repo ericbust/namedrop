@@ -116,6 +116,36 @@ fn a_rex_send_refuses_a_label_that_is_not_exactly_listed_and_lists_the_labels() 
     );
 }
 
+/// A refused label names what `rex hosts list` warned, as a home it
+/// could not reach, and a list `rex` could not give says how it failed,
+/// even with nothing on stderr.
+#[test]
+fn a_rex_send_refusal_names_what_rex_hosts_list_warned() {
+    let listed = serde_json::json!({
+        "home": {"label": "studio-home", "endpoint": "unix:///tmp/home.sock", "reached": false},
+        "hosts": [{"host": {"label": "studio", "endpoints": ["10.0.0.2:7297"]}}],
+        "warnings": [{"server": "this machine", "message": "its hosts are missing"}],
+    });
+    let space = Space::new(REX);
+    let refused = tests_support::Script::new(&format!("cat <<'EOF'\n{listed}\nEOF"))
+        .run(|| space.send("request-1", "@bob@devbox hi"))
+        .unwrap_err();
+    assert_eq!(
+        refused,
+        "devbox is not in your Rex hosts (rex hosts list): studio. rex hosts list could not \
+         reach your Rex home studio-home, so its hosts may be missing. rex hosts list warned \
+         about this machine: its hosts are missing."
+    );
+    let refused = tests_support::Script::new("exit 3")
+        .run(|| space.send("request-2", "@bob@devbox hi"))
+        .unwrap_err();
+    assert_eq!(
+        refused,
+        "could not read your Rex hosts: rex exited with exit status: 3 and wrote no error"
+    );
+    assert!(space.outbound().is_empty());
+}
+
 #[test]
 fn a_label_is_1_to_64_letters_digits_hyphens_and_underscores() {
     for label in ["a", "dev-box_2", &"x".repeat(64)] {

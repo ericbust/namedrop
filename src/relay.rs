@@ -455,6 +455,11 @@ pub(crate) trait RemoteHosts {
     fn participant(&self, _alias: &str, _host: &str) -> bool {
         false
     }
+
+    /// The refusal for `label`, which is not exactly a listed, valid one.
+    fn unlisted(&self, label: &str) -> String {
+        unlisted(label, self.listed().unwrap_or_default())
+    }
 }
 
 /// The remote agents of the thread a Rex reply answers, by display alias.
@@ -485,28 +490,68 @@ impl RemoteHosts for NoRemoteHosts {
 
 /// The labels `rex hosts list --json` prints, byte for byte, and the
 /// addresses each one dials, each in the one spelling of `address_spelling`,
-/// sorted.
-#[derive(Debug, Default)]
+/// sorted, and whether it reached the home that keeps them, with what
+/// `rex` warned about the list.
+#[derive(Debug)]
 pub(crate) struct Hosts {
     labels: Vec<String>,
     addresses: Vec<Vec<String>>,
+    home_reached: bool,
+    warnings: Vec<String>,
+}
+
+impl Default for Hosts {
+    fn default() -> Self {
+        Self {
+            labels: Vec::new(),
+            addresses: Vec::new(),
+            home_reached: true,
+            warnings: Vec::new(),
+        }
+    }
 }
 
 impl RemoteHosts for Hosts {
     fn listed(&self) -> Option<&[String]> {
         Some(&self.labels)
     }
+
+    fn unlisted(&self, label: &str) -> String {
+        let refusal = unlisted(label, &self.labels);
+        if self.warnings.is_empty() {
+            refusal
+        } else {
+            format!("{refusal}. {}", self.warnings.join(" "))
+        }
+    }
 }
 
 impl Hosts {
     /// The host list of this machine's `rex`, as the relay's later calls
-    /// read it.
+    /// read it: the hosts of the home `REX_HOME` or `rex home` names, and
+    /// of this machine's own server. `-S` and `REX_SERVER` change neither,
+    /// as Rex says, so the relay passes no server.
     pub(crate) fn read() -> Result<Self, String> {
         let output = rex::run(&["hosts", "list", "--json"], None, rex::CALL)
             .map_err(|failure| format!("could not read your Rex hosts: {failure}"))?;
         let listed: serde_json::Value = serde_json::from_slice(&output)
             .map_err(|error| format!("could not read your Rex hosts: {error}"))?;
         let mut hosts = Self::default();
+        let home = &listed["home"];
+        if home["reached"] == false {
+            hosts.home_reached = false;
+            hosts.warnings.push(format!(
+                "rex hosts list could not reach your Rex home {}, so its hosts may be missing.",
+                home["label"].as_str().unwrap_or("")
+            ));
+        }
+        for warning in listed["warnings"].as_array().into_iter().flatten() {
+            hosts.warnings.push(format!(
+                "rex hosts list warned about {}: {}.",
+                warning["server"].as_str().unwrap_or("a server"),
+                warning["message"].as_str().unwrap_or("")
+            ));
+        }
         for host in listed["hosts"].as_array().into_iter().flatten() {
             let Some(label) = host["host"]["label"].as_str() else {
                 continue;
@@ -545,11 +590,18 @@ impl Hosts {
         same
     }
 
+    /// Whether the list may lack a host it would list: one it could not
+    /// read from the home that keeps it.
+    pub(crate) fn incomplete(&self) -> bool {
+        !self.home_reached
+    }
+
     #[cfg(test)]
     pub(crate) fn labelled(labels: &[&str]) -> Self {
         Self {
             labels: labels.iter().map(|label| (*label).to_owned()).collect(),
             addresses: vec![Vec::new(); labels.len()],
+            ..Self::default()
         }
     }
 }
