@@ -81,4 +81,3 @@ class Server:
         result={k:record[k] for k in ['module','launcher','state']};result['module']='@'+result['module']
         if self.wrong:result[self.wrong]='/another/install'
         return result
-
