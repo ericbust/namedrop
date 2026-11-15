@@ -9,3 +9,5 @@ The runner executes each binary three times in separate profiles. It compares ev
 The script host handles the differential only. It does not replace either real-agent testbed lane. The run needs `/bin/ps` and `sandbox-exec`; a sandbox that blocks either cannot produce acceptance evidence.
 
 U3 also runs deactivate, activate again, and name in a second inactive space. Pass `--allow-package-lock` to the runner only for U3. It permits the added empty HOME `.config/namedrop/packages.lock` file and preserves every other comparison.
+
+U5 also runs `ui launch name` and `ui launch doctor` from a pane, after activation. Nothing is pinned.
