@@ -582,6 +582,24 @@ def migration_record(runtime):
     return Path(value['previous']) if value['previous'] is not None else None, Path(value['target'])
 
 
+def stored_schema(runtime):
+    """The store's schema, or None when there is no store."""
+    return state_schema(runtime) if (runtime.parent / 'namedrop.sqlite3').exists() else None
+
+
+def withdraw_first_publish(runtime, found):
+    """A first publish whose migration failed with the store as it found it
+    selects nothing, so a later install starts again. Its record could only
+    retry the same target, which cannot migrate this store."""
+    try:
+        unchanged = stored_schema(runtime) == found
+    except (OSError, sqlite3.Error):
+        return
+    if unchanged:
+        switch(runtime, None)
+        (runtime / 'migration.json').unlink()
+
+
 def recover_migration(runtime):
     """A normal activation retry repairs an interrupted switch without data rollback."""
     if not (runtime / 'migration.json').exists() and not (runtime / 'migration.json').is_symlink():
@@ -590,9 +608,14 @@ def recover_migration(runtime):
         previous, target = migration_record(runtime)
         require(current(runtime) in (previous, target), 'Runtime changed during an unfinished migration.')
         if previous is None:
+            found = stored_schema(runtime)
             switch(runtime, target)
-            drain_legacy_commands(runtime)
-            migrate_selected(runtime, target, gate)
+            try:
+                drain_legacy_commands(runtime)
+                migrate_selected(runtime, target, gate)
+            except BaseException:
+                withdraw_first_publish(runtime, found)
+                raise
             (runtime / 'migration.json').unlink()
             return
         schema = state_schema(runtime)
@@ -611,6 +634,7 @@ def switch_and_migrate(runtime, previous, target):
     with command_gate(runtime) as gate:
         record = runtime / 'migration.json'
         require(not record.exists() and not record.is_symlink(), 'An unfinished migration needs recovery.')
+        found = stored_schema(runtime) if previous is None else None
         write_owned(record, json.dumps({'previous': str(previous) if previous is not None else None,
                                         'target': str(target)}) + '\n', 0o600)
         try:
@@ -624,6 +648,8 @@ def switch_and_migrate(runtime, previous, target):
             if previous is not None and state_schema(runtime) == contract(runtime / previous)['state_schema']:
                 switch(runtime, previous)
                 record.unlink()
+            elif previous is None:
+                withdraw_first_publish(runtime, found)
             raise
         record.unlink()
 
@@ -813,6 +839,198 @@ def activate_codex_plugin(payload, refresh):
         return payload, 1
 
 
+MOVING_TO_HERDR = 'Namedrop is moving to Herdr. Run Activate Namedrop in Herdr again.'
+
+
+def refuse_handoff(marker):
+    if marker.exists():
+        require(json.loads(marker.read_text()).get('reason') != 'herdr_handoff', MOVING_TO_HERDR)
+
+
+def sync_directory(path):
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+@contextlib.contextmanager
+def signals_as_exits():
+    """SIGTERM and SIGHUP end Python without running `finally`. While an
+    install may hold its state's marker aside, they exit as an exception does,
+    so the marker goes back."""
+    def stop(number, _frame):
+        raise SystemExit(128 + number)
+    # A signal the caller ignores, as `nohup` ignores SIGHUP, stays ignored.
+    previous = {
+        number: signal.signal(number, stop)
+        for number in (signal.SIGTERM, signal.SIGHUP)
+        if signal.getsignal(number) != signal.SIG_IGN
+    }
+    try:
+        yield
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, signal.SIG_DFL if handler is None else handler)
+
+
+@contextlib.contextmanager
+def signals_ignored():
+    """The process is stopping, so a second signal must not cut a put-back
+    short or replace the first error."""
+    numbers = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+    try:
+        previous = {number: signal.signal(number, signal.SIG_IGN) for number in numbers}
+    except ValueError:  # not the main thread, where no signal is delivered
+        previous = {}
+    try:
+        yield
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, signal.SIG_DFL if handler is None else handler)
+
+
+def exclusive_within(runtime, wait):
+    """The exclusive command gate, without stopping any helper, or None when it
+    stays busy for `wait` seconds or cannot be opened."""
+    try:
+        descriptor = os.open(runtime / 'commands.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    except OSError:
+        return None
+    stream = os.fdopen(descriptor, 'r+')
+    deadline = time.monotonic() + wait
+    while True:
+        try:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return stream
+        except BlockingIOError:
+            if time.monotonic() < deadline:
+                time.sleep(.05)
+                continue
+        except OSError:
+            pass
+        stream.close()
+        return None
+
+
+class RemovedMarker:
+    """A reinstall into a state that `install --remove` retired. The incoming
+    runtime's `rex sessions` and the launcher's `install` refuse a retired
+    state, so for those steps the marker is renamed aside under the exclusive
+    gate, which keeps its bytes. It goes back on every path where the install
+    does not complete, unless the state was retired again meanwhile: a marker
+    that a handoff or a removal wrote since always wins. One left aside by a
+    process that could not put it back, after SIGKILL or a power loss, goes
+    back at the start of the next runtime.py run."""
+
+    WAIT = 5
+
+    def __init__(self, runtime):
+        self.runtime, self.marker, self.aside = runtime, runtime / 'retired.json', runtime / 'retired.aside.json'
+        self.held = False
+
+    def set_aside(self):
+        with command_gate(self.runtime):
+            require(not self.marker.is_symlink() and self.marker.is_file(),
+                    f'Runtime file has an unexpected type: {self.marker}')
+            reason = json.loads(self.marker.read_text()).get('reason')
+            require(reason != 'herdr_handoff', MOVING_TO_HERDR)
+            require(reason == 'removed', 'This retired state cannot be installed again.')
+            with open(self.marker, 'rb') as marker:
+                os.fsync(marker.fileno())
+            # Held first: an interrupt before the rename finds the marker in place.
+            self.held = True
+            os.rename(self.marker, self.aside)
+            sync_directory(self.runtime)
+
+    def complete(self):
+        self.held = False
+        self.aside.unlink(missing_ok=True)
+        sync_directory(self.runtime)
+
+    def restore(self):
+        """Puts the marker back unless another took its place. Returns
+        'restored', 'unfenced' when the exclusive gate stayed busy for WAIT
+        seconds, or 'superseded'."""
+        if not self.aside.exists():
+            return 'restored'  # the rename never happened
+        gate = exclusive_within(self.runtime, self.WAIT)
+        try:
+            try:
+                # A link never replaces a marker written since, gate or not.
+                os.link(self.aside, self.marker)
+                outcome = 'restored' if gate else 'unfenced'
+            except FileExistsError:
+                outcome = 'superseded'
+            with contextlib.suppress(OSError):
+                self.aside.unlink()  # else the next run finds both, and the marker wins
+                sync_directory(self.runtime)
+        finally:
+            if gate:
+                gate.close()
+        return outcome
+
+    def recover(self):
+        if self.aside.exists() or self.aside.is_symlink():
+            require(not self.aside.is_symlink() and self.aside.is_file(),
+                    f'Runtime file has an unexpected type: {self.aside}')
+            self.restore()
+
+    def put_back(self):
+        """What happened, for the person, once: the marker went back, or
+        another marker took its place, or it could not be written."""
+        if not self.held:
+            return None
+        self.held = False
+        with signals_ignored():
+            try:
+                outcome = self.restore()
+            except OSError as error:
+                return (f'Namedrop could not mark {self.runtime.parent} as removed again ({error}), so agents whose '
+                        'hooks still name it can use it. Run sh scripts/install.sh again.')
+        if outcome == 'superseded':
+            try:
+                reason = json.loads(self.marker.read_text()).get('reason')
+            except (OSError, ValueError, AttributeError):
+                reason = None
+            return MOVING_TO_HERDR if reason == 'herdr_handoff' else 'Namedrop was removed from Rex again meanwhile.'
+        return ('Namedrop stays removed from Rex. '
+                + ('' if outcome == 'restored' else 'A Namedrop command that started during the install may still finish. ')
+                + 'Run sh scripts/install.sh to install it again.')
+
+    def close(self):
+        note = self.put_back()
+        if note:
+            print(note, file=sys.stderr)
+
+
+def stage(root, runtime, incoming):
+    """Checks the built executable against the release's contract, and unpacks
+    it as releases/<digest>, which every publish selects. Returns the digest."""
+    executable = built_executable(root)
+    require(executable.is_file(), 'No built Namedrop executable was found. Rebuild with scripts/build.sh, or reinstall Namedrop.')
+    reported = subprocess.run([str(executable), '--runtime-info'], capture_output=True, text=True, check=True)
+    require(json.loads(reported.stdout) == incoming, 'Built runtime does not match the release compatibility declaration.')
+    contents = executable.read_bytes()
+    digest = hashlib.sha256(contents).hexdigest()
+    release = runtime / 'releases' / digest
+    if release.exists():
+        require(not release.is_symlink() and not (release/'namedrop').is_symlink()
+                and not (release/'runtime.json').is_symlink() and contract(release) == incoming
+                and hashlib.sha256((release / 'namedrop').read_bytes()).hexdigest() == digest,
+                'An existing runtime snapshot is inconsistent; no files were overwritten.')
+    else:
+        with tempfile.TemporaryDirectory(prefix='.prepare-', dir=runtime) as temporary:
+            prepared = Path(temporary) / digest
+            prepared.mkdir(mode=0o700)
+            (prepared/'namedrop').write_bytes(contents)
+            (prepared / 'namedrop').chmod(0o700)
+            (prepared / 'runtime.json').write_text(json.dumps(incoming) + '\n')
+            prepared.rename(release)
+    return digest
+
+
 def activate(root, args, *, verify='activate'):
     state = Path(os.environ['HERDR_PLUGIN_STATE_DIR'])
     require(state.is_absolute() and state.is_dir(), 'Activation needs an absolute, existing state directory.')
@@ -825,36 +1043,33 @@ def activate(root, args, *, verify='activate'):
         args = ['--plugin-state', str(state), '--json', 'install', '--input-json', '{"confirmed":true}', *args]
     runtime = state / 'runtime'
     retired = runtime / 'retired.json'
-    if retired.exists():
-        require(json.loads(retired.read_text()).get('reason') != 'herdr_handoff',
-                'Namedrop is moving to Herdr. Run Activate Namedrop in Herdr again.')
+    refuse_handoff(retired)
     if installation:
         installation.check_owner()
     owned_directory(runtime)
     owned_directory(runtime / 'releases')
-    with lock(runtime, 'activation.lock'):
-        if retired.exists():
-            require(json.loads(retired.read_text()).get('reason') != 'herdr_handoff',
-                    'Namedrop is moving to Herdr. Run Activate Namedrop in Herdr again.')
+    with lock(runtime, 'activation.lock'), contextlib.ExitStack() as window:
+        if installation:
+            window.enter_context(signals_as_exits())
+        RemovedMarker(runtime).recover()
+        refuse_handoff(retired)
         if installation:
             installation.check_owner()
             source = installation.source()
-        if installation and retired.exists():
-            with command_gate(runtime):
-                marker = json.loads(retired.read_text())
-                require(marker.get('reason') == 'removed', 'This retired state cannot be installed again.')
-                retired.unlink()
-                descriptor = os.open(runtime, os.O_RDONLY)
-                try:
-                    os.fsync(descriptor)
-                finally:
-                    os.close(descriptor)
         recover_migration(runtime)
         previous = current(runtime)
         old = previous.name if previous is not None else None
         old_previous = recorded_previous(runtime, old) if old is not None else None
         incoming = contract(root)
         live = previous is not None and live_compatible(contract(runtime / previous), incoming)
+        # Everything that needs no live state runs before a `removed` marker is
+        # set aside: only the survey and the launcher's `install` need it gone.
+        digest = stage(root, runtime, incoming) if installation else None
+        removal = None
+        if installation and retired.exists():
+            removal = RemovedMarker(runtime)
+            window.callback(removal.close)
+            removal.set_aside()
         if previous is not None:
             if not live or contract(runtime / previous)['state_schema'] != incoming['state_schema']:
                 check = installation.preflight if installation else preflight
@@ -862,31 +1077,13 @@ def activate(root, args, *, verify='activate'):
                 for notice in rex_notices(state_before):
                     print(notice, file=sys.stderr)
                 require(ready(state_before, agents),
-                        'Some Rex sessions still use pre-launcher tools or incomplete setup. Finish their work and restart the agents before installing again; nothing was stopped.' if installation else
+                        installation.refusal(state_before, agents) if installation else
                         'Some sessions still use pre-launcher tools or incomplete setup. Open Update Namedrop for the specific blockers; nothing was stopped.' if live else
                         'This update needs a session refresh. Open Update Namedrop to install when current work is finished; nothing was stopped.')
-        executable = built_executable(root)
-        require(executable.is_file(), 'No built Namedrop executable was found. Rebuild with scripts/build.sh, or reinstall Namedrop.')
-        reported = subprocess.run([str(executable), '--runtime-info'], capture_output=True, text=True, check=True)
-        require(json.loads(reported.stdout) == incoming, 'Built runtime does not match the release compatibility declaration.')
-        contents = executable.read_bytes()
-        digest = hashlib.sha256(contents).hexdigest()
+        if digest is None:
+            digest = stage(root, runtime, incoming)
         target = Path('releases') / digest
-        release = runtime / target
         before = old_previous if old == digest else old
-        if release.exists():
-            require(not release.is_symlink() and not (release/'namedrop').is_symlink()
-                    and not (release/'runtime.json').is_symlink() and contract(release) == incoming
-                    and hashlib.sha256((release / 'namedrop').read_bytes()).hexdigest() == digest,
-                    'An existing runtime snapshot is inconsistent; no files were overwritten.')
-        else:
-            with tempfile.TemporaryDirectory(prefix='.prepare-', dir=runtime) as temporary:
-                prepared = Path(temporary) / digest
-                prepared.mkdir(mode=0o700)
-                (prepared/'namedrop').write_bytes(contents)
-                (prepared / 'namedrop').chmod(0o700)
-                (prepared / 'runtime.json').write_text(json.dumps(incoming) + '\n')
-                prepared.rename(release)
         launcher = runtime / 'namedrop'
         if launcher.exists() or launcher.is_symlink():
             require(not launcher.is_symlink() and launcher.is_file() and launcher.read_text() == LAUNCHER,
@@ -963,8 +1160,15 @@ def activate(root, args, *, verify='activate'):
             record_source()
             raise
         if result.returncode:
-            print('Activation did not complete. The previous runtime remains selected; existing sessions can continue.'
-                  if previous is not None and current(runtime) == previous else 'Inspect setup before starting sessions.', file=sys.stderr)
+            kept = previous is not None and current(runtime) == previous
+            if installation:
+                note = removal.put_back() if removal else None
+                print('Installation did not complete. ' + (note or (
+                    'The previous runtime remains selected; existing sessions can continue.' if kept
+                    else 'Inspect setup before starting sessions.')), file=sys.stderr)
+            else:
+                print('Activation did not complete. The previous runtime remains selected; existing sessions can continue.'
+                      if kept else 'Inspect setup before starting sessions.', file=sys.stderr)
         if payload is not None:
             payload['data']['runtime'] = {'launcher': str(launcher), 'revision': digest,
                                          'live_update': live,
@@ -975,6 +1179,8 @@ def activate(root, args, *, verify='activate'):
                       'previous': before if selected == digest else old_previous if selected == old else None}
             write_owned(runtime / 'activation.json', json.dumps(record) + '\n', 0o600)
             result.stdout = json.dumps(payload) + '\n'
+        if removal and result.returncode == 0:
+            removal.complete()
         print(result.stdout, end='')
         print(result.stderr, end='', file=sys.stderr)
         if result.returncode == 0:

@@ -7,7 +7,7 @@ import re
 import subprocess
 import sys
 
-from update import require, rex_session_panes, rex_server_check, preflight_panes
+from update import require, rex_session_panes, rex_server_check, preflight_panes, safe
 
 
 class Install:
@@ -41,7 +41,8 @@ class Install:
         elif sys.platform == 'darwin':
             target = str(Path(os.environ['HOME']) / 'Library/Application Support/rex/server.sock')
         else:
-            target = str(Path(os.environ['XDG_RUNTIME_DIR']) / 'rex/server.sock')
+            directory = os.environ.get('XDG_RUNTIME_DIR')
+            target = str(Path(directory) / 'rex/server.sock') if directory else ''
         require(os.path.isabs(target), 'Start Rex, or set REX_SERVER to its Unix socket.')
         endpoints.add('rex:' + target)
         checked = {endpoint: 'stopped' for endpoint in stopped}
@@ -84,9 +85,16 @@ class Install:
         return list(observations.values()), stopped, unchecked
 
     def session_panes(self):
+        """The sessions of the one-time runtime migration. Only Namedrop's
+        SessionStart hook binds a Rex agent's session, so a surveyed agent with
+        none never loaded a Namedrop hook and has nothing to migrate. A later
+        live update still waits for it, because nothing shows when it started."""
         panes, stopped, unchecked = self.survey()
         self.notices(stopped, unchecked)
-        return panes, self.unknown_servers
+        require(not self.unknown_servers,
+                'Could not check the Rex server at ' + ', '.join(map(safe, self.unknown_servers))
+                + ' for sessions to record in the one-time runtime migration. Install again when it answers.')
+        return [pane for pane in panes if pane.get('agent_session')], []
 
     @staticmethod
     def notices(stopped, unchecked):
@@ -97,6 +105,24 @@ class Install:
     def preflight(self, live=False):
         panes, stopped, unchecked = self.survey()
         return preflight_panes(panes, self.unknown_servers, stopped, unchecked, live)
+
+    @staticmethod
+    def refusal(state, agents):
+        """Why a reinstall waits, and each session and server it waits for."""
+        if state['live_update']:
+            lines = ['Some Rex sessions still use pre-launcher tools or incomplete setup. Finish their work and '
+                     'restart the agents before installing again; nothing was stopped.']
+        else:
+            lines = ['This update needs a session refresh. Finish the work in each Rex session below and exit its '
+                     'agent before installing again; nothing was stopped.']
+        for pane in agents:
+            name = '@' + pane['label'] if pane.get('label') else 'An agent'
+            lines.append(f"- {name} ({pane.get('agent') or 'unknown kind'}, {pane.get('agent_status') or 'unknown'})"
+                         f" in block {pane['pane_id']} on {pane['_socket']}")
+        lines += [f'- The Rex server at {server}, which could not be checked' for server in state['other_servers']]
+        if not state['live_update'] and (state['unfinished'] or state['joins']):
+            lines.append(f"- {state['unfinished']} unfinished handoffs and {state['joins']} combined results pending")
+        return '\n  '.join(safe(line) for line in lines)
 
     def verify(self, payload):
         data = payload.get('data', {})
@@ -129,5 +155,17 @@ class Install:
             result = subprocess.run(['git', '-C', str(self.root), 'remote', 'get-url', 'origin'],
                                     capture_output=True, text=True, timeout=10)
             if result.returncode == 0:
-                origin = result.stdout.strip()
+                origin = public(result.stdout.strip())
         return dict(version=version[1], kind=kind, origin=origin)
+
+
+def public(origin):
+    """`origin` without credentials: no password, and no user name over HTTP,
+    where a token can stand in for one."""
+    from urllib.parse import urlsplit, urlunsplit
+    parts = urlsplit(origin)
+    if '@' not in parts.netloc:
+        return origin
+    user, _, host = parts.netloc.rpartition('@')
+    user = '' if parts.scheme in ('http', 'https') else user.partition(':')[0]
+    return urlunsplit(parts._replace(netloc=user + '@' + host if user else host))

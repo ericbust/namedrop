@@ -163,6 +163,47 @@ fn invalid_update_settings_are_visible_in_doctor_without_a_health_failure() {
     );
 }
 
+/// The U6 review's F3: Doctor reads the Rex module only on a Rex endpoint,
+/// and a module it cannot confirm is a notice that needs attention.
+#[test]
+fn doctor_reports_an_unconfirmed_rex_module_as_a_notice_and_only_on_rex() {
+    for endpoint in ["socket-a", "rex:/tmp/u6-doctor-never-listens.sock"] {
+        let f = Fixture::at(endpoint);
+        if update_profile::isolate(&f.root, &f.home) {
+            return;
+        }
+        // The isolated run gives every fixture one root, so each endpoint
+        // starts with no registration.
+        let record = f.home.join(".config/namedrop/rex.json");
+        let _ = fs::remove_file(&record);
+        f.register();
+        let healthy = diagnose_collaboration(&f.runtime());
+        assert_eq!(
+            healthy.status,
+            HealthStatus::Healthy,
+            "{endpoint}: {healthy:?}"
+        );
+        fs::create_dir_all(record.parent().unwrap()).unwrap();
+        fs::write(
+            &record,
+            json!({"module": f.root.join("namedrop.lua"), "config": f.root.join("init.lua"), "line": "inserted", "server": endpoint})
+                .to_string(),
+        )
+        .unwrap();
+        let report = diagnose_collaboration(&f.runtime());
+        let module = report.issues.iter().find(|i| i.code == "ND-REX-001");
+        if !endpoint.starts_with("rex:") {
+            assert!(module.is_none(), "{module:?}");
+            assert_eq!(report.status, HealthStatus::Healthy);
+            continue;
+        }
+        let module = module.unwrap();
+        assert_eq!(module.severity, HealthSeverity::Notice, "{module:?}");
+        assert_eq!(module.summary, "The Rex module is not confirmed.");
+        assert_eq!(report.status, HealthStatus::NeedsAttention);
+    }
+}
+
 struct Fixture {
     root: PathBuf,
     home: PathBuf,
