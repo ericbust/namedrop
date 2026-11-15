@@ -123,6 +123,12 @@ pub fn render_command_result_to_text_within(
                 }
             }
             let shortcuts = &data["shortcuts"];
+            if shortcuts["status"] == "no_module" {
+                lines.push(format!(
+                    "  Shortcuts: Namedrop's Rex module is not installed. {}",
+                    text(&shortcuts["repair"])
+                ));
+            }
             if let Some(error) = shortcuts["error"].as_str() {
                 lines.push(format!(
                     "  Shortcuts need attention: {}",
@@ -751,6 +757,22 @@ mod tests {
         }
         let quiet = activated(json!({"steps":["codex plugin add namedrop@namedrop --json"]}));
         assert!(!quiet.contains("Warning"), "{quiet}");
+    }
+
+    #[test]
+    fn activation_on_a_rex_home_without_its_module_says_how_to_install_it() {
+        let rendered = render_command_result_to_text(&CommandResult::success(
+            "activate",
+            json!({"space_id":"w1", "integration_packages":{}, "shell_command":null,
+                   "shortcuts":{"status":"no_module","repair":"Run sh scripts/install.sh."}}),
+        ));
+        assert!(
+            rendered.contains(
+                "  Shortcuts: Namedrop's Rex module is not installed. Run sh scripts/install.sh."
+            ),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("Shell"), "{rendered}");
     }
 
     /// The readable table shows what a person needs to choose a collaborator:

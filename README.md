@@ -473,6 +473,7 @@ For more detail, see these guides:
 - [Operations and recovery](docs/operations.md) covers names, groups, delivery states, and every command.
 - [Upgrades and backups](docs/operations.md#upgrade) covers replacing an installation, restoring state, and removing Namedrop.
 - [Compatibility](docs/compatibility.md) lists supported platforms, tested versions, and known gaps.
+- [Run Namedrop on Rex](docs/rex.md) sets up the experimental Rex support on the `experimental` branch, including mentions to agents on another machine.
 
 ## Data and privacy
 
