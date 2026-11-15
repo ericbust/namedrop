@@ -165,6 +165,9 @@ class ActivationChecks(unittest.TestCase):
             base = Path(directory)
             env = environment(base)
             path = base / 'state/namedrop.sqlite3'
+            with mock.patch.dict(os.environ, env, clear=True):
+                with self.assertRaisesRegex(RuntimeError, 'Cannot verify durable collaboration state'):
+                    update.preflight()
             schema(path)
             socket = 'rex:/tmp/fixture.sock'
             with sqlite3.connect(path) as db:

@@ -309,6 +309,8 @@ def session_panes():
 
 def rex_session_panes():
     path = Path(os.environ['HERDR_PLUGIN_STATE_DIR']) / 'namedrop.sqlite3'
+    if not path.is_file():
+        return []  # durable_state refuses a missing store with its own message
     with contextlib.closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=2)) as db:
         rows = db.execute("""SELECT b.session_socket_id, b.worktree_id, b.pane_id, b.tab_id,
                 (SELECT o.agent_session_id FROM agent_session_observations o

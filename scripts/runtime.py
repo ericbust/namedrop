@@ -1,6 +1,5 @@
 """Publish a compatible runtime without removing tools used by existing sessions."""
 
-import argparse
 import contextlib
 import ctypes
 import fcntl
@@ -927,13 +926,15 @@ def activate(root, args):
 
 if __name__ == '__main__':
     try:
-        parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
-        parser.add_argument('root', type=Path)
-        parser.add_argument('--state-dir', type=Path, required=True)
-        parser.add_argument('--verify', choices=('activate',), required=True)
-        options, arguments = parser.parse_known_args()
-        os.environ['HERDR_PLUGIN_STATE_DIR'] = str(options.state_dir)
-        sys.exit(activate(options.root.resolve(), arguments))
+        # No argparse: macOS's system Python caches each newly imported module
+        # under HOME, and Herdr's activation writes nothing new there.
+        root, *arguments = sys.argv[1:]
+        require(arguments[:1] == ['--state-dir'] and len(arguments) > 1 and arguments[1]
+                and arguments[2:3] == ['--verify'] and len(arguments) > 3,
+                'Usage: runtime.py ROOT --state-dir DIR --verify activate [ARGUMENT...]')
+        require(arguments[3] == 'activate', f'Unsupported runtime verification: {arguments[3]}')
+        os.environ['HERDR_PLUGIN_STATE_DIR'] = arguments[1]
+        sys.exit(activate(Path(root).resolve(), arguments[4:]))
     except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError, subprocess.SubprocessError) as error:
         print(f'Namedrop runtime activation stopped: {error}', file=sys.stderr)
         sys.exit(2)
