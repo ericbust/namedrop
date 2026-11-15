@@ -1,5 +1,6 @@
 """Publish a compatible runtime without removing tools used by existing sessions."""
 
+import argparse
 import contextlib
 import ctypes
 import fcntl
@@ -863,6 +864,8 @@ def activate(root, args):
             switch(runtime, target)
         payload = None
         try:
+            with lock(runtime, 'packages.lock'):
+                write_owned(runtime / 'owner', 'herdr\n', 0o600)
             result = subprocess.run([str(launcher), *args], capture_output=True, text=True)
             if result.returncode == 0:
                 payload = json.loads(result.stdout)
@@ -924,7 +927,13 @@ def activate(root, args):
 
 if __name__ == '__main__':
     try:
-        sys.exit(activate(Path(sys.argv[1]).resolve(), sys.argv[2:]))
+        parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+        parser.add_argument('root', type=Path)
+        parser.add_argument('--state-dir', type=Path, required=True)
+        parser.add_argument('--verify', choices=('activate',), required=True)
+        options, arguments = parser.parse_known_args()
+        os.environ['HERDR_PLUGIN_STATE_DIR'] = str(options.state_dir)
+        sys.exit(activate(options.root.resolve(), arguments))
     except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError, subprocess.SubprocessError) as error:
         print(f'Namedrop runtime activation stopped: {error}', file=sys.stderr)
         sys.exit(2)

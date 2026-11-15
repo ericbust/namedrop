@@ -1,5 +1,6 @@
 """Human-only wrapper around Herdr's managed reinstall and Namedrop activation."""
 
+import contextlib
 import json
 import fcntl
 import hashlib
@@ -306,6 +307,23 @@ def session_panes():
     return panes, unverified
 
 
+def rex_session_panes():
+    path = Path(os.environ['HERDR_PLUGIN_STATE_DIR']) / 'namedrop.sqlite3'
+    with contextlib.closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=2)) as db:
+        rows = db.execute("""SELECT b.session_socket_id, b.worktree_id, b.pane_id, b.tab_id,
+                (SELECT o.agent_session_id FROM agent_session_observations o
+                 WHERE o.session_socket_id=b.session_socket_id AND o.worktree_id=b.worktree_id
+                   AND o.address_id=b.address_id AND o.observed_at_ms >= b.bound_at_ms
+                 ORDER BY o.observed_at_ms DESC, o.rowid DESC LIMIT 1)
+            FROM pane_bindings b JOIN pane_addresses a
+            USING (session_socket_id, worktree_id, address_id)
+            WHERE b.active=1 AND a.retired=0 AND b.session_socket_id LIKE 'rex:%'
+            ORDER BY b.session_socket_id, b.worktree_id, b.pane_id""").fetchall()
+    return [dict(_socket=socket, workspace_id=space, pane_id=pane, tab_id=tab,
+                 agent_session={'value': session}, agent_status='unknown')
+            for socket, space, pane, tab, session in rows if session]
+
+
 def preflight(live=False):
     panes, unverified = session_panes()
     current_socket = os.environ['HERDR_SOCKET_PATH']
@@ -313,6 +331,7 @@ def preflight(live=False):
                 and p.get("workspace_id") == os.environ["HERDR_WORKSPACE_ID"]
                 and p['_socket'] == current_socket for p in panes),
             "The source pane/workspace is not present on this server.")
+    panes.extend(rex_session_panes())
     state = durable_state(panes, bool(unverified))
     state['other_servers'] = unverified
     agents = [p for p in panes if p.get("agent") or p.get("agent_session")
@@ -346,7 +365,8 @@ def is_codex(pane):
 def labels(panes):
     # Labels are cosmetic; unavailable metadata must not hide an open session.
     labels = {}
-    sockets = {os.environ['HERDR_SOCKET_PATH']} | {p['_socket'] for p in panes}
+    sockets = {os.environ['HERDR_SOCKET_PATH']} | {
+        p['_socket'] for p in panes if not p['_socket'].startswith('rex:')}
     for kind, plural in (("workspace", "workspaces"), ("tab", "tabs")):
         labels[kind] = {}
         for socket in sorted(sockets):
@@ -374,7 +394,8 @@ def show_agents(panes, metadata):
                 f" → tab {tab.get('number') or pane.get('tab_id', '?')} {tab.get('label', '')}"
                 f" → {name} ({agent}, {pane.get('agent_status') or 'unknown'}; {pane['pane_id']})")
         if pane['_socket'] != os.environ['HERDR_SOCKET_PATH']:
-            line += f" [Herdr: {pane['_socket']}]"
+            host = 'Rex' if pane['_socket'].startswith('rex:') else 'Herdr'
+            line += f" [{host}: {pane['_socket']}]"
         # Do not let terminal titles inject control sequences into the prompt.
         print(safe(line))
 
