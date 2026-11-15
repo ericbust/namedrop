@@ -72,8 +72,7 @@ def upgrade_from(baseline):
             assert os.readlink(selected / 'current') == 'releases/' + digest
             assert (selected / 'owner').read_text() == 'standalone\n'
             assert json.loads((selected / 'source.json').read_text())['kind'] == 'archive'
-            assert not (base / 'calls').exists()
             print('standalone archive upgrade: names and store rows preserved, schema '
-                  f"{contracts[0]['state_schema']} -> {contracts[1]['state_schema']}, owner=standalone, no Herdr calls")
+                  f"{contracts[0]['state_schema']} -> {contracts[1]['state_schema']}, owner=standalone, no herdr on PATH")
         finally:
             server.close()

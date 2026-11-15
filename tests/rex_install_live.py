@@ -376,6 +376,15 @@ while not os.path.exists(ended):time.sleep(.05)
 '''
 
 
+# Claude Code and Codex report their kind through OSC 7501 with no
+# integration installed, so Rex sees an agent that no Namedrop hook bound.
+UNHOOKED = '''import os,sys,time
+sys.stdout.write("\\x1b]7501;state=idle:app=" + sys.argv[1] + "\\x1b\\\\")
+sys.stdout.flush()
+while not os.path.exists(sys.argv[2]):time.sleep(.05)
+'''
+
+
 def bind_agents(f, count=2, first=0):
     script = f.root / 'standin.py'
     script.write_text(AGENT)
@@ -1005,11 +1014,33 @@ def section_runtime():
             after = store()
             assert after == before, '\n'.join(difflib.unified_diff(before.splitlines(), after.splitlines(), lineterm=''))
 
+        script = f.root / 'unhooked.py'
+        script.write_text(UNHOOKED)
+        unhooked = {f.session('u8-unhooked-' + app, sys.executable, '-I', str(script), app, str(f.root / ('end-' + app)))[1]: app
+                    for app in ('claude-code', 'codex')}
+
+        def surveyed():
+            p = subprocess.run([str(old / 'bin/namedrop'), '--plugin-state', str(f.state), '--endpoint', f.endpoint, 'rex',
+                                'sessions', '--json'], env=f.env, capture_output=True, text=True, timeout=30)
+            assert p.returncode == 0, (p.stdout, p.stderr)
+            return {pane['block']: (pane['agent'], pane['session']) for pane in json.loads(p.stdout)['data']['panes']}
+        wait(surveyed, lambda found: all(found.get(block) == (app, None) for block, app in unhooked.items()),
+             'the unhooked agents reported their kinds')
         publish(old)
         assert (f.state / 'runtime/owner').read_text() == 'standalone\n'
         assert json.loads((f.state / 'runtime/source.json').read_text())['kind'] == 'archive'
-        sessions, blocks = bind_agents(f, 1)
         migration = f.state / 'runtime/legacy-sessions.json'
+        assert json.loads(migration.read_text())['sessions'] == [], migration.read_text()
+        selected, before = os.readlink(f.state / 'runtime/current'), settled()
+        refused = publish(new, ok=False)
+        assert all(f'in block {block} on {f.endpoint}' in refused.stderr for block in unhooked), refused.stderr
+        assert os.readlink(f.state / 'runtime/current') == selected
+        unchanged(before)
+        for app in unhooked.values():
+            (f.root / ('end-' + app)).touch()
+        wait(surveyed, lambda found: not any(found.get(block, (None,))[0] for block in unhooked), 'the unhooked agents ended')
+        say('U8 first install with unhooked Claude Code and Codex agents passed; a live update waited for them')
+        sessions, blocks = bind_agents(f, 1)
         cutoff = json.loads(migration.read_text())
         survey = json.loads(f.nd('rex', 'sessions', '--endpoint', f.endpoint).stdout)['data']['panes']
         agent = next(p for p in survey if p['block'] == blocks[0])
