@@ -606,6 +606,7 @@ fn the_archive_bundles_every_declared_entrypoint_including_the_naming_popup() {
         "herdr-plugin.toml",
         "runtime.json",
         "scripts/setup.sh",
+        "scripts/install.sh",
         "scripts/update.sh",
         "scripts/update.py",
         "scripts/run.sh",
@@ -641,7 +642,7 @@ fn the_archive_bundles_every_declared_entrypoint_including_the_naming_popup() {
             "the archive ships a source-build input: {path}"
         );
     }
-    for path in ["bin/namedrop", "scripts/setup.sh"] {
+    for path in ["bin/namedrop", "scripts/setup.sh", "scripts/install.sh"] {
         assert_ne!(
             fs::metadata(package.join(path))
                 .unwrap()
