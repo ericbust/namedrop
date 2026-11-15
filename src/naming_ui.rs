@@ -324,7 +324,27 @@ fn name_prompt(runtime: &Runtime<'_>, terminal: &str) -> Result<Option<String>, 
             if menu_key()? != MenuKey::Enter {
                 return Ok(None);
             }
-            namedrop::activate_from_naming_screen(runtime)?;
+            let activation = namedrop::activate_from_naming_screen(runtime)?;
+            clear_screen();
+            // The CLI fails an incomplete activation. Naming continues here,
+            // so what needs attention stays above it.
+            if !activation_complete(&activation) {
+                say(
+                    Tone::Warn,
+                    "Namedrop is active, but part of its setup needs attention:",
+                );
+                let packages = activation["integration_packages"].as_object();
+                for (agent, package) in packages.into_iter().flatten() {
+                    if package["installed"] != true || !package["error"].is_null() {
+                        let error = package["error"].as_str().unwrap_or("not installed");
+                        say(
+                            Tone::Plain,
+                            &format!("{}: {}", sanitize(agent), sanitize(error)),
+                        );
+                    }
+                }
+                say(Tone::Muted, "Namedrop Doctor lists the repair.\n");
+            }
         }
     }
     let default = namedrop::default_pane_type(runtime)?;
@@ -1659,6 +1679,11 @@ mod rex_name_prompt_tests {
         if case == "active" {
             namedrop::activate_from_naming_screen(&runtime).unwrap();
         }
+        if case == "incomplete" {
+            // Codex's package cannot be written under a file.
+            fs::create_dir_all(home.join(".agents")).unwrap();
+            fs::write(home.join(".agents/skills"), "not a directory").unwrap();
+        }
         let result = name_prompt(&runtime, "t1");
         let popups = fake
             .attempted_effects()
@@ -1756,5 +1781,32 @@ mod rex_name_prompt_tests {
             "{report}"
         );
         assert_eq!(report["popups"], 0);
+    }
+
+    #[test]
+    fn an_incomplete_activation_shows_its_report_and_naming_continues() {
+        let (shown, report) = run("incomplete", b"\nu5-term\nt\n");
+        let attention = shown
+            .find("Namedrop is active, but part of its setup needs attention:")
+            .expect(&shown);
+        assert!(
+            shown[attention..].contains("\ncodex: ") && shown.contains("is not a directory"),
+            "{shown}"
+        );
+        assert!(
+            attention < shown.find("Name this pane").expect(&shown),
+            "{shown}"
+        );
+        assert_eq!(
+            report["result"]["Ok"], "Named @u5-term as terminal.",
+            "{report}"
+        );
+        assert_eq!(report["activated"], true);
+    }
+
+    #[test]
+    fn a_complete_activation_shows_no_report() {
+        let (shown, _) = run("inactive", b"\nu5-term\nt\n");
+        assert!(!shown.contains("needs attention"), "{shown}");
     }
 }
