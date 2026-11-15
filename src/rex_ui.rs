@@ -4,6 +4,11 @@ use crate::{installed_runtime::PackageLease, mux::Endpoint};
 use serde_json::{Value, json};
 use std::{fs, path::Path};
 
+mod handoff;
+mod install;
+pub(crate) use handoff::{handoff, predecessor_warnings};
+pub use install::{confirm_remove, install, remove};
+
 pub const CONFIG_LINE: &str = "pcall(require, \"namedrop\");";
 pub const MANAGED_LINE: &str =
     "-- Managed by Namedrop. `namedrop install` rewrites this file, so edits here are lost.";
@@ -160,7 +165,14 @@ pub(crate) fn registration(home: &Path) -> Result<Option<Value>, String> {
                     Err(format!("{} is not an object", path.display()))
                 }
             }),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(None)
+        }
         Err(e) => Err(format!("Could not read {}: {e}", path.display())),
     }
 }
@@ -194,6 +206,7 @@ pub(crate) fn refresh(
     }
     let text = module_text(launcher, state)?;
     crate::install::replace_if_changed(lease, &module, &text, Some(0o600))?;
+    mark_removed_line(&mut record);
     record["launcher"] = json!(launcher);
     record["state"] = json!(state);
     crate::install::replace_if_changed(
@@ -204,13 +217,30 @@ pub(crate) fn refresh(
     )
 }
 
+fn mark_removed_line(record: &mut Value) {
+    if record["line"] == "inserted"
+        && let Some(config) = record["config"].as_str()
+        && !fs::read(config).is_ok_and(|bytes| install::has_line(&bytes))
+    {
+        record["line"] = json!("removed");
+    }
+}
+
 pub(crate) fn inspect(home: Option<&Path>, endpoint: &Endpoint) -> Option<Result<Value, String>> {
-    let record = match registration(home?) {
+    let mut record = match registration(home?) {
         Ok(Some(r)) if r["module"].as_str().is_some_and(|s| !s.is_empty()) => r,
         Ok(_) => return None,
         Err(e) => return Some(Err(e)),
     };
-    Some(crate::mux::rex::ui_report(endpoint, &record))
+    mark_removed_line(&mut record);
+    Some(
+        crate::mux::rex::ui_report(endpoint, &record).map(|mut report| {
+            if record["line"] == "removed" {
+                report["confirmed"] = json!(false);
+            }
+            report
+        }),
+    )
 }
 
 pub(crate) fn shortcuts(home: Option<&Path>, endpoint: &Endpoint) -> Value {

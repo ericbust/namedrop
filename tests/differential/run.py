@@ -6,8 +6,8 @@ import subprocess
 import sys
 
 tools = Path(__file__).resolve().parent
-if len(sys.argv) not in (4,5) or (len(sys.argv)==5 and sys.argv[4]!="--allow-package-lock"):
-    raise SystemExit("usage: run.py BASE_BINARY HEAD_BINARY OUT [--allow-package-lock]")
+if len(sys.argv) < 4 or any(flag not in {"--allow-package-lock", "--allow-rex-ui"} for flag in sys.argv[4:]):
+    raise SystemExit("usage: run.py BASE_BINARY HEAD_BINARY OUT [--allow-package-lock] [--allow-rex-ui]")
 root = Path(sys.argv[3]).resolve()
 root.mkdir(parents=True, exist_ok=True)
 env = {k: v for k, v in os.environ.items() if k not in {"REX_BLOCK", "REX_SESSION", "REX_SERVER", "REX_CLIENT"}}

@@ -11,3 +11,5 @@ The script host handles the differential only. It does not replace either real-a
 U3 also runs deactivate, activate again, and name in a second inactive space. Pass `--allow-package-lock` to the runner only for U3. It permits the added empty HOME `.config/namedrop/packages.lock` file, mode 0600, and preserves every other comparison.
 
 U5 also runs `ui launch name` and `ui launch doctor` from a pane, after activation. Nothing is pinned.
+
+U7 also reads `--runtime-info`. Pass `--allow-rex-ui` for U7 to permit only the integer `rex_ui: 1` capability in that response and copied `runtime.json` files. Activation with no Rex registration and no standalone owner remains in the base flow without another pin.

@@ -30,6 +30,13 @@ use std::{
 /// directory is deleted or replaced. A second bridge for the same endpoint
 /// exits at once.
 pub fn run(state: &Path, endpoint: &Endpoint) -> ExitCode {
+    let initial_gate = match crate::runtime_command_guard(state, None) {
+        Ok(gate) => gate,
+        Err(_) => return ExitCode::SUCCESS,
+    };
+    if crate::installed_runtime::retirement::check(state, false).is_err() {
+        return ExitCode::SUCCESS;
+    }
     let Ok(Some(lock)) = Lock::take(state, endpoint) else {
         return ExitCode::SUCCESS;
     };
@@ -45,6 +52,7 @@ pub fn run(state: &Path, endpoint: &Endpoint) -> ExitCode {
     };
     let workers = Workers::inherited();
     let accepts = workers.clone();
+    drop(initial_gate);
     bridge(
         state,
         endpoint,
@@ -135,6 +143,9 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// whether it started one. The Rex runtime builder calls it, so any
 /// Namedrop command or hook in a Rex block starts its server's bridge.
 pub fn ensure(state: &Path, endpoint: &Endpoint) -> Result<bool, String> {
+    if crate::installed_runtime::retirement::check(state, false).is_err() {
+        return Ok(false);
+    }
     if Lock::take(state, endpoint)
         .map_err(|error| error.to_string())?
         .is_none()
@@ -362,7 +373,10 @@ fn serve(
     let mut reached = false;
     let mut failing: Option<Instant> = None;
     let mut tries = 0;
-    while !stop.is_set() && lock.held() {
+    while !stop.is_set()
+        && lock.held()
+        && crate::installed_runtime::retirement::check(state, false).is_ok()
+    {
         let failed = match server.open(stop) {
             Err(_) if !reached => return,
             Err(_) => true,
@@ -377,6 +391,9 @@ fn serve(
                     pending.resync_every_space(Instant::now());
                 }
                 loop {
+                    if crate::installed_runtime::retirement::check(state, false).is_err() {
+                        return;
+                    }
                     if stop.is_set() {
                         flush(state, endpoint, &mut pending, host, lock);
                         return;
@@ -454,6 +471,9 @@ fn flush(
 ) {
     let batch = pending.take();
     if batch.is_empty() {
+        return;
+    }
+    if crate::installed_runtime::retirement::check(state, false).is_err() {
         return;
     }
     let gate = crate::runtime_command_guard(state, None);

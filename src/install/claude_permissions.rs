@@ -447,7 +447,10 @@ pub(crate) fn remove_claude_permissions(
         return Ok(0);
     }
     let _guard = lock(state)?;
-    if crate::StateStore::open(state)
+    if !matches!(
+        crate::installed_runtime::retirement(state)?,
+        Some(crate::installed_runtime::Retirement::Removed { .. })
+    ) && crate::StateStore::open(state)
         .map_err(|error| error.to_string())?
         .transaction(|tx| tx.any_activated_worktrees())
         .map_err(|error| error.to_string())?

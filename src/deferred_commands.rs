@@ -517,6 +517,9 @@ fn launcher(state: &Path) -> Result<PathBuf, String> {
 
 /// Only a caller that can already connect to Herdr can ensure an outside owner.
 pub fn ensure_worker(state: &Path, socket: &str) -> Result<(), String> {
+    if crate::installed_runtime::retirement::check(state, false).is_err() {
+        return Ok(());
+    }
     probe(socket).map_err(|e| e.to_string())?;
     let directory = directory(state, socket)?;
     let lock = worker_lock(&directory)?;
@@ -544,6 +547,10 @@ fn worker_lock(directory: &Dir) -> Result<fs::File, String> {
 }
 
 pub fn run_worker(state: &Path, socket: &str) -> Result<(), String> {
+    if crate::installed_runtime::retirement::check(state, false).is_err() {
+        return Ok(());
+    }
+    let initial_gate = crate::runtime_command_guard(state, None)?;
     probe(socket).map_err(|e| e.to_string())?;
     crate::installed_runtime::reexec_if_replaced(state)?;
     let directory = directory(state, socket)?;
@@ -562,7 +569,15 @@ pub fn run_worker(state: &Path, socket: &str) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     let pending_directory = pending_directory(&directory)?;
     let mut last_probe = Instant::now();
+    drop(initial_gate);
     loop {
+        let gate = match crate::runtime_command_guard(state, None) {
+            Ok(gate) => gate,
+            Err(_) => return Ok(()),
+        };
+        if crate::installed_runtime::retirement::check(state, false).is_err() {
+            return Ok(());
+        }
         crate::installed_runtime::reexec_if_replaced(state)?;
         if last_probe.elapsed() >= Duration::from_secs(5) {
             if probe(socket).is_err() {
@@ -604,7 +619,12 @@ pub fn run_worker(state: &Path, socket: &str) -> Result<(), String> {
             }
         }
         pending.sort();
+        drop(gate);
         for key in pending {
+            let gate = match crate::runtime_command_guard(state, None) {
+                Ok(gate) => gate,
+                Err(_) => return Ok(()),
+            };
             let mut child = crate::daemon::command(
                 &launcher(state)?,
                 crate::daemon::Scope::Endpoint(&crate::mux::Endpoint::parse(socket)),
@@ -616,6 +636,7 @@ pub fn run_worker(state: &Path, socket: &str) -> Result<(), String> {
             .arg(&key)
             .spawn()
             .map_err(|e| e.to_string())?;
+            drop(gate);
             let deadline = Instant::now() + Duration::from_secs(60);
             loop {
                 if child.try_wait().map_err(|e| e.to_string())?.is_some() {

@@ -286,3 +286,74 @@ mod platform {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(target_os = "macos")]
+pub(crate) fn opens(pid: u32, path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    #[repr(C)]
+    struct FileInfo {
+        flags: u32,
+        status: u32,
+        offset: libc::off_t,
+        kind: i32,
+        guard: u32,
+    }
+    #[repr(C)]
+    struct VnodeFd {
+        file: FileInfo,
+        vnode: libc::vnode_info_path,
+    }
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    let size =
+        unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
+    if size <= 0 {
+        return false;
+    }
+    let mut fds = vec![
+        libc::proc_fdinfo {
+            proc_fd: 0,
+            proc_fdtype: 0
+        };
+        size as usize / std::mem::size_of::<libc::proc_fdinfo>() + 32
+    ];
+    let bytes = std::mem::size_of_val(fds.as_slice());
+    let read = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDLISTFDS,
+            0,
+            fds.as_mut_ptr().cast(),
+            bytes as i32,
+        )
+    };
+    if read <= 0 {
+        return false;
+    }
+    fds.truncate(read as usize / std::mem::size_of::<libc::proc_fdinfo>());
+    fds.iter().filter(|fd| fd.proc_fdtype == 1).any(|fd| {
+        let mut info = std::mem::MaybeUninit::<VnodeFd>::uninit();
+        let size = std::mem::size_of::<VnodeFd>();
+        let read = unsafe {
+            libc::proc_pidfdinfo(pid, fd.proc_fd, 2, info.as_mut_ptr().cast(), size as i32)
+        };
+        if read != size as i32 {
+            return false;
+        }
+        let info = unsafe { info.assume_init() };
+        u64::from(info.vnode.vip_vi.vi_stat.vst_dev) == metadata.dev()
+            && info.vnode.vip_vi.vi_stat.vst_ino == metadata.ino()
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn opens(pid: u32, path: &Path) -> bool {
+    std::fs::read_dir(format!("/proc/{pid}/fd")).is_ok_and(|fds| {
+        fds.flatten()
+            .any(|fd| std::fs::read_link(fd.path()).is_ok_and(|p| p == path))
+    })
+}

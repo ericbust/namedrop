@@ -81,6 +81,9 @@ pub fn accept(
 /// with the old image. It reaps the mailbox workers it starts as they
 /// exit, and hands those still running to that runtime.
 pub fn run_worker(state: &Path, endpoint: &crate::mux::Endpoint, label: &str) {
+    if crate::installed_runtime::retirement::check(state, false).is_err() {
+        return;
+    }
     let workers = crate::rex_bridge::Workers::inherited();
     let woken = std::cell::RefCell::new(Vec::new());
     let wake = |space: &crate::SpaceId| {
@@ -109,7 +112,7 @@ pub fn run_worker(state: &Path, endpoint: &crate::mux::Endpoint, label: &str) {
                     within,
                     std::time::Duration::from_secs(1),
                 );
-                state.is_dir()
+                state.is_dir() && crate::installed_runtime::retirement::check(state, false).is_ok()
             },
             woken: &woken,
             wake: &mut |space| wake(space),
@@ -142,12 +145,22 @@ fn hold(state: &Path, endpoint: &crate::mux::Endpoint, label: &str, work: &mut d
     if !valid_label(label) {
         return;
     }
+    let initial_gate = match crate::runtime_command_guard(state, None) {
+        Ok(gate) => gate,
+        Err(_) => return,
+    };
     let Ok(lock) = worker_lock(state, endpoint, label) else {
         return;
     };
-    while lock.try_lock().is_ok() {
+    drop(initial_gate);
+    while crate::installed_runtime::retirement::check(state, false).is_ok()
+        && lock.try_lock().is_ok()
+    {
         work();
         let _ = lock.unlock();
+        if crate::installed_runtime::retirement::check(state, false).is_err() {
+            return;
+        }
         let queued = RelayStore::read(state)
             .and_then(|store| store.queued(label, &endpoint.key))
             .is_ok_and(|queued| !queued.is_empty());
@@ -176,6 +189,9 @@ fn wait_for_new(
     let before = queued();
     let until = std::time::Instant::now() + within;
     loop {
+        if crate::installed_runtime::retirement::check(state, false).is_err() {
+            return;
+        }
         let left = until.saturating_duration_since(std::time::Instant::now());
         if left.is_zero() {
             return;

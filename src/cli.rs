@@ -82,6 +82,39 @@ impl RuntimeOptions {
 }
 
 impl Cli {
+    pub fn install_options(&self) -> Option<(bool, bool)> {
+        match self.command {
+            Command::Install {
+                print_config,
+                remove,
+            } => Some((print_config, remove)),
+            _ => None,
+        }
+    }
+    pub fn explicit_state(&self) -> Option<&Path> {
+        self.subagent_hook()
+            .map(|(s, _)| s)
+            .or_else(|| self.stop_hook_state_directory())
+            .or_else(|| self.stop_worker_state_directory())
+            .or_else(|| self.user_prompt_submit_hook_state_directory())
+            .or_else(|| self.mailbox_wake_hook_state_directory())
+            .or_else(|| self.session_start_hook_state_directory())
+            .or(self.runtime.plugin_state.as_deref())
+    }
+    pub fn quiet_retirement(&self) -> bool {
+        matches!(
+            self.command,
+            Command::Hook { .. }
+                | Command::Rex {
+                    command: RexCommand::Bridge | RexCommand::Ensure { .. }
+                }
+                | Command::Relay {
+                    command: RelayCommand::Worker { .. }
+                }
+                | Command::DashboardServer { .. }
+                | Command::DashboardObserverGuard { .. }
+        )
+    }
     pub fn subagent_hook(&self) -> Option<(&Path, crate::AgentRuntime)> {
         match &self.command {
             Command::Hook {
@@ -402,6 +435,13 @@ enum Command {
     Name(NameArgs),
     /// Activate Namedrop for this Herdr space after confirmation.
     Activate,
+    /// Install Namedrop's Rex module and shared agent packages.
+    Install {
+        #[arg(long, conflicts_with = "remove")]
+        print_config: bool,
+        #[arg(long)]
+        remove: bool,
+    },
     /// Deactivate Namedrop for this Herdr space while preserving its data.
     Deactivate,
     /// Inspect collaboration health without changing state.
@@ -547,6 +587,8 @@ impl Command {
             Self::Reminder { command } => command.operation(),
             Self::Name(_) => "name",
             Self::Activate => "activate",
+            Self::Install { remove: true, .. } => "install.remove",
+            Self::Install { .. } => "install",
             Self::Deactivate => "deactivate",
             Self::Doctor => "doctor",
             Self::Purge => "purge",

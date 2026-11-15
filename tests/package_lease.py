@@ -16,6 +16,11 @@ import time
 repo=Path(__file__).resolve().parents[1]
 binary=Path(sys.argv[1]).resolve()
 WRITERS={
+    'src/install.rs::remove_all':['tests/rex_installer.py --remove'],
+    'src/install/command.rs::remove_shell_command':['tests/rex_installer.py --remove'],
+    'src/rex_ui/install.rs::apply':['tests/rex_installer.py install/remove'],
+    'src/rex_ui/install.rs::install_packages':['tests/rex_installer.py install','activate handoff'],
+    'src/rex_ui/install.rs::save':['tests/rex_installer.py install','activate handoff'],
     'src/install.rs::install_integration_package_with_config': ['activate','event','hook'],
     'src/install.rs::remove_subagent_hooks':['deactivate'],
     'src/install.rs::replace_if_changed':['activate','name','deactivate','event','hook'],
@@ -217,15 +222,8 @@ with tempfile.TemporaryDirectory(prefix='nd-lease-matrix-') as folder:
             held.close()
         print('the status hook neither waits nor claims',flush=True)
 
-        # Herdr over a standalone record: activation writes nothing and names the standalone state.
         mixed=root/'herdr-over-standalone'
         ok(run(mixed,state,activate),'standalone first')
-        before=snapshot(mixed);p=run(mixed,old,activate)
-        assert p.returncode!=0 and 'ND-INSTALL-002' in p.stdout+p.stderr and str(state) in p.stdout+p.stderr,(p.returncode,p.stdout,p.stderr)
-        assert snapshot(mixed)==before,'herdr activation over a standalone record changed files'
-        skill=mixed/'.agents/skills/namedrop/SKILL.md';expected_skill=skill.read_text();skill.write_text('stale package\n')
-        ok(run(mixed,state,activate),'standalone again')
-        assert skill.read_text()==expected_skill,'the standalone owner did not write'
         # Herdr's other writers leave the packages to the next activation and still do their own work.
         herdr_inactive=installed('herdr-inactive','herdr')
         for name in ['event','hook','name','deactivate']:
@@ -235,6 +233,14 @@ with tempfile.TemporaryDirectory(prefix='nd-lease-matrix-') as folder:
             if name=='deactivate':assert json.loads(p.stdout)['data']['deactivated'] is True,p.stdout
             assert settled(mixed,before) if name=='hook' else snapshot(mixed)==before,('herdr writer over standalone changed files',name)
             print('herdr',name,'over a standalone record unchanged',flush=True)
+        # The takeover replaces U3's temporary refusal test in this commit.
+        p=ok(run(mixed,old,activate),'Herdr takes over')
+        data=json.loads(p.stdout)['data'];assert data['handoff'][0]['notice'].find('were not carried over')>=0,data
+        assert (mixed/'.config/namedrop/state-directory').read_text()==str(old)+'\n'
+        before=snapshot(mixed);p=run(mixed,state,activate)
+        assert p.returncode==69 and 'ND-INSTALL-001' in p.stderr and str(old) in p.stderr,(p.returncode,p.stdout,p.stderr)
+        assert snapshot(mixed)==before,'retired standalone activation changed shared files'
+        print('takeover stays with Herdr',flush=True)
     finally:
         sock.close()
         if (root/'pids').exists():

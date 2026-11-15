@@ -12,7 +12,7 @@ pub mod home;
 mod input;
 mod model;
 mod ports;
-mod processes;
+pub(crate) mod processes;
 pub(crate) mod rex;
 
 pub use effect::*;

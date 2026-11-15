@@ -130,3 +130,22 @@ fn read_target(home: &Path, target: &Path) -> Result<Option<(String, u32)>, Stri
     }
     Err(conflict(target, "is not a file path"))
 }
+
+pub(super) fn remove_shell_command(
+    lease: &PackageLease,
+    home: &Path,
+    state: &Path,
+) -> Result<(), String> {
+    lease.require_write()?;
+    let path = home.join(".local/bin/namedrop");
+    if let Some((text, _)) = read_target(home, &path)?
+        && text.starts_with(OWNER)
+        && text.contains(&format!(
+            "--plugin-state {} ",
+            shell_single_quote(state.to_str().ok_or("state path is not UTF-8")?)
+        ))
+    {
+        fs::remove_file(path).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}

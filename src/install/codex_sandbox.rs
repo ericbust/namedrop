@@ -374,6 +374,13 @@ pub(crate) fn remove(lease: &PackageLease, state: &Path) -> Result<usize, String
     if !lease.writable()? {
         return Ok(0);
     }
+    if matches!(
+        crate::installed_runtime::retirement(state)?,
+        Some(crate::installed_runtime::Retirement::Removed { .. })
+    ) {
+        let _guard = lock(&state.join("codex-sandbox.lock"))?;
+        return remove_owned(lease, state);
+    }
     crate::StateStore::open(state)
         .map_err(|e| e.to_string())?
         .transaction(|tx| {

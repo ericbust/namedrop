@@ -79,6 +79,14 @@ where
     I: IdGenerator,
 {
     let mut report = diagnose_space(runtime);
+    if let Some(home) = runtime.home_directory {
+        for warning in crate::rex_ui::predecessor_warnings(home, runtime.state_directory) {
+            report.issues.push(issue("ND-INSTALL-001",HealthSeverity::Notice,"Agents on Rex still run the old hooks.",&warning,HealthRepairKind::AgentRepair,"In each Rex session, run Activate Namedrop again and name the panes again, then restart those agents so they load the new hooks."));
+            if report.status == HealthStatus::Healthy {
+                report.status = HealthStatus::NeedsAttention;
+            }
+        }
+    }
     if runtime.mux.endpoint().kind == crate::mux::MuxKind::Rex
         && let Some(inspected) =
             crate::rex_ui::inspect(runtime.home_directory, runtime.mux.endpoint())
@@ -1635,6 +1643,13 @@ fn rex_module_explanation(diagnostic: &serde_json::Value) -> String {
             keys.join(", ")
         }
     );
+    if diagnostic["line"] == "removed" {
+        explanation.push_str(&format!(
+            " The Namedrop line was removed. To restore it, add {} as its own line in {}.",
+            crate::rex_ui::CONFIG_LINE,
+            text(&diagnostic["config"]["path"])
+        ));
+    }
     if let Some(error) = diagnostic["error"].as_str() {
         explanation.push_str(&format!(" Readback error: {error}"));
     }
@@ -1739,6 +1754,14 @@ mod tests {
             ],
             "error": "no about"
         });
+        let mut removed = diagnostic.clone();
+        removed["line"] = serde_json::json!("removed");
+        let repair = rex_module_explanation(&removed);
+        assert!(
+            repair.contains(crate::rex_ui::CONFIG_LINE)
+                && repair.contains("The Namedrop line was removed")
+                && repair.contains("/cfg/init.lua")
+        );
         let explanation = rex_module_explanation(&diagnostic);
         assert_eq!(terminal_safe_text(&explanation), explanation);
         assert_eq!(

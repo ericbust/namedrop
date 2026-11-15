@@ -472,6 +472,7 @@ fn only_a_set_rex_timeout_counts_in_the_confirm_check() {
     listener.set_nonblocking(true).unwrap();
     let prompt_with = |set_cap| {
         let socket = Socket {
+            connect_deadline: None,
             path: path.clone(),
             budget: Budget::ADAPTER_DEFAULT,
             cancelled: Arc::default(),

@@ -1,6 +1,9 @@
 //! Stable command paths and shared-package ownership across compatible updates.
-mod packages;
+pub(crate) mod helpers;
+pub(crate) mod packages;
+pub(crate) mod retirement;
 pub(crate) use packages::{PackageLease, Writer, package_guard};
+pub use retirement::{Retirement, begin_removal, retirement, standalone};
 #[cfg(test)]
 pub(crate) fn test_package_lease() -> PackageLease {
     PackageLease::development()
@@ -15,6 +18,22 @@ pub fn command_guard(
     state: &std::path::Path,
     wait: Option<std::time::Duration>,
 ) -> Result<Option<fs::File>, String> {
+    command_guard_inner(state, wait, false)
+}
+
+pub fn command_guard_allow_removed(
+    state: &std::path::Path,
+    wait: Option<std::time::Duration>,
+) -> Result<Option<fs::File>, String> {
+    command_guard_inner(state, wait, true)
+}
+
+fn command_guard_inner(
+    state: &std::path::Path,
+    wait: Option<std::time::Duration>,
+    allow_removed: bool,
+) -> Result<Option<fs::File>, String> {
+    retirement::check(state, allow_removed)?;
     let runtime = state.join("runtime");
     if !runtime.is_dir() {
         return Ok(None);
@@ -68,6 +87,7 @@ pub fn command_guard(
             }
         }
     }
+    retirement::check(state, allow_removed)?;
     if fs::symlink_metadata(runtime.join("migration.json")).is_ok() {
         return Err("Namedrop activation was interrupted. Reopen Update Namedrop to finish; this command made no changes.".into());
     }
