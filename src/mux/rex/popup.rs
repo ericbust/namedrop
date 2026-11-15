@@ -19,11 +19,11 @@ impl<W: Wire> RexMux<W> {
         }
         let target = &popup.target;
         let (title, from) = words(popup.screen);
-        // A layer floats over a window, and a detached block is in none.
+        // A layer floats over a window, and a detached pane is in none.
         if target.tab.as_str().is_empty() {
             return Err(MuxError::Unavailable(format!(
-                "This block is not in a window, so {title} cannot open over it. Open {title} \
-                 from a block in a window."
+                "This pane is not in a window, so {title} cannot open over it. Open {title} \
+                 from a pane in a window."
             )));
         }
         let mut call = self.call()?;
@@ -41,7 +41,9 @@ impl<W: Wire> RexMux<W> {
                 )));
             }
             // A launch typed in the target pane is that pane's foreground
-            // itself. The server is proven local, so its pids are ours.
+            // itself. Only the server is proven local: the pane's host is not
+            // checked, so a pane on another host whose remote pid equals ours
+            // is taken as this launch.
             Some(foreground)
                 if foreground.name == "namedrop" && foreground.pid != std::process::id() =>
             {
@@ -353,7 +355,7 @@ mod tests {
             );
             let error = mux.open_popup(&spec, &launcher).unwrap_err().to_string();
             assert!(
-                error.starts_with("This block is not in a window, so ")
+                error.starts_with("This pane is not in a window, so ")
                     && error.contains(words(screen).0),
                 "{error}"
             );

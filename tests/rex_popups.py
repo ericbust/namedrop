@@ -218,7 +218,7 @@ def main():
         before = blocks()
         result = subprocess.run([str(launcher), "--endpoint", endpoint, "--space", session, "--pane", detached,
                                  "ui", "launch", "name"], env=env, text=True, capture_output=True, timeout=20)
-        assert result.returncode and "This block is not in a window" in result.stdout + result.stderr, result
+        assert result.returncode and "This pane is not in a window" in result.stdout + result.stderr, result
         assert blocks() == before, "a detached target opened a layer"
         rex("block", "close", "-s", session, detached)
         wait_for(blocks, lambda ids: detached not in ids, "detached block did not close")
