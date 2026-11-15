@@ -5,9 +5,14 @@ one reply per request. It serves one connection at a time.
 `answer(method)` returns a request's payload, or raises EOFError to close
 the connection. Load it by path, as `python3 -I` puts no test folder on
 `sys.path`.
+
+`InstallServer` answers as a Rex server whose config is `config`, for the
+tests that run `namedrop install` and `runtime.py` against one.
 """
 import contextlib
+import fcntl
 import json
+import os
 import socket
 import struct
 import threading
@@ -91,3 +96,69 @@ class Server:
                                     'payload': self.answer(request['method'])})
                 except (EOFError, OSError):
                     pass
+
+
+LINE = 'pcall(require, "namedrop");'
+
+
+class InstallServer(Server):
+    """A server at `root/r.sock` whose config is `config`. It lists no
+    sessions, reloads the config, reports Namedrop's actions while the
+    config has the line, and answers `about` from `root/home`'s rex.json.
+    A reload fails at reload number `fail_at`, or every reload while
+    `fail_before` is set; `check_lock` asserts that no process holds the
+    per-user lock during a reload."""
+
+    def __init__(self, root, config):
+        self.root = root
+        self.config = config
+        self.reloads = 0
+        self.fail_at = None
+        self.warning = False
+        self.wrong = None
+        self.edit_during_error = False
+        self.fail_before = False
+        self.check_lock = True
+        super().__init__(root / 'r.sock', self.answer)
+
+    def answer(self, method):
+        if method == 'server.status':
+            return {'pid': os.getpid(), 'listeners': [{'primary': True, 'transport': 'unix', 'addresses': [str(self.socket)]}]}
+        if method == 'session.list':
+            return {'sessions': []}
+        if method == 'client.keymap':
+            return self.keymap()
+        if method == 'server.config_reload':
+            self.reloads += 1
+            if self.check_lock:
+                lock = self.root / 'home/.config/namedrop/packages.lock'
+                if lock.exists():
+                    with lock.open('r+') as f:
+                        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            failed = self.fail_before or self.reloads == self.fail_at
+            if failed and self.edit_during_error:
+                self.config.write_text('-- edited by person\n')
+            diagnostics = [{'severity': 'error' if failed else 'warning', 'message': 'fixture diagnostic'}]
+            return {'generation': self.reloads, 'diagnostics': diagnostics if failed or self.warning else []}
+        if method == 'client.action':
+            return {'result': self.about(), 'client_actions': []}
+        raise AssertionError(method)
+
+    def loaded(self):
+        return self.config.exists() and LINE.encode() in [line.strip() for line in self.config.read_bytes().split(b'\n')]
+
+    def keymap(self):
+        names = ['activate', 'name', 'manage', 'doctor', 'status', 'tour', 'channels', 'pause', 'resume', 'deactivate', 'about']
+        actions = [{'name': 'namedrop_' + n} for n in names] if self.loaded() else []
+        return {'config': {'path': str(self.config), 'exists': self.config.exists()}, 'actions': actions,
+                'bindings': [], 'diagnostics': []}
+
+    def about(self):
+        if not self.loaded():
+            return None
+        record = json.loads((self.root / 'home/.config/namedrop/rex.json').read_text())
+        result = {k: record[k] for k in ['module', 'launcher', 'state']}
+        result['module'] = '@' + result['module']
+        if self.wrong:
+            result[self.wrong] = '/another/install'
+        return result

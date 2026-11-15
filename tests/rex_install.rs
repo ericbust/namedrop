@@ -74,6 +74,7 @@ fn retirement_precedes_every_dispatch_form_and_all_cached_hook_forms() {
             vec!["send"],
             vec!["install"],
             vec!["rex", "action", "name"],
+            vec!["rex", "sessions", "--json"],
             vec!["ui", "launch", "name"],
             vec!["--validate-update-manifest", "/does-not-exist"],
             vec!["describe"],

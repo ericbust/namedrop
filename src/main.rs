@@ -251,6 +251,18 @@ fn main() -> ExitCode {
             return refuse_before_screen(&cli, inherited, 69);
         }
     }
+    if cli.is_rex_sessions() {
+        return finish(
+            "rex.sessions",
+            selected_state
+                .as_deref()
+                .ok_or_else(state_required)
+                .and_then(|state| {
+                    namedrop::rex_ui::sessions(state, cli.runtime.endpoint.as_deref(), inherited)
+                }),
+            cli.result_format(io::stdout().is_terminal()),
+        );
+    }
     if cli.rex_ensure_from_server() {
         let parent = unsafe { libc::getppid() } as u32;
         let Some(endpoint) = namedrop::rex_ui::server_start_endpoint(

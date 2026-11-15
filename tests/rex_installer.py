@@ -17,44 +17,13 @@ BINARY=Path(sys.argv[1]).resolve()
 LINE='pcall(require, "namedrop");'
 MANAGED='-- Managed by Namedrop. `namedrop install` rewrites this file, so edits here are lost.'
 
-class Server(scripted_rex.Server):
-    def __init__(self,root,config):
-        self.root=root;self.config=config;self.reloads=0;self.fail_at=None;self.warning=False;self.wrong=None;self.edit_during_error=False;self.fail_before=False;self.check_lock=True
-        super().__init__(root/'r.sock',self.answer)
-    def answer(self,method):
-        if method=='server.status':return {'pid':os.getpid(),'listeners':[{'primary':True,'transport':'unix','addresses':[str(self.socket)]}]}
-        if method=='client.keymap':return self.keymap()
-        if method=='server.config_reload':
-            self.reloads+=1
-            if self.check_lock:
-                import fcntl
-                lock=self.root/'home/.config/namedrop/packages.lock'
-                if lock.exists():
-                    with lock.open('r+') as f:fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)
-            failed=self.fail_before or self.reloads==self.fail_at
-            if failed and self.edit_during_error:self.config.write_text('-- edited by person\n')
-            return {'generation':self.reloads,'diagnostics':[{'severity':'error' if failed else 'warning','message':'fixture diagnostic'}] if failed or self.warning else []}
-        if method=='client.action':return {'result':self.about(),'client_actions':[]}
-        raise AssertionError(method)
-    def loaded(self):
-        return self.config.exists() and LINE.encode() in [l.strip() for l in self.config.read_bytes().split(b'\n')]
-    def keymap(self):
-        names=['activate','name','manage','doctor','status','tour','channels','pause','resume','deactivate','about']
-        return {'config':{'path':str(self.config),'exists':self.config.exists()},'actions':[{'name':'namedrop_'+n} for n in names] if self.loaded() else [],'bindings':[],'diagnostics':[]}
-    def about(self):
-        if not self.loaded():return None
-        record=json.loads((self.root/'home/.config/namedrop/rex.json').read_text())
-        result={k:record[k] for k in ['module','launcher','state']};result['module']='@'+result['module']
-        if self.wrong:result[self.wrong]='/another/install'
-        return result
-
 with tempfile.TemporaryDirectory(prefix='nd-u7-protocol-',dir='/tmp') as folder:
     root=Path(folder)
     def case(name,contents=b'-- personal config\n',custom=False):
         place=root/name;place.mkdir();(place/'home').mkdir();(place/'state/runtime').mkdir(parents=True);(place/'state/runtime/owner').write_text('standalone\n')
         config=place/('custom/init.lua' if custom else 'home/.config/rex/init.lua');config.parent.mkdir(parents=True,exist_ok=True)
         if contents is not None:config.write_bytes(contents)
-        return place,config,Server(place,config)
+        return place,config,scripted_rex.InstallServer(place,config)
     def run(place,server,*args,ok=True):
         env={'HOME':str(place/'home'),'PATH':'/usr/bin:/bin','NAMEDROP_STATE_DIR':str(place/'state'),'REX_SERVER':'unix://'+str(server.socket),'SHELL':'/bin/none'}
         p=subprocess.run([str(BINARY),'--json','install',*args,'--input-json','{"confirmed":true}'],env=env,input=b'',capture_output=True,timeout=30)

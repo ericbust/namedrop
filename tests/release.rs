@@ -610,6 +610,7 @@ fn the_archive_bundles_every_declared_entrypoint_including_the_naming_popup() {
         "scripts/update.py",
         "scripts/run.sh",
         "scripts/runtime.py",
+        "scripts/runtime_install.py",
         "scripts/check-linux-prerequisites.sh",
         "SHA256SUMS",
         "README.md",

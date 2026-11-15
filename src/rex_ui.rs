@@ -6,8 +6,10 @@ use std::{fs, path::Path};
 
 mod handoff;
 mod install;
+mod sessions;
 pub(crate) use handoff::{handoff, predecessor_warnings};
 pub use install::{confirm_remove, install, remove};
+pub use sessions::sessions;
 
 pub const CONFIG_LINE: &str = "pcall(require, \"namedrop\");";
 pub const MANAGED_LINE: &str =

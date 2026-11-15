@@ -330,7 +330,7 @@ def rex_server_check(endpoint):
     return None
 
 
-def rex_session_panes():
+def rex_session_panes(*, all_endpoints=False):
     """The Rex-bound agent sessions in the store, which Herdr's survey cannot
     see; the stopped Rex servers whose sessions were left out; and the Rex
     servers that could not be checked, with why, whose sessions are counted.
@@ -359,7 +359,8 @@ def rex_session_panes():
                        AND c.address_id=b.address_id AND c.claim_state='active') AS alias
                 FROM pane_bindings b JOIN pane_addresses a
                 USING (session_socket_id, worktree_id, address_id)
-                WHERE b.active=1 AND a.retired=0 AND b.session_socket_id LIKE 'rex:%')
+                WHERE b.active=1 AND a.retired=0
+                    {'' if all_endpoints else "AND b.session_socket_id LIKE 'rex:%'"})
             WHERE session != ''
             ORDER BY endpoint, space, pane""").fetchall()
     checked = {endpoint: rex_server_check(endpoint) for endpoint in sorted({row[0] for row in rows})}
@@ -381,6 +382,11 @@ def preflight(live=False):
             "The source pane/workspace is not present on this server.")
     rex_panes, stopped, unchecked = rex_session_panes()
     panes.extend(rex_panes)
+    return preflight_panes(panes, unverified, stopped, unchecked, live)
+
+
+def preflight_panes(panes, unverified, stopped, unchecked, live):
+    """Apply the same durable-work and legacy-session rules to either survey."""
     state = durable_state(panes, bool(unverified))
     state['other_servers'] = unverified
     state['stopped_rex_servers'] = stopped
