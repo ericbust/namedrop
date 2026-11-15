@@ -493,9 +493,17 @@ def check_rex_remote_lab(scratch):
     assert rex_remote.hosts_by_label(listed) == {"labb": ["ssh://nd@127.0.0.1:60970"],
                                                  "labb-http": ["http://127.0.0.1:60971"]}
     assert rex_remote.hosts_by_label({"hosts": []}) == {}
+    import rex_remote_checks
+    notice = ("Namedrop could not relay this message to @bterm@labb-http: labb-http's Rex server answers as "
+              "the one labb reaches")
+    assert rex_remote_checks.names_label(notice, "labb") and rex_remote_checks.names_label(notice, "labb-http")
+    assert not rex_remote_checks.names_label("Namedrop could not relay this message to @bterm@labb-http", "labb")
+    assert rex_remote_checks.tests_passed("running 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored\n") == 0
+    assert rex_remote_checks.tests_passed("test result: ok. 6 passed; 0 failed; 0 ignored; 1114 filtered out\n") == 6
     return ("remote lab: its ssh runs with the lab's config, key and known_hosts only, B's image pins its "
-            "base, Rex's version and signing key, up reads Rex's nested host entries, and up, --fresh and "
-            "down refuse a directory with no lab marker")
+            "base, Rex's version and signing key, up reads Rex's nested host entries, up, --fresh and down "
+            "refuse a directory with no lab marker, check 7 reads labb as a whole label, and check 9 counts "
+            "a filter that ran no test as a failure")
 
 
 def check_rex_remote_down(scratch):
