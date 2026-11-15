@@ -1346,11 +1346,12 @@ def section_updates():
             after = os.readlink(f.state / 'runtime/current')
             if migrated_failure:
                 assert after != selected
-                assert 'Activation failed after a possible state migration. The new runtime remains selected;' in failed.stderr
+                warning = failed.stderr.find('Activation failed after a possible state migration. The new runtime remains selected;')
+                assert -1 < warning < failed.stderr.find('Installation did not complete. Inspect setup before starting sessions.'), failed.stderr
                 assert store() == (schemas[1], before[1]), store()
             else:
                 assert after == selected
-                assert 'The previous runtime remains selected; existing sessions can continue.' in failed.stderr
+                assert 'Installation did not complete. The previous runtime remains selected; existing sessions can continue.' in failed.stderr
                 assert store() == before
             doctor_runs_selected(session, block)
             say('U10 migrated failure' if migrated_failure else 'U10 detection, migration and same-schema rollback', 'passed')
