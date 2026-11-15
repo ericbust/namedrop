@@ -104,7 +104,7 @@ fn a_principal_other_than_the_owner_or_the_tailnet_is_refused_and_nothing_starts
             status(&reply),
             (
                 "refused",
-                format!("the relay does not accept a {refused} caller here").as_str()
+                format!("the relay does not accept the caller kind `{refused}` here").as_str()
             )
         );
         assert_eq!(reply.0, "call-1");
@@ -293,6 +293,60 @@ fn finishing_waits_for_every_accept_still_running() {
     assert!(!receiver.busy());
 }
 
+/// The accept of a Tailscale caller gets its device as one
+/// `--caller-host=<node>` argument, and a peer caller's accept gets none.
+#[test]
+fn the_accept_of_a_tailscale_caller_names_its_device() {
+    const ARGS: &str = r#"cat >/dev/null; printf '{"host_id":"host-b","can_reply":true,"result":{"id":"m1","to":"bob","status":"accepted","reason":"%s"},"outbox":[],"more":false}' "$0 $1""#;
+    let state = State::new();
+    let (mut receiver, _) = receiver(&state, ARGS, ANSWER_WITHIN);
+    // SAFETY: `getuid` has no preconditions.
+    let uid = unsafe { libc::getuid() };
+    for (principal, args) in [
+        (
+            json!({"kind": "tailscale", "transport": "tailscale", "node": "studio"}),
+            "--caller-host=studio ",
+        ),
+        (
+            json!({"kind": "peer", "transport": "unix", "uid": uid}),
+            "/bin/sh ",
+        ),
+    ] {
+        assert_eq!(
+            receiver.receive(perform(principal, "host-b"), Some("host-b")),
+            None
+        );
+        let replies = answered(&mut receiver, Duration::from_secs(5));
+        assert_eq!(status(&replies[0]), ("accepted", args));
+    }
+    receiver.finish();
+}
+
+/// Only a Tailscale principal names the caller's machine, by its device,
+/// and only a device name that is a label is passed on.
+#[test]
+fn only_a_tailscale_principal_names_the_caller_s_host() {
+    for (principal, host) in [
+        (
+            json!({"kind": "tailscale", "transport": "tailscale", "display": "eric@example.com",
+                "node": "studio", "login_name": "eric@example.com"}),
+            Some("studio"),
+        ),
+        (
+            json!({"kind": "peer", "transport": "unix", "display": "uid 501", "uid": 501,
+                "gid": 20, "pid": 66537}),
+            None,
+        ),
+        (
+            json!({"kind": "tailscale", "node": "studio.tail1234.ts.net"}),
+            None,
+        ),
+        (json!({"kind": "anonymous", "node": "studio"}), None),
+    ] {
+        assert_eq!(caller_host(&principal), host, "{principal}");
+    }
+}
+
 /// The accept names its endpoint as a flag, which is where `relay accept`
 /// reads it, and gets the bridge's state directory.
 #[test]
@@ -373,4 +427,43 @@ fn each_accept_goes_to_the_reaper_it_was_given() {
         .parse()
         .unwrap();
     assert_eq!(*handed.lock().unwrap(), [pid]);
+}
+
+/// The bridge passes an accept's answer on as the accept wrote it, a field
+/// it does not know included, so a newer accept after an update loses
+/// nothing on its way to A. Output that is no answer is a `retry`.
+#[test]
+fn an_accept_s_answer_goes_on_as_it_wrote_it() {
+    const NEWER: &str = r#"cat >/dev/null; printf '{"host_id":"host-b","can_reply":true,"outbox":[],"more":false,"relay":9,"future":{"field":1}}'"#;
+    // SAFETY: `getuid` has no preconditions.
+    let uid = unsafe { libc::getuid() };
+    for (script, expected) in [
+        (
+            NEWER,
+            Some(
+                json!({"host_id": "host-b", "can_reply": true, "outbox": [], "more": false,
+                "relay": 9, "future": {"field": 1}}),
+            ),
+        ),
+        (r#"cat >/dev/null; printf '{"host_id":5}'"#, None),
+    ] {
+        let state = State::new();
+        let (mut receiver, _) = receiver(&state, script, ANSWER_WITHIN);
+        assert_eq!(
+            receiver.receive(
+                perform(
+                    json!({"kind": "peer", "transport": "unix", "uid": uid}),
+                    "host-b"
+                ),
+                Some("host-b")
+            ),
+            None
+        );
+        let replies = answered(&mut receiver, Duration::from_secs(5));
+        match expected {
+            Some(answer) => assert_eq!(replies[0].1, answer),
+            None => assert_eq!(status(&replies[0]).0, "retry"),
+        }
+        receiver.finish();
+    }
 }

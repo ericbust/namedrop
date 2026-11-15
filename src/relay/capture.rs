@@ -11,7 +11,7 @@ use super::{
 use crate::{
     StateNamespace, StateStore, ThreadId,
     mux::Endpoint,
-    store::{RelayAuthor, RelayOrigin, RelayRecipient, ToRelayAuthor},
+    store::{Answered, RelayAuthor, RelayOrigin, RelayRecipient, ToRelayAuthor},
 };
 use std::path::Path;
 
@@ -20,31 +20,59 @@ use std::path::Path;
 /// stops before a message it could not capture, so the next capture tries
 /// that message again, and it passes each message in one transaction with
 /// the count of the replies of it that B could not keep, so a retry never
-/// counts one twice.
+/// counts one twice. Once every message is captured, the cursor moves past
+/// the endpoint's last message, so the next capture reads only those made
+/// since. Everything it needs of the main database is read first, in one
+/// transaction, so a relay transaction never waits on the main database.
+/// Captures take turns, since one may move the cursor back.
 pub(crate) fn capture(
     state: &Path,
     endpoint: &Endpoint,
     start: &mut dyn FnMut(&str),
 ) -> Result<(), String> {
     let now = super::now_ms();
+    let _capturing = super::capturing(state).map_err(|error| error.to_string())?;
     let relay = RelayStore::open(state, now).map_err(|error| error.to_string())?;
+    let error = |error: crate::StoreError| error.to_string();
+    let anchor = relay.capture_anchor(&endpoint.key).map_err(error)?;
+    let marks = relay.capture_marks(&endpoint.key).map_err(error)?;
+    let floor = relay.capture_floor().map_err(error)?;
     let mut main = StateStore::open(state).map_err(|error| error.to_string())?;
-    let cursor = relay
-        .capture_cursor(&endpoint.key)
+    let (rewind, rows, last) = main
+        .transaction(|transaction| {
+            let rewind = rewind(transaction, &endpoint.key, &anchor, &marks, floor)?;
+            let after = rewind.as_ref().map_or(anchor.0, |rewind| rewind.rowid);
+            let (rows, last) = transaction.relay_recipient_messages(&endpoint.key, after)?;
+            let rows = rows
+                .into_iter()
+                .map(|row| {
+                    let answered = answered(transaction, endpoint, &row)?;
+                    Ok((row, answered))
+                })
+                .collect::<Result<Vec<_>, crate::StoreError>>()?;
+            Ok((rewind, rows, last))
+        })
         .map_err(|error| error.to_string())?;
-    let rows = main
-        .transaction(|transaction| transaction.relay_recipient_messages(&endpoint.key, cursor))
-        .map_err(|error| error.to_string())?;
+    drop(main);
+    if let Some(rewind) = &rewind {
+        relay
+            .rewind_capture(
+                &endpoint.key,
+                rewind.rowid,
+                rewind.message_id.as_deref(),
+                &rewind.gone,
+            )
+            .map_err(error)?;
+    }
     let mut labels: Vec<String> = Vec::new();
     let mut failure = None;
-    for row in &rows {
-        let captured =
-            capture_one(&relay, &mut main, endpoint, row, now).and_then(|(queued, unkept)| {
-                relay
-                    .captured(&endpoint.key, row.rowid, &unkept)
-                    .map(|()| queued)
-                    .map_err(|error| error.to_string())
-            });
+    for (row, answered) in &rows {
+        let captured = relay.captured(
+            &endpoint.key,
+            row.rowid,
+            (&row.message_id, &row.space),
+            || capture_one(&relay, endpoint, row, answered, now),
+        );
         match captured {
             Ok(queued) => {
                 for label in queued {
@@ -59,20 +87,101 @@ pub(crate) fn capture(
             }
         }
     }
+    if failure.is_none()
+        && let Some((last, message_id)) = last
+        && let Err(error) = relay.capture_through(&endpoint.key, last, &message_id)
+    {
+        failure = Some(error.to_string());
+    }
     for label in &labels {
         start(label);
     }
     failure.map_or(Ok(()), Err)
 }
 
-/// Keeps or queues one message for each relay author it addresses, and
-/// returns each label it queued for, and the display name of each relay
-/// author whose reply B could not keep.
-fn capture_one(
-    relay: &RelayStore,
-    main: &mut StateStore,
+/// Where a capture reads again from when its cursor's message is gone.
+struct Rewind {
+    rowid: i64,
+    message_id: Option<String>,
+    /// The spaces whose mark's message is gone too.
+    gone: Vec<String>,
+}
+
+/// Where `endpoint`'s capture reads from when the message at its cursor,
+/// `anchor`, is gone, or `None` when it is still there. A purge of the
+/// newest messages lets SQLite give their rowids to the next ones, at or
+/// below the cursor. Every message after the last relay message of each
+/// space that is still there is new or no relay message, and a purge takes
+/// a space's messages together, so capture reads again from the latest of
+/// the `marks` still there, and never before `floor` or a mark with no id,
+/// which it cannot check.
+fn rewind(
+    transaction: &crate::store::StateTransaction<'_>,
+    endpoint: &str,
+    anchor: &(i64, Option<String>),
+    marks: &[(String, i64, Option<String>)],
+    floor: i64,
+) -> Result<Option<Rewind>, crate::StoreError> {
+    let (cursor, Some(message_id)) = anchor else {
+        return Ok(None);
+    };
+    if transaction.message_at(endpoint, *cursor, message_id)? {
+        return Ok(None);
+    }
+    let mut rewind = Rewind {
+        rowid: floor.min(*cursor),
+        message_id: None,
+        gone: Vec::new(),
+    };
+    for (space, rowid, id) in marks {
+        let there = match id {
+            Some(id) => transaction.message_at(endpoint, *rowid, id)?,
+            None => true,
+        };
+        if !there {
+            rewind.gone.push(space.clone());
+        } else if *rowid > rewind.rowid && rowid <= cursor {
+            rewind.rowid = *rowid;
+            rewind.message_id.clone_from(id);
+        }
+    }
+    Ok(Some(rewind))
+}
+
+/// For each relay author `row` addresses, in order, the message of that
+/// author's in `row`'s thread that `row` answers, which B keeps a reply
+/// against, or `None` for an author of a label, as A has.
+fn answered(
+    transaction: &crate::store::StateTransaction<'_>,
     endpoint: &Endpoint,
     row: &ToRelayAuthor,
+) -> Result<Vec<Option<Answered>>, crate::StoreError> {
+    let namespace = StateNamespace::for_space(&endpoint.key, &row.space);
+    row.relay_recipients
+        .iter()
+        .map(|recipient| match recipient.display.rsplit_once('@') {
+            Some((alias, label)) if !is(recipient, RelayOrigin::Label(label), alias) => transaction
+                .relay_answered(
+                    &namespace,
+                    &ThreadId::new(&row.thread_id),
+                    row.rowid,
+                    &recipient.address_id,
+                    row.in_reply_to.as_deref(),
+                ),
+            _ => Ok(None),
+        })
+        .collect()
+}
+
+/// Keeps or queues one message for each relay author it addresses, and
+/// returns each label it queued for, and the display name of each relay
+/// author whose reply B could not keep. `answered` is what `answered` read
+/// for it.
+fn capture_one(
+    relay: &RelayStore,
+    endpoint: &Endpoint,
+    row: &ToRelayAuthor,
+    answered: &[Option<Answered>],
     now: i64,
 ) -> Result<(Vec<String>, Vec<String>), String> {
     let error = |error: crate::StoreError| error.to_string();
@@ -83,7 +192,7 @@ fn capture_one(
         .mapped_thread(&endpoint.key, &row.space, &row.thread_id)
         .map_err(error)?;
     let (mut labels, mut unkept) = (Vec::new(), Vec::new());
-    for recipient in &row.relay_recipients {
+    for (recipient, answered) in row.relay_recipients.iter().zip(answered) {
         let Some((alias, origin)) = recipient.display.rsplit_once('@') else {
             return Err(format!("relay author {} has no host", recipient.address_id));
         };
@@ -92,9 +201,24 @@ fn capture_one(
             labels.push(origin.to_owned());
             continue;
         }
+        // An answer to the relay's own notice, which asked nothing, is no
+        // reply for A, and none that B let go of.
+        if answered.as_ref().is_some_and(|answered| answered.notice) {
+            continue;
+        }
         let kept = match &mapped {
             Some((host_id, thread)) if is(recipient, RelayOrigin::Host(host_id), alias) => {
-                keep_for(relay, main, endpoint, row, recipient, host_id, thread, now)?
+                keep_for(
+                    relay,
+                    endpoint,
+                    row,
+                    answered
+                        .as_ref()
+                        .map(|answered| answered.message_id.as_str()),
+                    host_id,
+                    thread,
+                    now,
+                )?
             }
             // Its thread's mapping expired, so no reply can reach it.
             _ => false,
@@ -151,35 +275,22 @@ fn queue_to(
         .map_err(|error| error.to_string())
 }
 
-/// On B: keeps `row` for the A host `host_id`, in reply to the A message of
-/// `recipient`'s that it answers, and says whether B kept it, which it does
-/// not once that A message is no longer known or B's outbox for A is full.
-#[allow(clippy::too_many_arguments)]
+/// On B: keeps `row` for the A host `host_id`, in reply to the A message
+/// that relayed `answered`, the message of its recipient's it answers, and
+/// says whether B kept it, which it does not once that A message is no
+/// longer known or B's outbox for A is full.
 fn keep_for(
     relay: &RelayStore,
-    main: &mut StateStore,
     endpoint: &Endpoint,
     row: &ToRelayAuthor,
-    recipient: &RelayRecipient,
+    answered: Option<&str>,
     host_id: &str,
     thread: &str,
     now: i64,
 ) -> Result<bool, String> {
     let error = |error: crate::StoreError| error.to_string();
-    let namespace = StateNamespace::for_space(&endpoint.key, &row.space);
-    let answered = main
-        .transaction(|transaction| {
-            transaction.relay_answered(
-                &namespace,
-                &ThreadId::new(&row.thread_id),
-                row.rowid,
-                &recipient.address_id,
-                row.in_reply_to.as_deref(),
-            )
-        })
-        .map_err(error)?;
     let re = match answered {
-        Some(message) => relay.relayed_as(host_id, &message).map_err(error)?,
+        Some(message) => relay.relayed_as(host_id, message).map_err(error)?,
         None => None,
     };
     let Some(re) = re else {

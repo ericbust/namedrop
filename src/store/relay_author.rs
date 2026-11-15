@@ -6,6 +6,19 @@ pub(super) const ADDRESS_PREFIX: &str = "relay:";
 pub(super) const ROLE_PREFIX: &str = "role-relay:";
 const DESCRIPTION: &str = "Paneless relay author.";
 
+/// The messages of `?1` after rowid `?2` that a relay author receives, read
+/// as a range of rowids, so a capture reads only the messages made since
+/// its last.
+pub(crate) const TO_RELAY_AUTHORS: &str =
+    "SELECT m.rowid, m.worktree_id, m.message_id, m.thread_id, m.in_reply_to,
+        m.author_alias_snapshot, m.author_address_id, m.body
+     FROM collaboration_messages m
+     WHERE m.rowid > ?2 AND +m.session_socket_id = ?1 AND EXISTS (
+        SELECT 1 FROM message_recipients r WHERE r.session_socket_id = m.session_socket_id
+          AND r.worktree_id = m.worktree_id AND r.message_id = m.message_id
+          AND r.address_id LIKE 'relay:%')
+     ORDER BY m.rowid";
+
 /// Where a remote agent is, as one machine knows it: on the recipient's
 /// machine by the `host_id` the sender's server reported, and on the
 /// sender's machine by the `rex hosts` label it sends to, because its first
@@ -199,22 +212,24 @@ impl StateTransaction<'_> {
     }
 
     /// The messages of `session_socket_id` after `rowid` that a relay author
-    /// receives, oldest first, each with every relay author it addresses.
+    /// receives, oldest first, each with every relay author it addresses,
+    /// and the rowid and id of the last message of `session_socket_id`
+    /// after `rowid`, of any kind, when there is one.
     pub(crate) fn relay_recipient_messages(
         &self,
         session_socket_id: &str,
         after: i64,
-    ) -> Result<Vec<ToRelayAuthor>, StoreError> {
-        let mut statement = self.transaction.prepare(
-            "SELECT m.rowid, m.worktree_id, m.message_id, m.thread_id, m.in_reply_to,
-                m.author_alias_snapshot, m.author_address_id, m.body
-             FROM collaboration_messages m
-             WHERE m.session_socket_id = ?1 AND m.rowid > ?2 AND EXISTS (
-                SELECT 1 FROM message_recipients r WHERE r.session_socket_id = m.session_socket_id
-                  AND r.worktree_id = m.worktree_id AND r.message_id = m.message_id
-                  AND r.address_id LIKE 'relay:%')
-             ORDER BY m.rowid",
-        )?;
+    ) -> Result<(Vec<ToRelayAuthor>, Option<MessageAt>), StoreError> {
+        let last = self
+            .transaction
+            .query_row(
+                "SELECT rowid, message_id FROM collaboration_messages
+                 WHERE rowid > ?2 AND +session_socket_id = ?1 ORDER BY rowid DESC LIMIT 1",
+                params![session_socket_id, after],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let mut statement = self.transaction.prepare(TO_RELAY_AUTHORS)?;
         let mut rows = statement
             .query_map(params![session_socket_id, after], |row| {
                 Ok(ToRelayAuthor {
@@ -249,7 +264,25 @@ impl StateTransaction<'_> {
                 )?
                 .collect::<Result<_, _>>()?;
         }
-        Ok(rows)
+        Ok((rows, last))
+    }
+
+    /// Whether the message of `session_socket_id` at `rowid` is still
+    /// `message_id`. SQLite gives a new message the rowid after the
+    /// highest, so one that is gone, or another, means messages at or
+    /// below it were deleted, and a later one may take their rowids.
+    pub(crate) fn message_at(
+        &self,
+        session_socket_id: &str,
+        rowid: i64,
+        message_id: &str,
+    ) -> Result<bool, StoreError> {
+        Ok(self.transaction.query_row(
+            "SELECT EXISTS (SELECT 1 FROM collaboration_messages WHERE rowid = ?2
+                AND session_socket_id = ?1 AND message_id = ?3)",
+            params![session_socket_id, rowid, message_id],
+            |row| row.get(0),
+        )?)
     }
 
     /// What a message to `author` in `thread`, before `rowid`, answers of
@@ -262,11 +295,11 @@ impl StateTransaction<'_> {
         before: i64,
         author: &str,
         preferred: Option<&str>,
-    ) -> Result<Option<String>, StoreError> {
+    ) -> Result<Option<Answered>, StoreError> {
         Ok(self
             .transaction
             .query_row(
-                "SELECT message_id FROM collaboration_messages
+                "SELECT message_id, grammar_version = ?7 FROM collaboration_messages
                  WHERE session_socket_id = ?1 AND worktree_id = ?2 AND thread_id = ?3
                    AND rowid < ?4 AND author_address_id = ?5
                  ORDER BY message_id = ?6 DESC, rowid DESC LIMIT 1",
@@ -276,9 +309,15 @@ impl StateTransaction<'_> {
                     thread.as_str(),
                     before,
                     author,
-                    preferred
+                    preferred,
+                    NOTICE_GRAMMAR
                 ],
-                |row| row.get(0),
+                |row| {
+                    Ok(Answered {
+                        message_id: row.get(0)?,
+                        notice: row.get(1)?,
+                    })
+                },
             )
             .optional()?)
     }
@@ -358,6 +397,37 @@ impl StateTransaction<'_> {
         } else {
             "mention/v1"
         };
+        if !exists
+            && let Some(host) = relayed.self_named_host
+            && self.pane_type(namespace, &relayed.recipient.address_id)? == crate::PaneType::Agent
+        {
+            let text = format!(
+                "[Namedrop: {host} is the name the sending machine gave itself, which Rex did \
+                 not confirm.]"
+            );
+            self.insert_relayed_message(
+                namespace,
+                &Relayed {
+                    author: relayed.author,
+                    request_id: format!("{}:host-notice", relayed.request_id),
+                    thread: relayed.thread,
+                    message_id: MessageId::new(format!(
+                        "{}-host-notice",
+                        relayed.message_id.as_str()
+                    )),
+                    delivery_id: crate::DeliveryId::new(format!(
+                        "{}-host-notice",
+                        relayed.delivery_id.as_str()
+                    )),
+                    in_reply_to: None,
+                    recipient: relayed.recipient,
+                    text: &text,
+                    notice: true,
+                    self_named_host: None,
+                },
+                attribution,
+            )?;
+        }
         let draft = MessageDraft {
             thread_id: relayed.thread.clone(),
             message_id: relayed.message_id.clone(),
@@ -399,6 +469,20 @@ pub(crate) struct Relayed<'a> {
     pub text: &'a str,
     /// Whether the relay wrote it, as a notice that an item failed or that
     /// replies are held.
+    pub notice: bool,
+    /// The host a sender named itself by, when its principal names no
+    /// machine: an agent recipient gets a notice that says so before the
+    /// first message of a thread.
+    pub self_named_host: Option<&'a str>,
+}
+
+/// A main-database message by its rowid and id.
+pub(crate) type MessageAt = (i64, String);
+
+/// The message of a relay author's that a message to it answers, and
+/// whether it is the relay's own notice, which no agent wrote.
+pub(crate) struct Answered {
+    pub message_id: String,
     pub notice: bool,
 }
 

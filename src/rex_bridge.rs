@@ -246,6 +246,12 @@ trait Host {
     /// place, as the same command, and hands it the workers. Returns only
     /// when there is none to run.
     fn reexec_if_replaced(&mut self);
+    /// Starts the relay's worker of each label with an item queued or a
+    /// thread open, unless it runs.
+    fn start_relay_workers(&mut self);
+    /// How often a connected bridge starts the relay's workers again, so a
+    /// worker that stopped while a thread is open collects again.
+    fn relay_every(&self) -> Duration;
 }
 
 struct Processes<'a> {
@@ -268,6 +274,16 @@ impl Host for Processes<'_> {
         if let Some(mut command) = crate::installed_runtime::replacement(self.state) {
             let _ = command.env(INHERITED_WORKERS, self.workers.live()).exec();
         }
+    }
+
+    fn start_relay_workers(&mut self) {
+        crate::relay::start_workers(self.state, self.endpoint, &|worker| {
+            self.workers.reap(worker);
+        });
+    }
+
+    fn relay_every(&self) -> Duration {
+        RELAY_EVERY
     }
 }
 
@@ -323,6 +339,9 @@ impl Away {
 /// also how long a bridge outlives its state directory. The stream pings on
 /// its own schedule within it.
 const IDLE: Duration = Duration::from_secs(60);
+/// How often a connected bridge looks for a relay worker to start again.
+/// A worker collects every 30 s, so a killed one misses at most one.
+const RELAY_EVERY: Duration = Duration::from_secs(10);
 
 /// The bridge's loop. Each connection queues a `Resync` for every activated
 /// space of the endpoint, unless the server's `host_id` changed, then
@@ -370,7 +389,8 @@ fn serve(
             Ok(mut stream) => {
                 reached = true;
                 let opened = Instant::now();
-                crate::relay::start_workers(state, endpoint, &|worker| host.workers().reap(worker));
+                host.start_relay_workers();
+                let mut relay_due = Instant::now() + host.relay_every();
                 let mut pending = Pending::default();
                 let known = same_server(state, endpoint, stream.host_id());
                 if known {
@@ -388,9 +408,14 @@ fn serve(
                     if pending.due().is_some_and(|due| due <= now) {
                         flush(state, endpoint, &mut pending, host, lock);
                     }
+                    if relay_due <= now {
+                        host.start_relay_workers();
+                        relay_due = Instant::now() + host.relay_every();
+                    }
                     let within = pending
                         .due()
                         .map_or(IDLE, |due| due.saturating_duration_since(now))
+                        .min(relay_due.saturating_duration_since(now))
                         .min(if relay.busy() { receive::TICK } else { IDLE });
                     match stream.next(within) {
                         Next::Event(event) => pending.note(event, Instant::now()),

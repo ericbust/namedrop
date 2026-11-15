@@ -1,0 +1,12 @@
+{
+ "can_reply": true,
+ "epoch": "EPOCH",
+ "host_id": "host-b",
+ "more": false,
+ "outbox": [],
+ "result": {
+  "id": "MESSAGE",
+  "status": "accepted",
+  "to": "bob"
+ }
+}

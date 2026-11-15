@@ -235,12 +235,17 @@ impl Cli {
         )
     }
 
-    /// The `host_id` of `namedrop relay accept`.
-    pub fn relay_accept_host_id(&self) -> Option<&str> {
+    /// The `host_id` of `namedrop relay accept`, and the caller's host as
+    /// its principal names it.
+    pub fn relay_accept_host_id(&self) -> Option<(&str, Option<&str>)> {
         match &self.command {
             Command::Relay {
-                command: RelayCommand::Accept { host_id },
-            } => Some(host_id),
+                command:
+                    RelayCommand::Accept {
+                        host_id,
+                        caller_host,
+                    },
+            } => Some((host_id, caller_host.as_deref())),
             _ => None,
         }
     }
@@ -504,6 +509,9 @@ enum RelayCommand {
     Accept {
         #[arg(long)]
         host_id: String,
+        /// The caller's machine, as the server named it in the principal.
+        #[arg(long)]
+        caller_host: Option<String>,
     },
     /// Deliver the items queued for the `rex hosts` label `--host`, and
     /// collect its replies, for the Rex server `--endpoint` names.

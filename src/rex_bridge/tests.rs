@@ -109,6 +109,7 @@ struct Scripted<'w> {
     /// every 20 ms meanwhile, as a real stream wakes at its idle time.
     hold: Option<MuxEvent>,
     replies: &'w Mutex<Vec<(String, Value)>>,
+    waits: &'w Mutex<Vec<(Instant, Duration)>>,
 }
 
 impl Stream for Scripted<'_> {
@@ -117,6 +118,7 @@ impl Stream for Scripted<'_> {
     }
 
     fn next(&mut self, within: Duration) -> Next {
+        self.waits.lock().unwrap().push((Instant::now(), within));
         if let Some(next) = self.nexts.pop_front() {
             return next;
         }
@@ -153,6 +155,8 @@ struct Script {
     /// When each dial came, refused or not.
     dialed: Mutex<Vec<Instant>>,
     replies: Mutex<Vec<(String, Value)>>,
+    /// When each `next` came, and how long the bridge let it wait.
+    waits: Mutex<Vec<(Instant, Duration)>>,
 }
 
 impl Script {
@@ -166,6 +170,28 @@ impl Script {
             opened: AtomicU64::new(0),
             dialed: Mutex::new(Vec::new()),
             replies: Mutex::new(Vec::new()),
+            waits: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Waits for the bridge to first let a `next` wait longer than a batch
+    /// is held for, 250 ms, as it does only after a flush. Returns when the
+    /// `next` before that one came, which is before the flush began, or
+    /// `None` if the bridge has not waited so long 10 s on.
+    fn before_first_flush(&self) -> Option<Instant> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let wait = self
+                .waits
+                .lock()
+                .unwrap()
+                .windows(2)
+                .find(|waits| waits[1].1 > Duration::from_millis(250))
+                .map(|waits| waits[0].0);
+            if wait.is_some() || Instant::now() >= deadline {
+                return wait;
+            }
+            std::thread::sleep(Duration::from_millis(10));
         }
     }
 }
@@ -187,6 +213,7 @@ impl Server for Script {
             stop,
             hold,
             replies: &self.replies,
+            waits: &self.waits,
         }))
     }
 }
@@ -214,6 +241,9 @@ struct FakeHost {
     pids: Vec<u32>,
     replaced: bool,
     workers: Workers,
+    /// When the bridge started the relay's workers, and how often it does.
+    relay_starts: Vec<Instant>,
+    relay_every: Option<Duration>,
 }
 
 /// Requests a stop when dropped, so a helper thread that panics still ends
@@ -246,6 +276,14 @@ impl Host for FakeHost {
         if self.replaced {
             std::panic::resume_unwind(Box::new(Replaced));
         }
+    }
+
+    fn start_relay_workers(&mut self) {
+        self.relay_starts.push(Instant::now());
+    }
+
+    fn relay_every(&self) -> Duration {
+        self.relay_every.unwrap_or(IDLE)
     }
 }
 
@@ -310,6 +348,39 @@ fn a_second_bridge_for_a_server_exits_at_once_and_never_dials() {
         Ok(false),
         "a held lock starts no second bridge"
     );
+}
+
+/// While it stays connected, the bridge starts the relay's workers again
+/// each `relay_every`, so one killed while a thread is open collects again.
+#[test]
+fn a_connected_bridge_starts_the_relay_workers_again_on_its_cadence() {
+    let state = State::new();
+    let stop = Wake::new().unwrap();
+    let script = Script::new(vec![(
+        Some("host-a"),
+        Vec::new(),
+        Some(resync("session:s")),
+    )]);
+    let mut host = FakeHost {
+        relay_every: Some(Duration::from_millis(50)),
+        ..FakeHost::default()
+    };
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let _stop = StopOnDrop(&stop);
+            std::thread::sleep(Duration::from_millis(400));
+        });
+        bridged_with(&state, &script, &stop, &NO_WAIT, &mut host);
+    });
+    let starts = &host.relay_starts;
+    assert!(starts.len() >= 2, "{} starts", starts.len());
+    for pair in starts.windows(2) {
+        assert!(
+            pair[1] - pair[0] >= Duration::from_millis(50),
+            "{:?}",
+            pair[1] - pair[0]
+        );
+    }
 }
 
 #[test]
@@ -463,17 +534,25 @@ fn sigterm_stops_the_bridge_between_flushes() {
         ),
         (None, Vec::new(), None),
     ]);
-    let started = Instant::now();
-    let spawned = std::thread::scope(|scope| {
-        scope.spawn(|| {
-            std::thread::sleep(Duration::from_millis(300));
+    let (returned, on_return) = std::sync::mpsc::channel();
+    let (spawned, stopped) = std::thread::scope(|scope| {
+        let script = &script;
+        let signal = scope.spawn(move || {
+            script.before_first_flush();
             // SAFETY: the bridge's handler is installed, so the signal stops
             // it rather than this process.
             unsafe { libc::kill(libc::getpid(), libc::SIGTERM) };
+            let stopped = on_return.recv_timeout(Duration::from_secs(10)).is_ok();
+            if !stopped {
+                stop.wake();
+            }
+            stopped
         });
-        bridged(&state, &script, stop)
+        let spawned = bridged(&state, script, stop);
+        let _ = returned.send(());
+        (spawned, signal.join().unwrap())
     });
-    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(stopped, "the bridge ran on 10 s after SIGTERM");
     assert_eq!(script.opened.load(Ordering::Relaxed), 1);
     assert_eq!(spawned, ["session:s", "session:t", "session:s"]);
     assert_eq!(
@@ -771,23 +850,25 @@ fn a_space_whose_events_a_flush_cannot_queue_owes_one_resync_until_they_can_be()
         let (held, waited, queued) = std::thread::scope(|threads| {
             let held = threads.spawn(|| {
                 let _stop = StopOnDrop(&stop);
-                std::thread::sleep(Duration::from_millis(300));
+                let flushed = script.before_first_flush();
                 let held = state.queued("session:s").is_empty();
                 unblock(&state);
-                std::thread::sleep(Duration::from_millis(150));
-                let waited = state.queued("session:s").is_empty();
-                let deadline = Instant::now() + Duration::from_secs(3);
+                let deadline = Instant::now() + Duration::from_secs(10);
                 let both = || ["session:s", "session:t"].map(|space| state.queued(space));
                 while both().iter().any(Vec::is_empty) && Instant::now() < deadline {
                     std::thread::sleep(Duration::from_millis(20));
                 }
+                let waited = flushed.map(|before| before.elapsed());
                 (held, waited, both())
             });
             bridged(&state, &script, &stop);
             held.join().unwrap()
         });
         assert!(held, "{case}: queued while blocked");
-        assert!(waited, "{case}: tried again before a second passed");
+        assert!(
+            waited.is_some_and(|waited| waited >= Duration::from_secs(1)),
+            "{case}: tried again before a second passed: {waited:?}"
+        );
         assert_eq!(
             queued,
             [[resync("session:s")], [resync("session:t")]],
@@ -1492,7 +1573,8 @@ fn the_bridge_refuses_relay_calls_for_a_server_it_does_not_know() {
     assert!(!started.load(std::sync::atomic::Ordering::SeqCst));
 }
 
-/// A connection starts the relay worker of each label with an item queued.
+/// A connection starts the relay's workers, one for each label of its
+/// endpoint with an item queued.
 #[test]
 fn a_connection_starts_the_worker_of_each_label_with_an_item_queued() {
     let state = State::new();
@@ -1504,9 +1586,17 @@ fn a_connection_starts_the_worker_of_each_label_with_an_item_queued() {
     ] {
         crate::relay::tests_support::queue(&store, label, endpoint);
     }
-    crate::relay::tests_support::STARTED.with(|started| started.borrow_mut().clear());
     let script = Script::new(vec![(Some("host-a"), Vec::new(), None)]);
-    bridged(&state, &script, &Wake::new().unwrap());
+    let host = bridged_away(&state, &script, &Wake::new().unwrap(), &NO_WAIT);
+    assert_eq!(host.relay_starts.len(), 1);
+    crate::relay::tests_support::STARTED.with(|started| started.borrow_mut().clear());
+    crate::relay::tests_support::with_hosts(&["devbox", "studio"], || {
+        crate::relay::start_workers(
+            &state.0,
+            &endpoint(),
+            &crate::relay::receive::reap_in_thread,
+        )
+    });
     assert_eq!(
         crate::relay::tests_support::STARTED.with(|started| started.borrow().clone()),
         ["devbox", "studio"]

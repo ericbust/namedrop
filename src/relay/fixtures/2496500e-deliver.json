@@ -1,0 +1,17 @@
+{
+ "ack_through": 0,
+ "expect_host_id": "host-b",
+ "from": {
+  "host": "laptop",
+  "host_id": "host-a",
+  "name": "alice"
+ },
+ "item": {
+  "id": "MESSAGE",
+  "in_reply_to": null,
+  "text": "ping",
+  "thread": "THREAD",
+  "to": "bob"
+ },
+ "op": "deliver"
+}
