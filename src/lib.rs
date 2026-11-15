@@ -90,10 +90,11 @@ pub(crate) use install::{
     integration_package_attention_source, refresh_user_integration_packages,
     user_hook_activation_guidance,
 };
-#[doc(hidden)]
 pub use installed_runtime::command_guard as runtime_command_guard;
 #[doc(hidden)]
 pub use installed_runtime::executable as runtime_executable;
+#[doc(hidden)]
+pub use installed_runtime::package_refusal;
 pub use installed_runtime::reexec_if_replaced as runtime_reexec_if_replaced;
 #[doc(hidden)]
 pub use installed_runtime::validate_update_manifest;

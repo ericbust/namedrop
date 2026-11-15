@@ -391,6 +391,13 @@ fn main() -> ExitCode {
         );
     }
     if let Some(config) = cli.shortcuts_config() {
+        match home::resolve(&cli.runtime.flags(), inherited) {
+            Err(error) => return finish("ui.install-shortcuts", Err(error)),
+            Ok(home) if home.kind() == namedrop::mux::MuxKind::Rex => return finish("ui.install-shortcuts", Err(
+                "Rex shortcuts come from namedrop.lua. Run sh scripts/install.sh, then use Namedrop Doctor to see the keys in effect.".into(),
+            )),
+            Ok(_) => {}
+        }
         return finish("ui.install-shortcuts", naming_ui::install_shortcuts(config));
     }
     if cli.is_reset_tour() {
@@ -1339,6 +1346,14 @@ fn run_agent_status_changed_hook(inherited: &dyn Inherited) -> ExitCode {
             return ExitCode::from(65);
         }
     };
+    // The hook takes no package lock: its worker's refresh does, and leaves
+    // the packages to the next activation when it may not write them.
+    if let Some(refusal) = namedrop::package_refusal(
+        namedrop::InheritedDirectories::from_environment().home(),
+        &state_directory,
+    ) {
+        eprintln!("{refusal}");
+    }
     let endpoint = namedrop::mux::Endpoint::parse(&socket_id);
     let space = namedrop::SpaceId::new(&space_id);
     if let Err(error) =

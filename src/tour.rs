@@ -431,7 +431,26 @@ where
         Ok(false) => return not_shown("already_shown"),
         Err(error) => return failed("marker_error", error),
     }
-    match open_popup(runtime, target) {
+    let opened = crate::lifecycle::apply_popup(runtime, PopupScreen::Tour, target.facts());
+    if matches!(opened, Ok(crate::mux::Applied::Unsupported))
+        && runtime.mux.endpoint().kind == crate::mux::MuxKind::Rex
+    {
+        return match reset(runtime.state_directory, CURRENT_ID) {
+            Ok(_) => not_shown("unsupported"),
+            Err(error) => failed("marker_error", error),
+        };
+    }
+    match opened
+        .map(|applied| match applied {
+            crate::mux::Applied::Opened(reply) => reply,
+            crate::mux::Applied::Done | crate::mux::Applied::Unsupported => Value::Null,
+        })
+        .map_err(|error| match error {
+            MuxError::Protocol(error) => {
+                format!("Herdr returned an unreadable popup result: {error}")
+            }
+            error => error.to_string(),
+        }) {
         Ok(popup) => json!({
             "shown": true,
             "presentation_id": CURRENT_ID,

@@ -1,3 +1,4 @@
+use crate::installed_runtime::PackageLease;
 use crate::mux::MuxKind;
 use crate::{
     AgentRuntime, AttentionItemDraft, AttentionItemId, AttentionSourceKind, DiscoveredWorktree,
@@ -124,12 +125,7 @@ impl AgentConfigDirectories<'_> {
     /// Where the installer records the state directory it bakes into the
     /// hook wrappers.
     pub(crate) fn install_record(self, home: &Path) -> PathBuf {
-        crate::locator::install_record(
-            &self
-                .config
-                .map(Path::to_owned)
-                .unwrap_or_else(|| home.join(".config")),
-        )
+        crate::locator::install_record(home)
     }
 }
 
@@ -430,7 +426,13 @@ pub fn install_integration_package(
     executable: &Path,
     state_directory: &Path,
 ) -> Result<PathBuf, String> {
+    let lease = crate::installed_runtime::package_guard(
+        Some(root),
+        state_directory,
+        crate::installed_runtime::Writer::Activation,
+    )?;
     install_integration_package_with_config(
+        &lease,
         root,
         runtime,
         executable,
@@ -440,12 +442,14 @@ pub fn install_integration_package(
 }
 
 fn install_integration_package_with_config(
+    lease: &PackageLease,
     root: &Path,
     runtime: AgentRuntime,
     executable: &Path,
     state_directory: &Path,
     config: AgentConfigDirectories<'_>,
 ) -> Result<PathBuf, String> {
+    lease.require_write()?;
     let PreparedPackage {
         directory,
         files,
@@ -467,16 +471,16 @@ fn install_integration_package_with_config(
     }
     // Publish ownership first so an interrupted refresh can be completed later.
     for (name, contents, mode) in files {
-        replace_if_changed(&directory.join(name), &contents, mode)?;
+        replace_if_changed(lease, &directory.join(name), &contents, mode)?;
     }
     if let Some((path, contents)) = codex_policy {
         fs::create_dir_all(path.parent().expect("policy has a parent"))
             .map_err(|error| conflict(&path, &format!("cannot create rules directory: {error}")))?;
-        replace_if_changed(&path, &contents, Some(0o600))?;
+        replace_if_changed(lease, &path, &contents, Some(0o600))?;
     }
     if runtime == AgentRuntime::ClaudeCode
         && let Err(error) =
-            claude_permissions::refresh(&config.claude(root), executable, state_directory)
+            claude_permissions::refresh(lease, &config.claude(root), executable, state_directory)
     {
         eprintln!(
             "Namedrop skipped Claude Code permissions: {error}; {}",
@@ -486,7 +490,7 @@ fn install_integration_package_with_config(
     // Only a Rex block's CLI reads the record, so Herdr's install never
     // fails for it.
     let record = config.install_record(root);
-    if let Err(error) = crate::locator::write_install_record(&record, state_directory) {
+    if let Err(error) = crate::locator::write_install_record(lease, &record, state_directory) {
         eprintln!(
             "Namedrop could not record its state directory in {}: {error}",
             record.display()
@@ -629,10 +633,18 @@ pub(crate) fn install_record_mismatch(
 ) -> Option<(PathBuf, PathBuf)> {
     let record = config.install_record(home);
     let recorded = crate::locator::read_install_record(&record)?;
-    let baked = format!(
-        "--state-directory {}",
-        shell_single_quote(recorded.to_str()?)
-    );
+    packages_bake_another_state(home, &recorded).then_some((record, recorded))
+}
+
+/// Whether an installed SessionStart wrapper bakes another state directory
+/// than `state`.
+pub(crate) fn packages_bake_another_state(home: &Path, state: &Path) -> bool {
+    let Some(baked) = state
+        .to_str()
+        .map(|state| format!("--state-directory {}", shell_single_quote(state)))
+    else {
+        return false;
+    };
     [AgentRuntime::Codex, AgentRuntime::ClaudeCode]
         .into_iter()
         .filter_map(|runtime| {
@@ -640,7 +652,6 @@ pub(crate) fn install_record_mismatch(
                 .ok()
         })
         .any(|wrapper| !wrapper.contains(&baked))
-        .then_some((record, recorded))
 }
 
 /// Each installed SessionStart or UserPromptSubmit wrapper that sets no
@@ -898,34 +909,50 @@ impl IntegrationPackageInstallation {
 pub(crate) fn refresh_user_integration_packages<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
     discovered: &DiscoveredWorktree,
+    writer: crate::installed_runtime::Writer,
 ) -> Result<IntegrationPackageInstallation, String>
 where
     M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
-    let (_package_guard, current) = crate::installed_runtime::package_guard()?;
+    let lease = crate::installed_runtime::package_guard(
+        runtime.home_directory,
+        runtime.state_directory,
+        writer,
+    )?;
+    // A refusal is this refresh's report, so the event that ran it still
+    // does its own work instead of failing.
+    let current = lease.writable();
+    if let Err(refusal) = &current {
+        eprintln!("{refusal}");
+    }
     let executable = crate::collaboration_executable().map(PathBuf::from);
     let outcomes = [AgentRuntime::Codex, AgentRuntime::ClaudeCode].map(|agent_runtime| {
-        let outcome = match (runtime.home_directory, &executable) {
-            (Some(home_directory), _) if !current => {
+        let outcome = match (runtime.home_directory, &executable, &current) {
+            (_, _, Err(refusal)) => Err(refusal.clone()),
+            (Some(home_directory), _, Ok(false)) => {
                 verified_package_directory(home_directory, agent_runtime)
             }
-            (Some(home_directory), Ok(executable)) => install_integration_package_with_config(
-                home_directory,
-                agent_runtime,
-                executable,
-                runtime.state_directory,
-                runtime.agent_config,
-            ),
-            (None, _) => Err(
+            (Some(home_directory), Ok(executable), Ok(true)) => {
+                install_integration_package_with_config(
+                    &lease,
+                    home_directory,
+                    agent_runtime,
+                    executable,
+                    runtime.state_directory,
+                    runtime.agent_config,
+                )
+            }
+            (None, _, _) => Err(
                 "no user home directory is available for the shared Agent Integration package"
                     .to_owned(),
             ),
-            (_, Err(error)) => Err(error.clone()),
+            (_, Err(error), _) => Err(error.clone()),
         };
         (agent_runtime, outcome)
     });
+    drop(lease);
     let namespace = discovered.namespace(runtime.session_socket_id);
     let attribution = MutationAttribution::new(
         crate::ActorKind::Plugin,
@@ -1112,9 +1139,12 @@ fn subagent_script(
     ))
 }
 
-pub(crate) fn remove_subagent_hooks(state: &Path, home: Option<&Path>) -> Result<usize, String> {
-    let (_guard, current) = crate::installed_runtime::package_guard()?;
-    if !current {
+pub(crate) fn remove_subagent_hooks(
+    lease: &PackageLease,
+    state: &Path,
+    home: Option<&Path>,
+) -> Result<usize, String> {
+    if !lease.writable()? {
         return Ok(0);
     }
     if StateStore::open(state)
@@ -1171,7 +1201,7 @@ pub(crate) fn remove_subagent_hooks(state: &Path, home: Option<&Path>) -> Result
             }
         }
         if changed {
-            replace_if_changed(&path, &format!("{manifest}\n"), None)?;
+            replace_if_changed(lease, &path, &format!("{manifest}\n"), None)?;
         }
         let ledger = directory.join(SUBAGENT_OWNERSHIP_FILE);
         let script = directory.join(SUBAGENT_SCRIPT_FILE);
@@ -1480,15 +1510,23 @@ impl std::fmt::Display for ReplacementError {
 /// Replaces one owned file by staging it and renaming it over the target, and
 /// only when its content differs, so a reader of the package never observes a
 /// half-written file and repeated lifecycle events rewrite nothing.
-fn replace_if_changed(target: &Path, contents: &str, mode: Option<u32>) -> Result<(), String> {
-    replace_with_status(target, contents, mode).map_err(|error| error.message)
+fn replace_if_changed(
+    lease: &PackageLease,
+    target: &Path,
+    contents: &str,
+    mode: Option<u32>,
+) -> Result<(), String> {
+    lease.require_write()?;
+    replace_with_status(lease, target, contents, mode).map_err(|error| error.message)
 }
 
 fn replace_with_status(
+    lease: &PackageLease,
     target: &Path,
     contents: &str,
     mode: Option<u32>,
 ) -> Result<(), ReplacementError> {
+    lease.require_write().map_err(ReplacementError::from)?;
     match fs::symlink_metadata(target) {
         Ok(metadata) if metadata.is_symlink() => {
             return Err(conflict(target, "is a symbolic link").into());
@@ -1718,6 +1756,7 @@ mod permission_tests {
             None
         );
         crate::locator::write_install_record(
+            &crate::installed_runtime::test_package_lease(),
             &home.join(".config/namedrop/state-directory"),
             Path::new("/elsewhere"),
         )
@@ -1836,12 +1875,28 @@ mod permission_tests {
         store
             .transaction(|tx| tx.deactivate_worktree(&ns_a, &attribution))
             .unwrap();
-        assert_eq!(remove_subagent_hooks(&root, Some(&home)).unwrap(), 0);
+        assert_eq!(
+            remove_subagent_hooks(
+                &crate::installed_runtime::test_package_lease(),
+                &root,
+                Some(&home)
+            )
+            .unwrap(),
+            0
+        );
         assert!(codex.join(SUBAGENT_SCRIPT_FILE).exists());
         store
             .transaction(|tx| tx.deactivate_worktree(&ns_b, &attribution))
             .unwrap();
-        assert_eq!(remove_subagent_hooks(&root, Some(&home)).unwrap(), 12);
+        assert_eq!(
+            remove_subagent_hooks(
+                &crate::installed_runtime::test_package_lease(),
+                &root,
+                Some(&home)
+            )
+            .unwrap(),
+            12
+        );
         assert!(!codex.join(SUBAGENT_SCRIPT_FILE).exists());
         assert_eq!(
             fs::read_to_string(claude.join(SUBAGENT_SCRIPT_FILE)).unwrap(),
@@ -1858,7 +1913,15 @@ mod permission_tests {
         }
         assert!(codex.join(SESSION_START_SCRIPT_FILE).exists());
         assert!(codex.join(HOOK_SCRIPT_FILE).exists());
-        assert_eq!(remove_subagent_hooks(&root, Some(&home)).unwrap(), 0);
+        assert_eq!(
+            remove_subagent_hooks(
+                &crate::installed_runtime::test_package_lease(),
+                &root,
+                Some(&home)
+            )
+            .unwrap(),
+            0
+        );
         drop(store);
         fs::remove_dir_all(root).unwrap();
     }

@@ -1,4 +1,10 @@
 //! Stable command paths and shared-package ownership across compatible updates.
+mod packages;
+pub(crate) use packages::{PackageLease, Writer, package_guard};
+#[cfg(test)]
+pub(crate) fn test_package_lease() -> PackageLease {
+    PackageLease::development()
+}
 use sha2::Digest;
 use std::{fs, os::unix::fs::OpenOptionsExt, path::PathBuf};
 
@@ -196,34 +202,6 @@ pub fn executable() -> Result<PathBuf, String> {
     }
 }
 
-/// Serialize pointer publication with package refresh. A command already running
-/// from an older compatible snapshot may finish its work, but cannot overwrite
-/// the current runtime's shared integration packages afterwards.
-pub(crate) fn package_guard() -> Result<(Option<fs::File>, bool), String> {
-    let Some(runtime) = directory()? else {
-        return Ok((None, true));
-    };
-    let path = runtime.join("packages.lock");
-    if fs::symlink_metadata(&path).is_ok_and(|metadata| !metadata.is_file()) {
-        return Err("runtime package lock is not a regular file".into());
-    }
-    let guard = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .mode(0o600)
-        .open(path)
-        .map_err(|error| error.to_string())?;
-    guard.lock().map_err(|error| error.to_string())?;
-    let active =
-        fs::canonicalize(runtime.join("current/namedrop")).map_err(|error| error.to_string())?;
-    let running = std::env::current_exe()
-        .and_then(fs::canonicalize)
-        .map_err(|error| error.to_string())?;
-    Ok((Some(guard), active == running))
-}
-
 /// A live update must keep every host entrypoint behind the stable launcher.
 pub fn validate_update_manifest(path: &std::path::Path) -> Result<(), String> {
     let manifest = fs::read_to_string(path)
@@ -261,4 +239,10 @@ pub fn validate_update_manifest(path: &std::path::Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// The `ND-INSTALL-002` refusal this runtime's package refresh would report,
+/// read without a lock or a write, for the status hook to print.
+pub fn package_refusal(home: Option<&std::path::Path>, state: &std::path::Path) -> Option<String> {
+    packages::refusal_notice(home, state)
 }

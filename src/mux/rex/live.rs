@@ -23,7 +23,7 @@ fn ws_reads_the_welcome_of_a_real_server() {
     let mut socket = WebSocket::connect(stream, "/api/control", "rex.control.v1", 1 << 20).unwrap();
     socket.upgrade().unwrap();
     socket
-        .send_text(r#"{"type":"hello","api_revision":12,"client":{"kind":"other","name":"namedrop-live"}}"#)
+        .send_text(r#"{"type":"hello","api_revision":13,"api_min_revision":12,"client":{"kind":"other","name":"namedrop-live"}}"#)
         .unwrap();
     let Message::Text(welcome) = socket.recv().unwrap() else {
         panic!("the welcome is a text message");
@@ -31,7 +31,21 @@ fn ws_reads_the_welcome_of_a_real_server() {
     let welcome: serde_json::Value = serde_json::from_str(&welcome).unwrap();
     assert_eq!(welcome["type"], "welcome", "{welcome}");
     assert_eq!(welcome["protocol"], "rex.control.v1", "{welcome}");
-    assert_eq!(welcome["api_revision"], 12, "{welcome}");
+    assert!(
+        matches!(welcome["api_revision"].as_u64(), Some(12..=13)),
+        "{welcome}"
+    );
+    socket
+        .send_text(r#"{"type":"request","id":"1","method":"server.status"}"#)
+        .unwrap();
+    let Message::Text(status) = socket.recv().unwrap() else {
+        panic!("the status is a text message");
+    };
+    let status: serde_json::Value = serde_json::from_str(&status).unwrap();
+    assert_eq!(
+        welcome["api_revision"], status["payload"]["api_revision"],
+        "{status}"
+    );
     socket.close(1000).unwrap();
 }
 
