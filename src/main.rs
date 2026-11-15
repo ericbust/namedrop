@@ -255,21 +255,8 @@ fn main() -> ExitCode {
     {
         return rex_action_result(Err(error));
     }
-    let _hook_gate = if cli.subagent_hook().is_some()
-        || cli.stop_hook_state_directory().is_some()
-        || cli.stop_worker_state_directory().is_some()
-    {
-        match selected_state
-            .as_deref()
-            .map(|state| namedrop::runtime_command_guard(state, None))
-            .transpose()
-        {
-            Ok(gate) => gate,
-            Err(_) => return ExitCode::SUCCESS,
-        }
-    } else {
-        None
-    };
+    // These hooks take no command gate, so an update's exclusive gate never
+    // holds up an agent's turn. The retirement check above already ran.
     if let Some((state, host)) = cli.subagent_hook() {
         let _ = namedrop::reminder::ensure_clock(state, None, Starter::Caller);
         return run_subagent_hook(state, host, inherited);
