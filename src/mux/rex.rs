@@ -11,6 +11,8 @@ pub(crate) mod events;
 #[cfg(test)]
 mod live;
 mod local;
+mod popup;
+mod ui;
 pub(crate) mod wire;
 mod ws;
 
@@ -65,6 +67,14 @@ pub(super) fn connect(
 /// for the home's probe.
 pub(crate) fn peer_within(socket: &Path, within: Duration) -> std::io::Result<u32> {
     local::peer_within(socket, within)
+}
+
+pub(crate) fn ui_report(endpoint: &Endpoint, record: &Value) -> Result<Value, String> {
+    let socket = endpoint
+        .unix_socket()
+        .ok_or("Namedrop needs a Rex Unix socket")?;
+    let wire = Socket::new(socket.to_owned(), Budget::ADAPTER_DEFAULT, Arc::default());
+    ui::report(&wire, socket, record).map_err(|error| error.to_string())
 }
 
 /// What the Rex server at `socket` says about `block` of `session`, over one
@@ -762,7 +772,7 @@ impl<W: Wire> RexMux<W> {
 
 impl<W: Wire> MuxAct for RexMux<W> {
     /// `Identify` labels the block `@alias`, and `RenameTab` labels the
-    /// window. Rex shows no badges, notifications, or popups yet, and has no
+    /// window. Popups open as layers. Rex shows no badges or notifications, and has no
     /// keybindings to reload.
     fn apply(&self, effect: &Effect) -> Result<Applied, MuxError> {
         match effect {
@@ -788,10 +798,19 @@ impl<W: Wire> MuxAct for RexMux<W> {
                 call.request("session.set_window_label", label, Gone::Tab)?;
                 Ok(Applied::Done)
             }
-            Effect::Badges { .. }
-            | Effect::Notify { .. }
-            | Effect::OpenPopup(_)
-            | Effect::ReloadKeybindings => Ok(Applied::Unsupported),
+            Effect::OpenPopup(popup) => {
+                let launcher =
+                    match crate::installed_runtime::directory().map_err(MuxError::Unavailable)? {
+                        Some(runtime) => runtime.join("namedrop"),
+                        None => PathBuf::from(
+                            crate::collaboration_executable().map_err(MuxError::Unavailable)?,
+                        ),
+                    };
+                self.open_popup(popup, &launcher)
+            }
+            Effect::Badges { .. } | Effect::Notify { .. } | Effect::ReloadKeybindings => {
+                Ok(Applied::Unsupported)
+            }
         }
     }
 }

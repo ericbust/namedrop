@@ -94,11 +94,16 @@ fn a_child_that_exited_and_was_not_reaped_is_gone_and_no_member_of_its_group() {
 }
 
 /// A launcher that never reaps its agent keeps the dead agent as a zombie
-/// in the launcher's live group, which the system still lists.
+/// in the launcher's live group, which the system still lists. The agent
+/// outlives the shell's `exec`, because a shell such as dash reaps a child
+/// that ended before it runs its next command.
 #[test]
 fn a_zombie_in_a_live_group_is_listed_and_is_no_member() {
     let mut launcher = Command::new("/bin/sh")
-        .args(["-c", "/bin/sh -c 'exit 0' & echo $!; exec /bin/sleep 30"])
+        .args([
+            "-c",
+            "/bin/sh -c 'sleep 0.3; exit 0' & echo $!; exec /bin/sleep 30",
+        ])
         .process_group(0)
         .stdout(std::process::Stdio::piped())
         .spawn()

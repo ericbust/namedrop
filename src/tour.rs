@@ -411,12 +411,25 @@ where
         |reason: &str| json!({"shown": false, "presentation_id": CURRENT_ID, "reason": reason});
     let failed = |reason: &str, error: String| json!({"shown": false, "presentation_id": CURRENT_ID, "reason": reason, "error": error});
 
-    let agents = || discovered.panes.iter().filter(|pane| pane.reports_kind());
+    // A detached Rex block is in no window for a layer to float over, and
+    // trying would spend the once-only marker on a tour nobody saw.
+    let rex = runtime.mux.endpoint().kind == crate::mux::MuxKind::Rex;
+    let agents = || {
+        discovered
+            .panes
+            .iter()
+            .filter(|pane| pane.reports_kind() && !(rex && pane.tab_id.is_empty()))
+    };
     let Some(target) = preferred_pane_id
         .and_then(|preferred| agents().find(|pane| pane.pane_id == preferred))
         .or_else(|| agents().next())
     else {
-        return not_shown("no_agent_pane");
+        let detached = discovered.panes.iter().any(|pane| pane.reports_kind());
+        return not_shown(if detached {
+            "no_window"
+        } else {
+            "no_agent_pane"
+        });
     };
     if let Err(error) = current() {
         return failed("presentation_error", error);
@@ -431,7 +444,26 @@ where
         Ok(false) => return not_shown("already_shown"),
         Err(error) => return failed("marker_error", error),
     }
-    match open_popup(runtime, target) {
+    let opened = crate::lifecycle::apply_popup(runtime, PopupScreen::Tour, target.facts());
+    if matches!(opened, Ok(crate::mux::Applied::Unsupported))
+        && runtime.mux.endpoint().kind == crate::mux::MuxKind::Rex
+    {
+        return match reset(runtime.state_directory, CURRENT_ID) {
+            Ok(_) => not_shown("unsupported"),
+            Err(error) => failed("marker_error", error),
+        };
+    }
+    match opened
+        .map(|applied| match applied {
+            crate::mux::Applied::Opened(reply) => reply,
+            crate::mux::Applied::Done | crate::mux::Applied::Unsupported => Value::Null,
+        })
+        .map_err(|error| match error {
+            MuxError::Protocol(error) => {
+                format!("Herdr returned an unreadable popup result: {error}")
+            }
+            error => error.to_string(),
+        }) {
         Ok(popup) => json!({
             "shown": true,
             "presentation_id": CURRENT_ID,

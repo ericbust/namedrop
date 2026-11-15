@@ -63,32 +63,39 @@ pub(super) fn launch(
     mode: UiMode,
 ) -> Result<serde_json::Value, String> {
     with_runtime_options(options, inherited, |runtime| {
-        let workspace = runtime
-            .workspace_id
-            .ok_or("This popup requires an active Herdr space")?;
-        let pane = runtime
-            .current_pane_id
-            .ok_or("This popup requires an active Herdr pane")?;
-        let origin = target_pane(runtime)?;
-        if mode == UiMode::Tour {
-            return tour::open_popup(runtime, &origin);
-        }
-        // The popup carries the Agent Session it was opened for, so asking for
-        // help later cannot reach a replacement session in the same pane.
-        let screen = match mode {
-            UiMode::Name => PopupScreen::Name,
-            UiMode::Manage => PopupScreen::Manage,
-            UiMode::Doctor => PopupScreen::Doctor,
-            UiMode::Status => PopupScreen::Status,
-            UiMode::Tour => PopupScreen::Tour,
-        };
-        let target = PaneFacts {
-            id: PaneId::new(pane),
-            space: SpaceId::new(workspace),
-            ..origin.facts()
-        };
-        namedrop::open_popup(runtime, screen, target).map_err(|error| error.to_string())
+        launch_in_runtime(runtime, mode)
     })
+}
+
+pub(super) fn launch_in_runtime(
+    runtime: &Runtime<'_>,
+    mode: UiMode,
+) -> Result<serde_json::Value, String> {
+    let workspace = runtime
+        .workspace_id
+        .ok_or("This popup requires an active Herdr space")?;
+    let pane = runtime
+        .current_pane_id
+        .ok_or("This popup requires an active Herdr pane")?;
+    let origin = target_pane(runtime)?;
+    if mode == UiMode::Tour {
+        return tour::open_popup(runtime, &origin);
+    }
+    // The popup carries the Agent Session it was opened for, so asking for
+    // help later cannot reach a replacement session in the same pane.
+    let screen = match mode {
+        UiMode::Name => PopupScreen::Name,
+        UiMode::Manage => PopupScreen::Manage,
+        UiMode::Doctor => PopupScreen::Doctor,
+        UiMode::Status => PopupScreen::Status,
+        UiMode::Tour => PopupScreen::Tour,
+    };
+    let target = PaneFacts {
+        id: PaneId::new(pane),
+        space: SpaceId::new(workspace),
+        ..origin.facts()
+    };
+    namedrop::open_popup(runtime, screen, target).map_err(|error| error.to_string())
 }
 
 fn target_pane(runtime: &Runtime<'_>) -> Result<DiscoveredPane, String> {
@@ -110,24 +117,41 @@ fn target_terminal(runtime: &Runtime<'_>) -> Result<String, String> {
 
 pub(super) fn run(options: &RuntimeOptions, inherited: &dyn Inherited, mode: UiMode) -> ExitCode {
     if mode == UiMode::Status {
-        let observing = super::location(options, inherited).and_then(|location| location.pane);
-        return crate::agent_status_ui::run(
-            options,
-            inherited,
-            observing.as_ref().map(PaneId::as_str),
-        );
+        let observing = observing_pane(options, inherited);
+        return crate::agent_status_ui::run(options, inherited, observing.as_deref());
     }
     match run_prompt(options, inherited, mode) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             // Keep actionable errors visible instead of closing the popup immediately.
             eprintln!("\nNamedrop: {}", error.escape_debug());
-            if io::stdin().is_terminal() {
+            if super::popup_input::is_rex(options, inherited) {
+                // Rex retains quick nonzero exits, even after the error was acknowledged.
+                if super::popup_input::wait_for_key().is_ok() {
+                    return ExitCode::SUCCESS;
+                }
+            } else if io::stdin().is_terminal() {
                 let _ = prompt_line("Enter or Esc closes: ");
             }
             ExitCode::from(65)
         }
     }
+}
+
+/// The pane the status panel itself occupies. A Rex layer runs with an
+/// explicit `--endpoint`, so its home has no pane: its own block is only in
+/// the `REX_BLOCK` Rex gives it.
+fn observing_pane(options: &RuntimeOptions, inherited: &dyn Inherited) -> Option<String> {
+    if let Ok(Home::Rex(place)) = home::resolve(&options.flags(), inherited) {
+        return inherited
+            .var("REX_BLOCK")
+            .and_then(|block| block.into_string().ok())
+            .filter(|block| !block.is_empty())
+            .or(place.pane.map(|pane| pane.as_str().to_owned()));
+    }
+    super::location(options, inherited)
+        .and_then(|location| location.pane)
+        .map(|pane| pane.as_str().to_owned())
 }
 
 fn run_prompt(
@@ -281,6 +305,55 @@ fn doctor_prompt(runtime: &Runtime<'_>, terminal: &str, session: &str) -> Result
 /// Names the invoking pane and returns the confirmation it printed, or
 /// `None` when the person cancelled.
 fn name_prompt(runtime: &Runtime<'_>, terminal: &str) -> Result<Option<String>, String> {
+    if runtime.mux.endpoint().kind == namedrop::mux::MuxKind::Rex {
+        let workspace = runtime
+            .workspace_id
+            .ok_or("This popup is missing its invoking space")?;
+        let active = match namedrop::StateStore::open_read_only(runtime.state_directory)
+            .map_err(|e| e.to_string())?
+        {
+            Some(mut store) => store
+                .transaction(|tx| {
+                    tx.worktree_state(&namedrop::StateNamespace::for_space(
+                        runtime.session_socket_id,
+                        workspace,
+                    ))
+                })
+                .map_err(|e| e.to_string())?
+                .is_some_and(|state| state.activated && !state.deactivated),
+            None => false,
+        };
+        if !active {
+            say(
+                Tone::Warn,
+                "Namedrop is not active in this session. Press Enter to activate it, or Esc to cancel.",
+            );
+            if menu_key()? != MenuKey::Enter {
+                return Ok(None);
+            }
+            let activation = namedrop::activate_from_naming_screen(runtime)?;
+            clear_screen();
+            // The CLI fails an incomplete activation. Naming continues here,
+            // so what needs attention stays above it.
+            if !activation_complete(&activation) {
+                say(
+                    Tone::Warn,
+                    "Namedrop is active, but part of its setup needs attention:",
+                );
+                let packages = activation["integration_packages"].as_object();
+                for (agent, package) in packages.into_iter().flatten() {
+                    if package["installed"] != true || !package["error"].is_null() {
+                        let error = package["error"].as_str().unwrap_or("not installed");
+                        say(
+                            Tone::Plain,
+                            &format!("{}: {}", sanitize(agent), sanitize(error)),
+                        );
+                    }
+                }
+                say(Tone::Muted, "Namedrop Doctor lists the repair.\n");
+            }
+        }
+    }
     let default = namedrop::default_pane_type(runtime)?;
     say(Tone::Strong, "Name this pane\n");
     say(
@@ -1438,7 +1511,86 @@ fn prompt_line(label: &str) -> Result<Option<String>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::wrap_exact;
+    use super::{observing_pane, wrap_exact};
+    use clap::Parser;
+    use namedrop::mux::home::{Claimed, Inherited};
+    use std::{collections::BTreeMap, ffi::OsString, io, path::Path};
+
+    /// Inherited names only: no socket, ancestor or process is ever read.
+    struct Names(BTreeMap<&'static str, &'static str>);
+
+    impl Inherited for Names {
+        fn var(&self, name: &str) -> Option<OsString> {
+            self.0.get(name).map(OsString::from)
+        }
+        fn id(&self) -> u32 {
+            0
+        }
+        fn ancestors(&self) -> Vec<u32> {
+            Vec::new()
+        }
+        fn peer(&self, _socket: &Path) -> io::Result<u32> {
+            Err(io::ErrorKind::NotFound.into())
+        }
+        fn claimed(&self, _socket: &Path, _session: &str, _block: &str) -> Result<Claimed, String> {
+            Err("no Rex claim".to_owned())
+        }
+        fn incarnation(&self, _pid: u32) -> Option<String> {
+            None
+        }
+    }
+
+    fn observing(argv: &[&str], names: &[(&'static str, &'static str)]) -> Option<String> {
+        let cli = namedrop::cli::Cli::try_parse_from(
+            ["namedrop"]
+                .iter()
+                .chain(argv)
+                .chain(&["ui", "run", "status"]),
+        )
+        .unwrap();
+        observing_pane(&cli.runtime, &Names(names.iter().copied().collect()))
+    }
+
+    #[test]
+    fn a_rex_status_layer_observes_its_own_block_not_the_target() {
+        let layer = [
+            ("REX_BLOCK", "block:layer"),
+            ("REX_SESSION", "session:s"),
+            ("NAMEDROP_TARGET_PANE", "block:target"),
+        ];
+        assert_eq!(
+            observing(&["--endpoint", "rex:/tmp/r.sock"], &layer).as_deref(),
+            Some("block:layer")
+        );
+        assert_eq!(
+            observing(
+                &["--endpoint", "rex:/tmp/r.sock", "--pane", "block:flag"],
+                &layer
+            )
+            .as_deref(),
+            Some("block:layer")
+        );
+        assert_eq!(
+            observing(
+                &["--endpoint", "rex:/tmp/r.sock", "--pane", "block:flag"],
+                &[]
+            )
+            .as_deref(),
+            Some("block:flag")
+        );
+        assert_eq!(observing(&["--endpoint", "rex:/tmp/r.sock"], &[]), None);
+        // A Herdr popup keeps its own pane, and an inherited Rex block (Herdr
+        // inside Rex) never stands in for it.
+        let herdr = [
+            ("HERDR_SOCKET_PATH", "/tmp/herdr.sock"),
+            ("HERDR_PANE_ID", "popup-pane"),
+            ("REX_BLOCK", "block:outer"),
+        ];
+        assert_eq!(
+            observing(&["--endpoint", "/tmp/herdr.sock"], &herdr).as_deref(),
+            Some("popup-pane")
+        );
+    }
 
     #[test]
     fn doctor_wrapping_breaks_at_spaces_and_keeps_every_character() {
@@ -1453,5 +1605,252 @@ mod tests {
         assert_eq!(wrapped.concat(), long);
         assert!(wrapped.iter().all(|piece| piece.len() <= 9), "{wrapped:?}");
         assert_eq!(wrap_exact("", 9), [""]);
+    }
+}
+
+/// `name_prompt` reads the popup's own stdin, so each case runs it in a child
+/// copy of this test binary whose stdin and stdout are pipes, against an
+/// in-memory Rex host.
+#[cfg(test)]
+mod rex_name_prompt_tests {
+    use super::name_prompt;
+    use namedrop::{
+        AgentConfigDirectories, LifecycleRuntime, ProcessIds, StateNamespace, StateStore,
+        SystemClock,
+        mux::{Effect, Mux, fake::FakeMux},
+    };
+    use serde_json::{Value, json};
+    use std::{
+        env, fs,
+        io::Write,
+        path::{Path, PathBuf},
+        process::{Command, Stdio},
+        sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering},
+        },
+    };
+
+    const CASE: &str = "NAMEDROP_TEST_REX_NAME_PROMPT";
+    const ROOT: &str = "NAMEDROP_TEST_REX_NAME_ROOT";
+    const OFFER: &str =
+        "Namedrop is not active in this session. Press Enter to activate it, or Esc to cancel.";
+    const ENDPOINT: &str = "rex:/tmp/nd-name-prompt.sock";
+
+    fn mux() -> FakeMux {
+        FakeMux::world()
+            .endpoint(ENDPOINT)
+            .space("s1")
+            .pane("p1")
+            .terminal("t1")
+            .tab("window:w")
+            .claude()
+            .session("agent-1")
+            .idle()
+            .build()
+    }
+
+    fn activated(state: &Path) -> bool {
+        StateStore::open_read_only(state)
+            .unwrap()
+            .and_then(|mut store| {
+                store
+                    .transaction(|tx| tx.worktree_state(&StateNamespace::for_space(ENDPOINT, "s1")))
+                    .unwrap()
+            })
+            .is_some_and(|state| state.activated && !state.deactivated)
+    }
+
+    /// The child's half: one `name_prompt` on the piped stdin, then what it
+    /// left behind, as one marked JSON line.
+    #[test]
+    fn child_runs_one_name_prompt() {
+        let Ok(case) = env::var(CASE) else { return };
+        let root = PathBuf::from(env::var(ROOT).unwrap());
+        let (state, home) = (root.join("state"), root.join("home"));
+        let fake = mux();
+        let shared: Arc<dyn Mux> = Arc::new(fake.clone());
+        let ids = ProcessIds::default();
+        let runtime = LifecycleRuntime {
+            state_directory: &state,
+            home_directory: Some(&home),
+            agent_config: AgentConfigDirectories::default(),
+            cwd: &root,
+            workspace_id: Some("s1"),
+            current_pane_id: Some("p1"),
+            session_socket_id: ENDPOINT,
+            mux: &shared,
+            clock: &SystemClock,
+            ids: &ids,
+        };
+        if matches!(case.as_str(), "active" | "deactivated" | "marked") {
+            namedrop::activate_from_naming_screen(&runtime).unwrap();
+        }
+        if case == "deactivated" {
+            namedrop::execute_lifecycle_operation("deactivate", json!({}), &runtime).unwrap();
+            assert!(!activated(&state));
+        }
+        if case == "marked" {
+            // `deactivate` also clears `activated`, so only a row written by
+            // hand shows that the deactivated mark alone refuses.
+            rusqlite::Connection::open(state.join("namedrop.sqlite3"))
+                .unwrap()
+                .execute("UPDATE worktrees SET deactivated = 1", [])
+                .unwrap();
+            assert!(!activated(&state));
+        }
+        if case == "incomplete" {
+            // Codex's package cannot be written under a file.
+            fs::create_dir_all(home.join(".agents")).unwrap();
+            fs::write(home.join(".agents/skills"), "not a directory").unwrap();
+        }
+        let result = name_prompt(&runtime, "t1");
+        let popups = fake
+            .attempted_effects()
+            .iter()
+            .filter(|effect| matches!(effect, Effect::OpenPopup(_)))
+            .count();
+        println!(
+            "\nREPORT {}",
+            json!({
+                "result": result,
+                "activated": activated(&state),
+                "popups": popups,
+                "tour_shown": namedrop::tour::is_shown(&state, namedrop::tour::CURRENT_ID).unwrap(),
+            })
+        );
+    }
+
+    /// The parent's half: what the person saw, and the child's report.
+    fn run(case: &str, keys: &[u8]) -> (String, Value) {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let root = env::temp_dir().join(format!(
+            "nd-rex-name-prompt-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("home")).unwrap();
+        let mut command = Command::new(env::current_exe().unwrap());
+        for name in ["REX_BLOCK", "REX_SESSION", "REX_SERVER", "REX_CLIENT"] {
+            command.env_remove(name);
+        }
+        let mut child = command
+            .args([
+                "naming_ui::rex_name_prompt_tests::child_runs_one_name_prompt",
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CASE, case)
+            .env(ROOT, &root)
+            .env("HOME", root.join("home"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(keys).unwrap();
+        let output = child.wait_with_output().unwrap();
+        fs::remove_dir_all(&root).unwrap();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(
+            output.status.success(),
+            "{stdout}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let (shown, report) = stdout
+            .rsplit_once("\nREPORT ")
+            .unwrap_or_else(|| panic!("no report: {stdout}"));
+        let report = report.lines().next().unwrap();
+        (shown.to_owned(), serde_json::from_str(report).unwrap())
+    }
+
+    #[test]
+    fn an_inactive_rex_session_offers_activation_and_enter_activates_without_a_tour() {
+        let (shown, report) = run("inactive", b"\nu5-term\nt\n");
+        let offer = shown.find(OFFER).expect(&shown);
+        let naming = shown.find("Name this pane").expect(&shown);
+        assert!(offer < naming, "{shown}");
+        assert_eq!(
+            report["result"]["Ok"], "Named @u5-term as terminal.",
+            "{report}"
+        );
+        assert_eq!(report["activated"], true);
+        assert_eq!(report["popups"], 0, "activation opened a popup");
+        assert_eq!(report["tour_shown"], false, "activation claimed the tour");
+    }
+
+    #[test]
+    fn escape_at_the_offer_names_nothing_and_activates_nothing() {
+        let (shown, report) = run("inactive", b"\x1b");
+        assert!(shown.contains(OFFER), "{shown}");
+        assert!(!shown.contains("Name this pane"), "{shown}");
+        assert_eq!(report["result"], json!({"Ok": null}));
+        assert_eq!(report["activated"], false);
+        assert_eq!(report["popups"], 0);
+    }
+
+    #[test]
+    fn an_active_rex_session_goes_straight_to_naming() {
+        let (shown, report) = run("active", b"u5-term\nt\n");
+        assert!(!shown.contains(OFFER), "{shown}");
+        assert!(shown.contains("Name this pane"), "{shown}");
+        assert_eq!(
+            report["result"]["Ok"], "Named @u5-term as terminal.",
+            "{report}"
+        );
+        assert_eq!(report["popups"], 0);
+    }
+
+    #[test]
+    fn a_deactivated_rex_session_offers_activation_again() {
+        for case in ["deactivated", "marked"] {
+            let (shown, report) = run(case, b"\nu5-term\nt\n");
+            let offer = shown.find(OFFER).expect(&shown);
+            assert!(
+                offer < shown.find("Name this pane").expect(&shown),
+                "{case}: {shown}"
+            );
+            assert_eq!(
+                report["result"]["Ok"], "Named @u5-term as terminal.",
+                "{case}: {report}"
+            );
+            assert_eq!(report["activated"], true, "{case}");
+        }
+    }
+
+    #[test]
+    fn an_incomplete_activation_shows_its_report_and_naming_continues() {
+        let (shown, report) = run("incomplete", b"\nu5-term\nt\n");
+        let attention = shown
+            .find("Namedrop is active, but part of its setup needs attention:")
+            .expect(&shown);
+        let repair = shown
+            .find("Namedrop Doctor lists the repair.")
+            .expect(&shown);
+        // Claude Code's package installed, so only Codex's is listed.
+        let listed: Vec<&str> = shown[attention..repair].lines().skip(1).collect();
+        assert!(
+            listed.len() == 1
+                && listed[0].starts_with("codex: ")
+                && listed[0].ends_with("is not a directory"),
+            "{shown}"
+        );
+        assert!(
+            attention < shown.find("Name this pane").expect(&shown),
+            "{shown}"
+        );
+        assert_eq!(
+            report["result"]["Ok"], "Named @u5-term as terminal.",
+            "{report}"
+        );
+        assert_eq!(report["activated"], true);
+    }
+
+    #[test]
+    fn a_complete_activation_shows_no_report() {
+        let (shown, _) = run("inactive", b"\nu5-term\nt\n");
+        assert!(!shown.contains("needs attention"), "{shown}");
     }
 }

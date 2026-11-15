@@ -40,6 +40,7 @@ pub use relay::{accept as relay_accept, run_worker as relay_worker};
 #[doc(hidden)]
 pub mod reminder;
 pub mod rex_bridge;
+pub mod rex_ui;
 pub use reminder::execute_reminder_operation;
 mod persona;
 mod ports;
@@ -90,10 +91,11 @@ pub(crate) use install::{
     integration_package_attention_source, refresh_user_integration_packages,
     user_hook_activation_guidance,
 };
-#[doc(hidden)]
 pub use installed_runtime::command_guard as runtime_command_guard;
 #[doc(hidden)]
 pub use installed_runtime::executable as runtime_executable;
+#[doc(hidden)]
+pub use installed_runtime::package_refusal;
 pub use installed_runtime::reexec_if_replaced as runtime_reexec_if_replaced;
 #[doc(hidden)]
 pub use installed_runtime::validate_update_manifest;
@@ -109,9 +111,10 @@ pub use integration::{
 };
 pub(crate) use integration::{collaboration_executable, tool_environment};
 pub use lifecycle::{
-    DiscoveredPane, DiscoveredWorktree, EventError, LifecycleRuntime, discover_worktree,
-    discover_worktree_for_workspace, execute_lifecycle_operation, handle_mux_event,
-    locate_agent_session_pane, open_popup, pane_workspace, reconcile_discovered_panes,
+    DiscoveredPane, DiscoveredWorktree, EventError, LifecycleRuntime, activate_from_naming_screen,
+    discover_worktree, discover_worktree_for_workspace, execute_lifecycle_operation,
+    handle_mux_event, locate_agent_session_pane, open_popup, pane_workspace,
+    reconcile_discovered_panes,
 };
 pub use message::{
     BodyMention, OperatorSendError, OperatorSendErrorKind, ParsedMessage, RecipientOutlook,

@@ -10,8 +10,9 @@ use std::{
 };
 
 const PROTOCOL: &str = "rex.control.v1";
-/// The only control API revision this client has been checked against.
-const API_REVISION: u64 = 12;
+/// The control API revisions this client accepts.
+const API_MIN_REVISION: u64 = 12;
+const API_REVISION: u64 = 14;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_TIMEOUT: Duration = Duration::from_secs(60);
 pub(super) const MAX_CALL_BYTES: usize = 4 * 1024 * 1024;
@@ -177,12 +178,17 @@ impl<'a, S: Timed> Connection<'a, S> {
             welcome["api_revision"].as_u64(),
             limit,
         ) {
-            (Some("welcome"), Some(PROTOCOL), Some(API_REVISION), Some(limit)) => {
+            (
+                Some("welcome"),
+                Some(PROTOCOL),
+                Some(API_MIN_REVISION..=API_REVISION),
+                Some(limit),
+            ) => {
                 connection.max_request = usize::try_from(limit).unwrap_or(usize::MAX);
                 Ok(connection)
             }
             _ => Err(Fault::Closed(format!(
-                "the server's welcome is not one for {PROTOCOL} revision {API_REVISION}: {welcome}"
+                "the server's welcome is not one for {PROTOCOL} revisions {API_MIN_REVISION} to {API_REVISION}: {welcome}"
             ))),
         }
     }
@@ -200,7 +206,7 @@ impl<'a, S: Timed> Connection<'a, S> {
         let hello = json!({
             "type": "hello",
             "api_revision": API_REVISION,
-            "api_min_revision": API_REVISION,
+            "api_min_revision": API_MIN_REVISION,
             "client": {"kind": "other", "name": "namedrop", "version": env!("CARGO_PKG_VERSION")},
         });
         self.exchange(budget, deadline, &hello, |_| true)

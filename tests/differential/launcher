@@ -1,0 +1,15 @@
+#!/usr/bin/python3 -I
+"""The installed runtime's launcher, standing in for the real one: it logs each
+start's arguments and location-shaped environment to $ROOT/spawns, then runs
+the selected release."""
+import json
+import os
+import sys
+
+KEEP = ("HERDR_", "NAMEDROP_", "REX_", "CLAUDE", "CODEX_", "AI_AGENT")
+names = sorted((k, v) for k, v in os.environ.items() if k.startswith(KEEP) and k != "HERDR_BIN_PATH")
+with open(os.path.join(os.environ["ROOT"], "spawns"), "a") as log:
+    log.write(json.dumps({"args": sys.argv[1:], "env": names}) + "\n")
+here = os.path.dirname(os.path.abspath(sys.argv[0]))
+binary = os.path.join(here, "current", "namedrop")
+os.execv(binary, [binary] + sys.argv[1:])

@@ -175,6 +175,51 @@ fn each_row_of_the_decode_table_yields_its_event_and_every_other_line_none() {
     assert_eq!(server.join().unwrap(), Some(1000));
 }
 
+/// Real event lines from a preview.19 scratch server, client events left out.
+/// The connection negotiated revision 13. Rex sent no `process_changed` and
+/// no `block_created` for the new session's block, so only `session_created`
+/// announces it. Then the shell set the root status, reset the terminal, and
+/// was killed.
+const STARTUP_GAP: &str = include_str!("../fixtures/events/startup-gap.jsonl");
+
+/// `session_created` yields nothing: the bridge flushes only activated
+/// spaces, and activation surveys the space itself.
+#[test]
+fn after_a_missed_startup_the_block_s_later_status_and_closure_still_decode() {
+    let state = State::new();
+    let wake = Wake::new().unwrap();
+    let (client, server) = serve("host-a", |server| {
+        let captured: Vec<Value> = STARTUP_GAP
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        send_events(server, &captured);
+        server.close_code()
+    });
+    let mut stream = events(client, &state, &wake, Liveness::REX);
+    let space = SpaceId::new("session:01a1dce4-961e-7df2-98c6-90e1826ec304");
+    let slot = PaneSlot {
+        space: space.clone(),
+        pane: PaneId::new("block:01a1dce4-9620-705d-9c6b-938795894fd0"),
+        tab: None,
+    };
+    let mut decoded = Vec::new();
+    while let Next::Event(event) = stream.next(Duration::from_millis(300)) {
+        decoded.push(event);
+    }
+    assert_eq!(
+        decoded,
+        [
+            MuxEvent::AgentStatusChanged(slot.clone()),
+            MuxEvent::AgentStatusChanged(slot.clone()),
+            MuxEvent::PaneClosed(slot),
+            MuxEvent::SpaceClosed(space),
+        ]
+    );
+    drop(stream);
+    assert_eq!(server.join().unwrap(), Some(1000));
+}
+
 /// Only the root status record speaks for the block's agent.
 #[test]
 fn a_status_record_other_than_the_root_s_yields_nothing() {

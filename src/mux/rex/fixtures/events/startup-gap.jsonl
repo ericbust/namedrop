@@ -1,0 +1,6 @@
+{"type":"session_created","payload":{"session":{"session_id":"session:01a1dce4-961e-7df2-98c6-90e1826ec304","label":"nd-gap"}}}
+{"type":"session_event","payload":{"session_id":"session:01a1dce4-961e-7df2-98c6-90e1826ec304","event":{"type":"block_event","payload":{"block_id":"block:01a1dce4-9620-705d-9c6b-938795894fd0","creator_name":"com.superlogical.terminal","name":"program_status_changed","payload":{"id":"","record":{"state":"working","app":"claude-code","effective_app":"claude-code","updated_at":"2026-11-14T20:48:51.933577-05:00","owner":{"pid":25317,"name":"zsh"}},"reason":"report"}}}}}
+{"type":"session_event","payload":{"session_id":"session:01a1dce4-961e-7df2-98c6-90e1826ec304","event":{"type":"block_event","payload":{"block_id":"block:01a1dce4-9620-705d-9c6b-938795894fd0","creator_name":"com.superlogical.terminal","name":"program_status_removed","payload":{"ids":[""],"reason":"reset"}}}}}
+{"type":"session_event","payload":{"session_id":"session:01a1dce4-961e-7df2-98c6-90e1826ec304","event":{"type":"block_closed","payload":{"block_id":"block:01a1dce4-9620-705d-9c6b-938795894fd0"}}}}
+{"type":"session_event","payload":{"session_id":"session:01a1dce4-961e-7df2-98c6-90e1826ec304","event":{"type":"session_view_changed","payload":{"revision":2}}}}
+{"type":"session_destroyed","payload":{"session_id":"session:01a1dce4-961e-7df2-98c6-90e1826ec304"}}

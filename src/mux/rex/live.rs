@@ -22,8 +22,9 @@ fn ws_reads_the_welcome_of_a_real_server() {
     let stream = UnixStream::connect(socket()).unwrap();
     let mut socket = WebSocket::connect(stream, "/api/control", "rex.control.v1", 1 << 20).unwrap();
     socket.upgrade().unwrap();
+    // Offer 13 to check negotiation with a server whose maximum is newer.
     socket
-        .send_text(r#"{"type":"hello","api_revision":12,"client":{"kind":"other","name":"namedrop-live"}}"#)
+        .send_text(r#"{"type":"hello","api_revision":13,"api_min_revision":12,"client":{"kind":"other","name":"namedrop-live"}}"#)
         .unwrap();
     let Message::Text(welcome) = socket.recv().unwrap() else {
         panic!("the welcome is a text message");
@@ -31,7 +32,28 @@ fn ws_reads_the_welcome_of_a_real_server() {
     let welcome: serde_json::Value = serde_json::from_str(&welcome).unwrap();
     assert_eq!(welcome["type"], "welcome", "{welcome}");
     assert_eq!(welcome["protocol"], "rex.control.v1", "{welcome}");
-    assert_eq!(welcome["api_revision"], 12, "{welcome}");
+    assert!(
+        matches!(welcome["api_revision"].as_u64(), Some(12..=13)),
+        "{welcome}"
+    );
+    socket
+        .send_text(r#"{"type":"request","id":"1","method":"server.status"}"#)
+        .unwrap();
+    let Message::Text(status) = socket.recv().unwrap() else {
+        panic!("the status is a text message");
+    };
+    let status: serde_json::Value = serde_json::from_str(&status).unwrap();
+    // The welcome names the server's maximum apart from the negotiated
+    // revision, and the status reports that maximum.
+    assert_eq!(
+        welcome["api_server_revision"], status["payload"]["api_revision"],
+        "{welcome} {status}"
+    );
+    assert_eq!(
+        welcome["api_revision"].as_u64(),
+        Some(status["payload"]["api_revision"].as_u64().unwrap().min(13)),
+        "{welcome} {status}"
+    );
     socket.close(1000).unwrap();
 }
 
@@ -339,10 +361,12 @@ fn mux_connect_surveys_a_scratch_server_through_a_rex_endpoint() {
     }
 }
 
-/// The bridge's stream on a real server sees a session's first block start
-/// its shell, and its kill close the block and then the session. Set
-/// `NAMEDROP_REX_LIVE_HOME` to the scratch server's `HOME`, which the `rex`
-/// client runs with.
+/// The bridge's stream on a real server sees a new session's shell set and
+/// then reset the root status, and its kill closes the block and then the
+/// session. Rex may send no event at all for the new block's
+/// startup, so the status changes come from shell builtins typed after
+/// attachment, which start no process. Set `NAMEDROP_REX_LIVE_HOME` to the
+/// scratch server's `HOME`, which the `rex` client runs with.
 #[test]
 #[ignore = "run with NAMEDROP_REX_LIVE=unix://<scratch server socket>, NAMEDROP_REX_LIVE_HOME, and -- --ignored --test-threads=1"]
 fn the_bridge_stream_follows_a_real_session_from_start_to_kill() {
@@ -387,19 +411,31 @@ fn the_bridge_stream_follows_a_real_session_from_start_to_kill() {
     while let Next::Event(event) = stream.next(Duration::from_millis(500)) {
         seen.push(event);
     }
-    rex(&["kill", &session]);
-    while let Next::Event(event) = stream.next(Duration::from_millis(500)) {
-        seen.push(event);
-    }
     let slot = crate::mux::PaneSlot {
         space: crate::SpaceId::new(&session),
         pane: crate::mux::PaneId::new(&block),
         tab: None,
     };
-    assert!(
-        seen.contains(&MuxEvent::AgentStatusChanged(slot.clone())),
-        "{seen:?}"
-    );
+    for line in [
+        r"printf '\e]7501;state=working:app=probe\e\\'",
+        r"printf '\ec'",
+    ] {
+        rex(&["send", "-s", &session, "-b", &block, line]);
+        rex(&["send-key", "-s", &session, "-b", &block, "enter"]);
+        let mut step = Vec::new();
+        while let Next::Event(event) = stream.next(Duration::from_millis(500)) {
+            step.push(event);
+        }
+        assert!(
+            step.contains(&MuxEvent::AgentStatusChanged(slot.clone())),
+            "{line}: {step:?}"
+        );
+        seen.extend(step);
+    }
+    rex(&["kill", &session]);
+    while let Next::Event(event) = stream.next(Duration::from_millis(500)) {
+        seen.push(event);
+    }
     assert_eq!(
         seen[seen.len() - 2..],
         [

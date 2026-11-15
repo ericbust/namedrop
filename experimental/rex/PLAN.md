@@ -84,7 +84,7 @@ Each step ends in a state that you can check before the next step starts.
 
 TLS to a real remote server, a Linux B, and the operator's own hosts were not tested. `testbed rex down` stopped both lanes, their bridges and A's worker among them.
 
-6. **Add the UI and the installer.** Ship a Lua module that the user loads from `init.lua` with one `require` line. The module defines the palette actions and the key bindings, and it opens the naming, manage, doctor, status, and tour screens in floating layers. The step is done when a machine with Rex and no Herdr can install Namedrop, activate it, and name a pane from the palette.
+6. **Add the UI and the installer.** Ship a Lua module that the user loads from `init.lua` with one `require` line. The module defines the palette actions and the key bindings, and it opens the naming, manage, doctor, status, and tour screens in floating layers. The step is done when a machine with Rex and no Herdr can install Namedrop, activate it, and name a pane from the palette. [UI.md](UI.md) is its design.
 7. **Add verification and documentation.** Write a Rex driver for the testbed and a Rex checklist for `/verify`. State the supported Rex API revision in `docs/compatibility.md`. The step is done when `/verify` passes on Rex.
 
 ## Before the first release

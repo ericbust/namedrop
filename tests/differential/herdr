@@ -1,0 +1,72 @@
+#!/usr/bin/python3 -I
+"""A script Herdr for the differential run: one workspace w1 at $CHECKOUT with a
+Codex pane p1, a Claude Code pane p2, and a shell pane p3, all idle. Each call
+is logged to $ROOT/calls as one JSON line: the location-shaped environment and
+the arguments, typed text included."""
+import json
+import os
+import sys
+
+ROOT = os.environ["ROOT"]
+args = sys.argv[1:]
+names = sorted(
+    (key, value)
+    for key, value in os.environ.items()
+    if key.startswith(("HERDR_", "NAMEDROP_", "REX_", "CLAUDE", "CODEX_", "AI_AGENT"))
+    and key not in ("HERDR_BIN_PATH",)
+)
+with open(os.path.join(ROOT, "calls"), "a") as log:
+    log.write(json.dumps({"env": names, "args": args}) + "\n")
+
+shell = int(os.environ.get("SHELLPID", "1"))
+panes = [
+    {"pane_id": "p1", "terminal_id": "t1", "tab_id": "tab1", "workspace_id": "w1",
+     "agent": "codex", "agent_session": {"value": "session-1"}, "agent_status": "idle"},
+    {"pane_id": "p2", "terminal_id": "t2", "tab_id": "tab1", "workspace_id": "w1",
+     "agent": "claude", "agent_session": {"value": "session-2"}, "agent_status": "idle"},
+    {"pane_id": "p3", "terminal_id": "t3", "tab_id": "tab1", "workspace_id": "w1"},
+    {"pane_id": "p4", "terminal_id": "t4", "tab_id": "tab1", "workspace_id": "w1",
+     "agent": "claude", "agent_session": {"value": "session-4"}, "agent_status": "idle"},
+    {"pane_id": "p5", "terminal_id": "t5", "tab_id": "tab1", "workspace_id": "w1",
+     "agent": "codex", "agent_session": {"value": "session-5"}, "agent_status": "idle"},
+]
+
+
+override = os.path.join(ROOT, "sessions.json")
+if os.path.exists(override):
+    for pane in panes:
+        session = json.load(open(override)).get(pane["pane_id"])
+        if session:
+            pane["agent_session"] = {"value": session}
+
+
+def out(value):
+    print(json.dumps({"result": value}))
+
+
+key = " ".join(args[:2])
+if key == "session list":
+    print(json.dumps({"sessions": []}))
+elif key == "status server":
+    print("running: yes\nsocket: " + os.environ.get("SOCK", "/run/h.sock"))
+elif key == "worktree list":
+    second = "--workspace" in args and args[args.index("--workspace") + 1] == "w2"
+    out({"worktrees": [{"path": os.environ["CHECKOUT"] + ("2" if second else ""), "open_workspace_id": "w2" if second else "w1"}]})
+elif key == "workspace list":
+    out({"workspaces": [{"workspace_id": "w1", "label": "repo"}, {"workspace_id": "w2", "label": "inactive"}]})
+elif key == "workspace get":
+    out({"workspace": {"workspace_id": "w2" if "w2" in args else "w1", "label": "repo"}})
+elif key == "pane list":
+    out({"panes": [{"pane_id":"p6","terminal_id":"t6","tab_id":"tab2","workspace_id":"w2"}] if "w2" in args else panes})
+elif key == "pane process-info":
+    pane = args[2] if len(args) > 2 else "p1"
+    out({"process_info": {"pane_id": pane, "shell_pid": shell,
+                          "foreground_process_group_id": shell, "foreground_processes": []}})
+elif key == "tab get":
+    out({"tab": {"tab_id": "tab1", "label": "repo"}})
+elif key == "plugin pane":
+    out({"pane_id": "popup"})
+elif key == "plugin list":
+    out({"plugins": []})
+else:
+    print("{}")

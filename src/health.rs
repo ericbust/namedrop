@@ -79,6 +79,48 @@ where
     I: IdGenerator,
 {
     let mut report = diagnose_space(runtime);
+    if runtime.mux.endpoint().kind == crate::mux::MuxKind::Rex
+        && let Some(inspected) =
+            crate::rex_ui::inspect(runtime.home_directory, runtime.mux.endpoint())
+    {
+        let (confirmed, explanation, diagnostic) = match inspected {
+            Ok(diagnostic) => (
+                diagnostic["confirmed"] == true,
+                rex_module_explanation(&diagnostic),
+                diagnostic,
+            ),
+            Err(error) => (
+                false,
+                error.clone(),
+                serde_json::json!({"confirmed":false,"error":error}),
+            ),
+        };
+        let mut check = issue(
+            "ND-REX-001",
+            if confirmed {
+                HealthSeverity::Info
+            } else {
+                HealthSeverity::Notice
+            },
+            if confirmed {
+                "The Rex module is confirmed."
+            } else {
+                "The Rex module is not confirmed."
+            },
+            &explanation,
+            HealthRepairKind::ProductAction,
+            if confirmed {
+                "Keys bound later in init.lua override the Namedrop keys."
+            } else {
+                "Run sh scripts/install.sh, then check Namedrop Doctor again."
+            },
+        );
+        check.diagnostic = diagnostic;
+        report.issues.push(check);
+        if !confirmed && report.status == HealthStatus::Healthy {
+            report.status = HealthStatus::NeedsAttention;
+        }
+    }
     if let Some(diagnostic) = crate::dashboard::tailscale::diagnose(runtime.state_directory) {
         let explanation = match (&diagnostic.url, &diagnostic.problem) {
             (Some(url), Some(problem)) => format!("{url}: {problem}"),
@@ -279,9 +321,34 @@ where
             issues.push(hook_issue);
         }
     }
-    if let Some((record, recorded)) = runtime
-        .home_directory
-        .and_then(|home| crate::install::install_record_mismatch(home, runtime.agent_config))
+    // UI.md's third case: a Herdr release from before step 6 rebaked the
+    // packages for its own state and left the module naming the standalone
+    // one. Activating again here would take the packages back, so the
+    // record's repair is not offered beside this one.
+    let module_mismatch = runtime.mux.endpoint().kind == crate::mux::MuxKind::Rex
+        && runtime.home_directory.is_some_and(|home| {
+            std::fs::read(crate::locator::rex_registration(home))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .and_then(|registration| {
+                    registration["state"].as_str().map(std::path::PathBuf::from)
+                })
+                .is_some_and(|module| crate::install::packages_bake_another_state(home, &module))
+        });
+    if module_mismatch {
+        issues.push(issue(
+            "ND-INSTALL-003",
+            HealthSeverity::Notice,
+            "The Rex module and the shared agent packages name different installs.",
+            "An older Herdr release updated the packages without updating the Rex module.",
+            HealthRepairKind::AgentRepair,
+            "Update Namedrop in Herdr, then run Activate Namedrop there again.",
+        ));
+    }
+    if !module_mismatch
+        && let Some((record, recorded)) = runtime
+            .home_directory
+            .and_then(|home| crate::install::install_record_mismatch(home, runtime.agent_config))
     {
         let mut record_issue = issue(
             "ND-INTEGRATION-002",
@@ -1578,6 +1645,46 @@ fn add_operation<M, C, I>(
         issue.repair.command = Some(command);
     }
 }
+/// Doctor's account of the Rex module. An issue's text renders as one line,
+/// because the report escapes control characters, newlines included.
+fn rex_module_explanation(diagnostic: &serde_json::Value) -> String {
+    let text = |value: &serde_json::Value| value.as_str().unwrap_or("none").to_owned();
+    let keys = diagnostic["keys"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|k| {
+            let status = match k["status"].as_str() {
+                Some("in_effect") => "in effect",
+                Some("shadowed") => "shadowed",
+                Some("skipped") => "skipped at load",
+                _ => "unknown",
+            };
+            match k["source"].as_str() {
+                Some(source) => format!("{} {status} ({source})", text(&k["key"])),
+                None => format!("{} {status}", text(&k["key"])),
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut explanation = format!(
+        "Registered module: {}. Loaded module: {}, launcher {}, state {}. Server config: {}. Server environment: {}. Keys: {}.",
+        text(&diagnostic["module"]),
+        text(&diagnostic["about"]["module"]),
+        text(&diagnostic["about"]["launcher"]),
+        text(&diagnostic["about"]["state"]),
+        text(&diagnostic["config"]["path"]),
+        diagnostic["env"],
+        if keys.is_empty() {
+            "none".to_owned()
+        } else {
+            keys.join(", ")
+        }
+    );
+    if let Some(error) = diagnostic["error"].as_str() {
+        explanation.push_str(&format!(" Readback error: {error}"));
+    }
+    explanation
+}
 
 #[must_use]
 pub fn render_health_report_to_text(report: &HealthReport) -> String {
@@ -1662,6 +1769,28 @@ pub fn render_health_report_to_text(report: &HealthReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rex_module_explanation_is_one_line_with_each_key() {
+        let diagnostic = serde_json::json!({
+            "module": "/cfg/namedrop.lua",
+            "about": {"module": "/cfg/namedrop.lua", "launcher": "/s/runtime/namedrop", "state": "/s"},
+            "config": {"path": "/cfg/init.lua"},
+            "env": {"HOME": "/home"},
+            "keys": [
+                {"key": "alt+shift+cmd+i", "status": "in_effect", "source": "namedrop.lua:39"},
+                {"key": "alt+shift+cmd+m", "status": "shadowed", "source": "init.lua:4"},
+                {"key": "alt+shift+cmd+h", "status": "skipped"}
+            ],
+            "error": "no about"
+        });
+        let explanation = rex_module_explanation(&diagnostic);
+        assert_eq!(terminal_safe_text(&explanation), explanation);
+        assert_eq!(
+            explanation,
+            "Registered module: /cfg/namedrop.lua. Loaded module: /cfg/namedrop.lua, launcher /s/runtime/namedrop, state /s. Server config: /cfg/init.lua. Server environment: {\"HOME\":\"/home\"}. Keys: alt+shift+cmd+i in effect (namedrop.lua:39), alt+shift+cmd+m shadowed (init.lua:4), alt+shift+cmd+h skipped at load. Readback error: no about"
+        );
+    }
 
     #[test]
     fn expired_relay_replies_are_one_notice_that_counts_each_sender() {
