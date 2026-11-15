@@ -491,6 +491,18 @@ pub fn remove(
         .home()
         .ok_or("Namedrop removal needs an absolute HOME")?;
     let standalone = installed_runtime::standalone(state)?;
+    // Rex's verdict on the file before the edit, so an error that was already
+    // there is not taken for one the edit made. Read with no lease held.
+    let failed_before = registration(home).ok().flatten().and_then(|record| {
+        let (record, _) = planned_removal(record).ok()??;
+        let reload = rpc(
+            &Endpoint::parse(record["server"].as_str()?),
+            "server.config_reload",
+            None,
+        )
+        .ok()?;
+        crate::mux::rex::config_errors(&reload).then_some(reload)
+    });
     let lease = installed_runtime::package_guard(Some(home), state, Writer::Removal)?;
     if standalone {
         match installed_runtime::retirement(state)? {
@@ -513,39 +525,44 @@ pub fn remove(
             .as_deref()
             .is_none_or(|r| installed_runtime::packages::same(r, state));
     let record = registration(home)?;
-    let mut edit = None;
-    if let Some(record) = &record
-        && let Some(config) = record["config"].as_str().map(PathBuf::from)
-        && record["line"] == "inserted"
-        && fs::symlink_metadata(&config).is_ok_and(|m| m.is_file())
-    {
-        let before = fs::read(&config).map_err(|e| e.to_string())?;
-        let n = before
-            .iter()
-            .position(|b| *b == b'\n')
-            .map_or(before.len(), |n| n + 1);
-        if before.get(..n) == Some(format!("{CONFIG_LINE}\n").as_bytes())
-            || before.get(..n) == Some(format!("{CONFIG_LINE}\r\n").as_bytes())
-        {
-            edit = Some(Edit::apply(
+    let planned = match record.clone() {
+        Some(record) => planned_removal(record)?,
+        None => None,
+    };
+    let edit = match planned {
+        Some((record, before)) => {
+            let config = PathBuf::from(record["config"].as_str().unwrap_or_default());
+            let n = before
+                .iter()
+                .position(|b| *b == b'\n')
+                .map_or(before.len(), |n| n + 1);
+            Some(Edit::apply(
                 &lease,
                 &config,
                 &before,
                 before[n..].to_vec(),
                 fs::metadata(&config).ok().map(|m| m.permissions().mode()),
-            )?);
+            )?)
         }
-    }
+        None => None,
+    };
     drop(lease);
     if let Some(record) = &record
         && let Some(server) = record["server"].as_str()
     {
         let endpoint = Endpoint::parse(server);
+        // Only an error the edit made fails removal: with no edit, or with a
+        // file that already failed, removal goes on.
         if let Ok(reload) = rpc(&endpoint, "server.config_reload", None)
             && crate::mux::rex::config_errors(&reload)
+            && edit.is_some()
+            && failed_before.is_none()
         {
             return Err(restore(home, state, edit, &endpoint, &reload, true)?);
         }
+    }
+    if let Some(edit) = &edit {
+        edit.keep_only_its_backup();
     }
     let lease = installed_runtime::package_guard(Some(home), state, Writer::Removal)?;
     if standalone {
@@ -581,8 +598,36 @@ pub fn remove(
         }
         fs::remove_file(crate::locator::rex_registration(home)).map_err(|e| e.to_string())?;
     }
+    let mut report = json!({"removed":true,"state_preserved":true,"packages_removed":remove_packages,"message":if remove_packages {"Namedrop was removed from Rex. Its state directory was preserved."} else {"Removed only the Rex configuration. The shared packages and install record belong to another owner."}});
+    if let Some(diagnostic) = failed_before {
+        report["config_error"] = json!(format!(
+            "Rex's configuration failed before Namedrop removed its line, so that error is not Namedrop's: {diagnostic}"
+        ));
+    }
+    Ok(report)
+}
+
+/// The record, its line state read again from `init.lua`, and the file's
+/// bytes, when removal deletes the line: the line state is `inserted`, the
+/// file is regular, and its first line is exactly the line. A file it cannot
+/// read is an error, never a missing line.
+fn planned_removal(mut record: Value) -> Result<Option<(Value, Vec<u8>)>, String> {
+    super::reinspect_line(&mut record);
+    let Some(config) = record["config"].as_str().map(PathBuf::from) else {
+        return Ok(None);
+    };
+    if record["line"] != "inserted" || !fs::symlink_metadata(&config).is_ok_and(|m| m.is_file()) {
+        return Ok(None);
+    }
+    let before = fs::read(&config).map_err(|e| format!("{}: {e}", config.display()))?;
+    let n = before
+        .iter()
+        .position(|b| *b == b'\n')
+        .map_or(before.len(), |n| n + 1);
     Ok(
-        json!({"removed":true,"state_preserved":true,"packages_removed":remove_packages,"message":if remove_packages {"Namedrop was removed from Rex. Its state directory was preserved."} else {"Removed only the Rex configuration. The shared packages and install record belong to another owner."}}),
+        (before.get(..n) == Some(format!("{CONFIG_LINE}\n").as_bytes())
+            || before.get(..n) == Some(format!("{CONFIG_LINE}\r\n").as_bytes()))
+        .then_some((record, before)),
     )
 }
 

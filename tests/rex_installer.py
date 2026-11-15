@@ -180,9 +180,10 @@ with tempfile.TemporaryDirectory(prefix='nd-u7-protocol-',dir='/tmp') as folder:
     place,config,server=case('latin1',b'-- caf\xe9 config\nlocal x = 1\n')
     try:
         before=config.read_bytes();run(place,server);assert config.read_bytes()==LINE.encode()+b'\n'+before
-        assert [b.read_bytes() for b in backups(config)]==[before]
+        assert [b.read_bytes() for b in backups(config)]==[before];inserted=config.read_bytes()
         assert json.loads((place/'home/.config/namedrop/rex.json').read_text())['line']=='inserted'
         run(place,server,'--remove');assert config.read_bytes()==before
+        assert [b.read_bytes() for b in backups(config)]==[inserted],'older backups were kept'
     finally:server.close()
     # An edit that fails changes nothing and installs as --print-config does,
     # with the line, the reason, and where it goes.
@@ -196,5 +197,21 @@ with tempfile.TemporaryDirectory(prefix='nd-u7-protocol-',dir='/tmp') as folder:
             assert data['line']=='printed' and data['manual_config'] and 'could not edit' in data['reason'] and str(config) in data['instruction'] and data['config_line']==LINE,data
             assert json.loads((place/'home/.config/namedrop/rex.json').read_text())['line']=='printed'
             run(place,server);assert config.read_bytes()==LINE.encode()+b'\n'+before
+        finally:server.close()
+    # Removal finishes over a file that was already broken, and over a reload
+    # that fails with no edit; an error its own edit makes still restores.
+    for name in ['remove-broken','remove-unedited','remove-rollback']:
+        place,config,server=case(name)
+        try:
+            run(place,server,*(['--print-config'] if name=='remove-unedited' else []));edited=config.read_bytes()
+            if name=='remove-rollback':server.fail_at=server.reloads+2
+            else:server.fail_before=True
+            p=run(place,server,'--remove',ok=name!='remove-rollback')
+            if name=='remove-rollback':
+                assert config.read_bytes()==edited and b'Restored' in p.stdout and (place/'home/.config/namedrop/rex.json').exists(),p
+                continue
+            data=json.loads(p.stdout)['data'];assert data['removed'] is True,data
+            assert ('config_error' in data)==(name=='remove-broken'),data
+            assert config.read_bytes()==b'-- personal config\n' and not (config.parent/'namedrop.lua').exists() and not (place/'home/.config/namedrop/rex.json').exists()
         finally:server.close()
 print('protocol installer guards, rollback, identity, idempotence and removal passed')
