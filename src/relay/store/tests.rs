@@ -1137,7 +1137,7 @@ fn lost_reports_validate_authority_fields_and_bound_the_page() {
         ("devbox", "host-b", loss("message", &"a".repeat(65), 6)),
     ] {
         store
-            .note_lost(endpoint, label, host, "epoch", &[report], NOW)
+            .note_lost(endpoint, label, label, host, "epoch", &[report], NOW)
             .unwrap();
     }
     for count in [-1, LOST_COUNT_LIMIT + 1, i64::MAX] {
@@ -1149,7 +1149,15 @@ fn lost_reports_validate_authority_fields_and_bound_the_page() {
                 report.discarded = count;
             }
             store
-                .note_lost(endpoint, "devbox", "host-b", "epoch", &[report], NOW)
+                .note_lost(
+                    endpoint,
+                    "devbox",
+                    "devbox",
+                    "host-b",
+                    "epoch",
+                    &[report],
+                    NOW,
+                )
                 .unwrap();
         }
     }
@@ -1161,6 +1169,7 @@ fn lost_reports_validate_authority_fields_and_bound_the_page() {
     store
         .note_lost(
             endpoint,
+            "devbox",
             "devbox",
             "host-b",
             "epoch",
@@ -1175,7 +1184,9 @@ fn lost_reports_validate_authority_fields_and_bound_the_page() {
         .unwrap();
     let reports: Vec<_> = (0..100).map(|i| loss("message", "bob", i)).collect();
     store
-        .note_lost(endpoint, "devbox", "host-b", "epoch", &reports, NOW)
+        .note_lost(
+            endpoint, "devbox", "devbox", "host-b", "epoch", &reports, NOW,
+        )
         .unwrap();
     assert_eq!(count(&store, "SELECT COUNT(*) FROM lost"), LOST_LIMIT);
     assert_eq!(
@@ -1183,9 +1194,12 @@ fn lost_reports_validate_authority_fields_and_bound_the_page() {
         LOST_LIMIT - 1,
         "B names its latest first, so A keeps the first 32 of the answer"
     );
+    let untold = store.lost_untold(endpoint).unwrap();
+    assert_eq!(untold.len(), 1, "one alias and message are told once");
     assert_eq!(
-        store.lost_untold(endpoint).unwrap().len(),
-        LOST_LIMIT as usize
+        (untold[0].discarded, untold[0].expired),
+        (LOST_LIMIT, 0),
+        "of every count A keeps"
     );
 }
 
@@ -1211,6 +1225,7 @@ fn a_loss_noted_while_another_relay_writer_writes_waits_for_it() {
     let noted = store.note_lost(
         "rex:/tmp/a.sock",
         "devbox",
+        "devbox",
         "host-b",
         "epoch",
         &[loss("message", "bob", 1)],
@@ -1219,6 +1234,48 @@ fn a_loss_noted_while_another_relay_writer_writes_waits_for_it() {
     committed.join().unwrap();
     assert_eq!(noted.map_err(|error| error.to_string()), Ok(()));
     assert_eq!(count(&store, "SELECT COUNT(*) FROM lost"), 1);
+}
+
+/// A loss told stays told as long as A keeps the item it answers, so B can
+/// never name it again to a sender who was told: the record goes only once
+/// the item has.
+#[test]
+fn a_told_loss_stays_told_while_its_item_is_kept() {
+    let state = State::new();
+    let store = state.open(NOW);
+    queue(&store, "message", NOW);
+    store
+        .connection
+        .execute("UPDATE outbound SET state='accepted', host_id='host-b'", [])
+        .unwrap();
+    let endpoint = "rex:/tmp/a.sock";
+    store
+        .note_lost(
+            endpoint,
+            "devbox",
+            "devbox",
+            "host-b",
+            "epoch",
+            &[loss("message", "bob", 1)],
+            NOW,
+        )
+        .unwrap();
+    let untold = store.lost_untold(endpoint).unwrap();
+    assert_eq!(untold.len(), 1);
+    store.told_lost(endpoint, &untold[0], NOW).unwrap();
+    drop(store);
+    let kept = |store: &RelayStore| {
+        (
+            count(store, "SELECT COUNT(*) FROM outbound"),
+            count(store, "SELECT COUNT(*) FROM lost_told"),
+        )
+    };
+    let store = state.open(NOW + DONE_LIFETIME_MS - 1);
+    assert_eq!(kept(&store), (1, 1));
+    assert!(store.lost_untold(endpoint).unwrap().is_empty());
+    drop(store);
+    let store = state.open(NOW + DONE_LIFETIME_MS);
+    assert_eq!(kept(&store), (0, 0), "the record goes with its item");
 }
 
 #[test]
@@ -1235,6 +1292,7 @@ fn lost_reports_roll_back_the_whole_page_on_write_failure() {
         store
             .note_lost(
                 "rex:/tmp/a.sock",
+                "devbox",
                 "devbox",
                 "host-b",
                 "epoch",
@@ -1254,7 +1312,7 @@ fn lost_reports_doctor_saturates_legacy_counts_and_preserves_other_conditions() 
         .set_can_reply("rex:/tmp/a.sock", "devbox", false)
         .unwrap();
     for since in [1, 2] {
-        store.connection.execute("INSERT INTO lost (endpoint, host_id, epoch, re, remote_alias, since_ms, label, discarded, expired, updated_at_ms) VALUES ('rex:/tmp/a.sock', 'host-b', 'epoch', 'message', 'bob', ?1, 'devbox', ?2, ?2, ?3)", params![since, i64::MAX, NOW]).unwrap();
+        store.connection.execute("INSERT INTO lost (endpoint, host_id, epoch, re, remote_alias, since_ms, label, peer, discarded, expired, updated_at_ms) VALUES ('rex:/tmp/a.sock', 'host-b', 'epoch', 'message', 'bob', ?1, 'devbox', 'devbox', ?2, ?2, ?3)", params![since, i64::MAX, NOW]).unwrap();
     }
     let conditions = store.conditions("rex:/tmp/a.sock", NOW).unwrap();
     assert_eq!(conditions.len(), 1);
@@ -1280,6 +1338,7 @@ fn lost_reports_retain_only_the_latest_page_per_peer_across_answers() {
         .note_lost(
             endpoint,
             "studio",
+            "studio",
             "host-c",
             "epoch",
             &[loss("message", "bob", 0)],
@@ -1293,6 +1352,7 @@ fn lost_reports_retain_only_the_latest_page_per_peer_across_answers() {
         store
             .note_lost(
                 endpoint,
+                "devbox",
                 "devbox",
                 "host-b",
                 &format!("epoch-{page}"),
@@ -1316,8 +1376,13 @@ fn lost_reports_retain_only_the_latest_page_per_peer_across_answers() {
             1
         );
         assert_eq!(
-            store.lost_untold(endpoint).unwrap().len(),
-            LOST_LIMIT as usize + 1
+            store
+                .lost_untold(endpoint)
+                .unwrap()
+                .iter()
+                .map(|lost| (lost.label.as_str(), lost.discarded))
+                .collect::<Vec<_>>(),
+            [("studio", 1), ("devbox", LOST_LIMIT)]
         );
     }
 }

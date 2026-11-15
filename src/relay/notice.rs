@@ -93,10 +93,17 @@ pub(crate) fn tell(
             return;
         }
     }
+    // A server's losses are told at most `LOST_NOTICES_PER_HOUR` an hour.
+    // One past that waits for a later call, and Doctor counts it now.
     for lost in &lost {
+        match store.lost_allowance(&endpoint.key, &lost.peer, now) {
+            Ok(allowance) if allowance > 0 => {}
+            Ok(_) => continue,
+            Err(_) => return,
+        }
         let told = notice(state, gate, &endpoint.key, &lost_notice(lost));
         if !settle(told, &lost.space, wake, || {
-            store.told_lost(&endpoint.key, lost)
+            store.told_lost(&endpoint.key, lost, now)
         }) {
             return;
         }
@@ -105,6 +112,8 @@ pub(crate) fn tell(
 
 /// The notice that B let go of replies to a message before A acknowledged
 /// them. A may have collected one that expired and not yet acknowledged it.
+/// It comes from the relay author of the message's recipient, which the
+/// message made, so what B says it lost makes no relay author.
 fn lost_notice(lost: &LostReplies) -> Notice<'_> {
     let replies = |count: i64| {
         if count == 1 {
@@ -113,27 +122,29 @@ fn lost_notice(lost: &LostReplies) -> Notice<'_> {
             format!("{count} replies")
         }
     };
-    let (alias, label) = (&lost.remote_alias, &lost.label);
+    let (recipient, label) = (&lost.recipient, &lost.label);
+    let from = if lost.remote_alias == *recipient {
+        String::new()
+    } else {
+        format!(" from {}", lost.remote_alias)
+    };
     const FULL: &str = "because it already kept 10,000 replies for this machine";
     const WAITED: &str = "that stayed in its outbox for 7 days without acknowledgement";
-    let why = match (lost.new_discarded, lost.new_expired) {
-        (discarded, 0) => format!("{} to this message {FULL}", replies(discarded)),
-        (0, expired) => format!("{} to this message {WAITED}", replies(expired)),
+    let why = match (lost.discarded, lost.expired) {
+        (discarded, 0) => format!("{}{from} to this message {FULL}", replies(discarded)),
+        (0, expired) => format!("{}{from} to this message {WAITED}", replies(expired)),
         (discarded, expired) => format!(
-            "{} to this message: {discarded} {FULL}, and {expired} {WAITED}",
+            "{}{from} to this message: {discarded} {FULL}, and {expired} {WAITED}",
             replies(discarded.saturating_add(expired))
         ),
     };
     Notice {
         space: &lost.space,
         label,
-        alias,
+        alias: recipient,
         message: &lost.re,
-        request_id: format!(
-            "relay-lost:{label}:{}:{}:{}:{alias}:{}:{}:{}",
-            lost.host_id, lost.epoch, lost.re, lost.since_ms, lost.discarded, lost.expired
-        ),
-        text: format!("The machine of @{alias}@{label} let go of {why}."),
+        request_id: format!("relay-lost:{label}:{}:{}", lost.re, lost.remote_alias),
+        text: format!("The machine of @{recipient}@{label} let go of {why}."),
     }
 }
 
@@ -284,17 +295,14 @@ mod tests {
     #[test]
     fn lost_notice_saturates_legacy_counts() {
         let lost = LostReplies {
-            host_id: "host-b".into(),
-            epoch: "epoch".into(),
             re: "message".into(),
             remote_alias: "bob".into(),
-            since_ms: 1,
             discarded: i64::MAX,
             expired: i64::MAX,
-            new_discarded: i64::MAX,
-            new_expired: i64::MAX,
             label: "devbox".into(),
             space: "space".into(),
+            recipient: "bob".into(),
+            peer: "devbox".into(),
         };
         assert!(
             lost_notice(&lost)

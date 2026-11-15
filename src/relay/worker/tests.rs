@@ -651,10 +651,10 @@ fn start_workers_skips_a_label_removed_from_rex_hosts() {
     assert_eq!(STARTED.with(|started| started.take()), ["devbox"]);
 }
 
-/// A sender hears in its thread, once for each new loss, of the replies
-/// to its message that B let go of, and Doctor counts them.
+/// A sender hears in its thread, once, of the replies from an agent to its
+/// message that B let go of, and Doctor counts every one B names after.
 #[test]
-fn a_sender_is_told_once_of_each_new_loss_b_names() {
+fn a_sender_is_told_once_of_the_replies_b_let_go_of_and_doctor_counts_the_rest() {
     let space = Space::new(REX);
     let rex = rex(&["devbox"]);
     let message = sent(&space, &rex);
@@ -692,25 +692,111 @@ fn a_sender_is_told_once_of_each_new_loss_b_names() {
          kept 10,000 replies for this machine."
             .to_owned(),
     ];
-    assert_eq!(told(), [first]);
+    assert_eq!(told(), std::slice::from_ref(&first));
     assert_eq!(woken, ["session:a"]);
     assert_eq!(doctor()[0].lost, 2);
-    work_for(&space, &rex, 1);
-    assert_eq!(told().len(), 1, "the same loss is told once");
-    work_for(&space, &rex, 1);
+    for lost in [2, 3, 8] {
+        let (_, woken) = work_for(&space, &rex, 1);
+        assert_eq!(
+            told(),
+            std::slice::from_ref(&first),
+            "bob's losses are told once"
+        );
+        assert!(woken.is_empty(), "{woken:?}");
+        assert_eq!(doctor()[0].lost, lost);
+    }
+}
+
+/// A B that makes up losses, with a new alias or a new start in each
+/// answer, gets its sender told at most `LOST_NOTICES_PER_HOUR` an hour, each
+/// alias and message once even after its row was evicted, from the relay
+/// author the message made, so it makes no relay author and queues no
+/// more deliveries than that.
+#[test]
+fn a_b_that_makes_up_losses_gets_its_sender_told_a_bounded_few() {
+    use crate::relay::store::LOST_NOTICES_PER_HOUR;
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    let message = sent(&space, &rex);
+    let count = |sql: &str| space.main(sql)[0][0].parse::<i64>().unwrap();
+    let notices = || {
+        count(
+            "SELECT CAST(COUNT(*) AS TEXT) FROM collaboration_messages
+             WHERE request_id LIKE 'relay-lost:%'",
+        )
+    };
+    let from_bob = || {
+        count(
+            "SELECT CAST(COUNT(*) AS TEXT) FROM collaboration_messages
+             WHERE request_id LIKE 'relay-lost:%' AND body NOT LIKE '% from %'",
+        )
+    };
+    let authors = || {
+        count(
+            "SELECT CAST(COUNT(*) AS TEXT) FROM pane_addresses
+             WHERE address_id LIKE 'relay:%'",
+        )
+    };
+    let deliveries = || {
+        count(
+            "SELECT CAST(COUNT(*) AS TEXT) FROM mailbox_deliveries d
+             JOIN collaboration_messages m USING (session_socket_id, worktree_id, message_id)
+             WHERE m.request_id LIKE 'relay-lost:%'",
+        )
+    };
+    let round = |lost: Vec<Value>, first: bool| {
+        let mut page = answer("accepted", None, json!([]));
+        page["lost"] = json!(lost);
+        if !first {
+            page.as_object_mut().unwrap().remove("result");
+        }
+        rex.answer_with(page);
+        work_for(&space, &rex, 1);
+    };
+    let bob = |since: i64| json!({"re": message, "from": "bob", "since": since, "discarded": 1, "expired": 0});
+    let made_up = |round: i64| -> Vec<Value> {
+        (0..40)
+            .map(|i| {
+                json!({"re": message, "from": format!("n{round}x{i}"),
+                    "since": round * 1000 + i, "discarded": 1, "expired": 0})
+            })
+            .collect()
+    };
+    for since in 0..3 {
+        round(vec![bob(50_000 + since)], since == 0);
+    }
+    assert_eq!(from_bob(), 1, "a new start is not a new loss to tell");
+    for flood in 0..4 {
+        round(made_up(flood), false);
+        assert_eq!(notices(), LOST_NOTICES_PER_HOUR, "after flood {flood}");
+    }
+    round(vec![bob(60_000)], false);
+    assert_eq!(from_bob(), 1, "an evicted loss is not told again");
+    assert_eq!(authors(), 1, "only the recipient's own relay author");
+    assert_eq!(deliveries(), LOST_NOTICES_PER_HOUR);
+    let relay = Connection::open(space.state.join("relay.sqlite3")).unwrap();
+    relay
+        .execute(
+            "UPDATE lost_told SET told_at_ms = told_at_ms - 60 * 60 * 1000",
+            [],
+        )
+        .unwrap();
+    round(made_up(9), false);
     assert_eq!(
-        told()[1][3],
-        "The machine of @bob@devbox let go of 1 reply to this message that stayed in its outbox \
-         for 7 days without acknowledgement."
+        notices(),
+        2 * LOST_NOTICES_PER_HOUR,
+        "the next hour tells more"
     );
-    work_for(&space, &rex, 1);
-    assert_eq!(
-        told()[2][3],
-        "The machine of @bob@devbox let go of 5 replies to this message: 3 because it already \
-         kept 10,000 replies for this machine, and 2 that stayed in its outbox for 7 days \
-         without acknowledgement."
+    assert_eq!(from_bob(), 1);
+    assert_eq!(authors(), 1);
+    assert!(
+        crate::relay::tests_support::store(&space.state)
+            .conditions(REX, crate::relay::now_ms())
+            .unwrap()[0]
+            .lost
+            >= 32,
+        "Doctor counts what was not told"
     );
-    assert_eq!(doctor()[0].lost, 8);
 }
 
 /// The answers of the first merged relay, `2496500e`, as it made them,
@@ -4368,8 +4454,8 @@ fn told_losses(space: &Space) -> Vec<Vec<String>> {
 }
 
 /// A loss devbox's B names for a message sent to both hosts is told as
-/// devbox's, by the remote alias it names, even when studio's item was
-/// accepted too.
+/// devbox's, by the relay author of the message's recipient on devbox, with
+/// the remote alias it names, even when studio's item was accepted too.
 #[test]
 fn a_loss_for_a_message_to_two_hosts_is_told_as_the_reporting_host_s() {
     let space = Space::new(REX);
@@ -4398,9 +4484,23 @@ fn a_loss_for_a_message_to_two_hosts_is_told_as_the_reporting_host_s() {
     work_for(&space, &rex, 1);
     let told: Vec<_> = told_losses(&space)
         .into_iter()
-        .map(|row| row[0].clone())
+        .map(|row| (row[0].clone(), row[3].clone()))
         .collect();
-    assert_eq!(told, ["bob@devbox", "eve@devbox"]);
+    let because = "to this message because it already kept 10,000 replies for this machine.";
+    assert_eq!(
+        told,
+        [
+            (
+                "bob@devbox".to_owned(),
+                format!("The machine of @bob@devbox let go of 2 replies {because}")
+            ),
+            (
+                "bob@devbox".to_owned(),
+                format!("The machine of @bob@devbox let go of 1 reply from eve {because}")
+            )
+        ],
+        "from devbox's recipient, which names the alias B gave"
+    );
 }
 
 /// A loss for a message sent only to studio, or for a message A never

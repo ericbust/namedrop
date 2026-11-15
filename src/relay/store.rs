@@ -126,12 +126,20 @@ CREATE TABLE lost (
     remote_alias TEXT NOT NULL,
     since_ms INTEGER NOT NULL,
     label TEXT NOT NULL,
+    peer TEXT NOT NULL,
     discarded INTEGER NOT NULL,
     expired INTEGER NOT NULL,
-    told_discarded INTEGER NOT NULL DEFAULT 0,
-    told_expired INTEGER NOT NULL DEFAULT 0,
     updated_at_ms INTEGER NOT NULL,
     PRIMARY KEY (endpoint, host_id, epoch, re, remote_alias, since_ms)
+);
+CREATE TABLE lost_told (
+    endpoint TEXT NOT NULL,
+    label TEXT NOT NULL,
+    re TEXT NOT NULL,
+    remote_alias TEXT NOT NULL,
+    peer TEXT NOT NULL,
+    told_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (endpoint, label, re, remote_alias)
 );
 ";
 /// B's replies for A after `after`, a range of `outbox_by_seq` read in
@@ -140,9 +148,14 @@ const PAGE: &str = "SELECT seq, re, thread, sender, message_id, text FROM outbox
     WHERE host_id = ?1 AND seq > ?2 ORDER BY seq";
 
 /// B tells A of at most this many of the A messages whose replies it let
-/// go of, the latest first.
+/// go of, the latest first, and A keeps at most this many for each label
+/// and server.
 pub(crate) const LOST_LIMIT: i64 = 32;
 pub(crate) const LOST_COUNT_LIMIT: i64 = 1_000_000_000;
+/// A tells its senders of at most this many new losses of one server an
+/// hour, so a server that makes up losses cannot fill their mailboxes.
+pub(crate) const LOST_NOTICES_PER_HOUR: i64 = 4;
+const HOUR_MS: i64 = 60 * 60 * 1000;
 
 /// An item A could not deliver within this fails.
 pub(crate) const OUTBOUND_LIFETIME_MS: i64 = 24 * 60 * 60 * 1000;
@@ -341,12 +354,20 @@ CREATE TABLE lost (
     remote_alias TEXT NOT NULL,
     since_ms INTEGER NOT NULL,
     label TEXT NOT NULL,
+    peer TEXT NOT NULL,
     discarded INTEGER NOT NULL,
     expired INTEGER NOT NULL,
-    told_discarded INTEGER NOT NULL DEFAULT 0,
-    told_expired INTEGER NOT NULL DEFAULT 0,
     updated_at_ms INTEGER NOT NULL,
     PRIMARY KEY (endpoint, host_id, epoch, re, remote_alias, since_ms)
+);
+CREATE TABLE lost_told (
+    endpoint TEXT NOT NULL,
+    label TEXT NOT NULL,
+    re TEXT NOT NULL,
+    remote_alias TEXT NOT NULL,
+    peer TEXT NOT NULL,
+    told_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (endpoint, label, re, remote_alias)
 );
 ";
 
@@ -404,7 +425,13 @@ fn current_layout() -> &'static Layout {
 const COLUMNS_NEW_IN_2: [(&str, &str); 2] =
     [("conditions", "other_label_at_ms"), ("dropped", "told")];
 /// The tables and indexes `TO_3` makes, and the columns it adds.
-const NEW_IN_3: [&str; 4] = ["outbox_lost", "lost", "outbox_by_seq", "capture_start"];
+const NEW_IN_3: [&str; 5] = [
+    "outbox_lost",
+    "lost",
+    "lost_told",
+    "outbox_by_seq",
+    "capture_start",
+];
 const COLUMNS_NEW_IN_3: [(&str, &str); 7] = [
     ("outbound", "paused"),
     ("outbound", "paused_told"),
@@ -666,20 +693,20 @@ pub(crate) enum Why {
 }
 
 /// The replies of one B alias to one A message that B let go of, as B
-/// last said, and how many of them its sender has not been told of.
+/// last said, whose sender has not been told of them.
+#[derive(Debug)]
 pub(crate) struct LostReplies {
-    pub host_id: String,
-    pub epoch: String,
     pub re: String,
     pub remote_alias: String,
-    pub since_ms: i64,
     pub discarded: i64,
     pub expired: i64,
-    pub new_discarded: i64,
-    pub new_expired: i64,
-    /// The label and space the A message was sent from.
+    /// The label and space the A message was sent from, its recipient on
+    /// that label whose relay author tells the sender, and A's name for
+    /// the server.
     pub label: String,
     pub space: String,
+    pub recipient: String,
+    pub peer: String,
 }
 
 /// An item's key on B: A's `host_id`, A's message id, and the recipient.
@@ -954,15 +981,17 @@ impl RelayStore {
         Ok(lost)
     }
 
-    /// Records what the server `host_id` said it let go of in its outbox
-    /// epoch `epoch`, as `label`'s worker read it. A count only grows, and
-    /// a new loss is dated `now_ms`. It reads `outbound` before it writes,
-    /// so it takes the write lock at its start, and one that meets another
-    /// relay writer waits its turn.
+    /// Records what the server `host_id`, A's `peer`, said it let go of in
+    /// its outbox epoch `epoch`, as `label`'s worker read it. A count only
+    /// grows, and a new loss is dated `now_ms`. It reads `outbound` before
+    /// it writes, so it takes the write lock at its start, and one that
+    /// meets another relay writer waits its turn.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn note_lost(
         &self,
         endpoint: &str,
         label: &str,
+        peer: &str,
         host_id: &str,
         epoch: &str,
         lost: &[Lost],
@@ -985,14 +1014,14 @@ impl RelayStore {
             }
             transaction.execute(
                 "INSERT INTO lost (endpoint, host_id, epoch, re, remote_alias, since_ms, label,
-                    discarded, expired, updated_at_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                    peer, discarded, expired, updated_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
                  ON CONFLICT (endpoint, host_id, epoch, re, remote_alias, since_ms) DO UPDATE SET
                     updated_at_ms = CASE WHEN excluded.discarded > discarded
                         OR excluded.expired > expired THEN excluded.updated_at_ms
                         ELSE updated_at_ms END,
                     discarded = MAX(discarded, excluded.discarded),
-                    expired = MAX(expired, excluded.expired)",
+                    expired = MAX(expired, excluded.expired), peer = excluded.peer",
                 params![
                     endpoint,
                     host_id,
@@ -1001,6 +1030,7 @@ impl RelayStore {
                     lost.from,
                     lost.since,
                     label,
+                    peer,
                     lost.discarded,
                     lost.expired,
                     now_ms
@@ -1018,58 +1048,91 @@ impl RelayStore {
         Ok(())
     }
 
-    /// Each A message of `endpoint` whose replies B let go of since its
-    /// sender was last told, with how many more, oldest first. One whose
-    /// item A no longer keeps is left out, since its sender's thread is
-    /// not known.
+    /// Each B alias and A message of `endpoint` whose replies B let go of,
+    /// and whose sender was never told, with how many B let go of, oldest
+    /// first. One whose item A no longer keeps is left out, since its
+    /// sender's thread is not known.
     pub(crate) fn lost_untold(&self, endpoint: &str) -> Result<Vec<LostReplies>, StoreError> {
         let mut statement = self.connection.prepare(
-            "SELECT l.host_id, l.epoch, l.re, l.remote_alias, l.since_ms, l.discarded, l.expired,
-                l.discarded - l.told_discarded, l.expired - l.told_expired, o.label, o.space
+            "SELECT l.re, l.remote_alias, l.discarded, l.expired, o.label, o.space, o.recipient,
+                l.peer
              FROM lost l JOIN outbound o ON o.rowid = (SELECT rowid FROM outbound
                 WHERE endpoint = l.endpoint AND message_id = l.re
                     AND label = l.label AND host_id = l.host_id AND state = 'accepted'
                 ORDER BY recipient = l.remote_alias DESC, rowid LIMIT 1)
-             WHERE l.endpoint = ?1
-                AND (l.discarded > l.told_discarded OR l.expired > l.told_expired)
+             WHERE l.endpoint = ?1 AND (l.discarded > 0 OR l.expired > 0)
+                AND NOT EXISTS (SELECT 1 FROM lost_told t WHERE t.endpoint = l.endpoint
+                    AND t.label = l.label AND t.re = l.re AND t.remote_alias = l.remote_alias)
              ORDER BY l.updated_at_ms, l.rowid",
         )?;
-        let lost = statement
-            .query_map(params![endpoint], |row| {
-                Ok(LostReplies {
-                    host_id: row.get(0)?,
-                    epoch: row.get(1)?,
-                    re: row.get(2)?,
-                    remote_alias: row.get(3)?,
-                    since_ms: row.get(4)?,
-                    discarded: row.get(5)?,
-                    expired: row.get(6)?,
-                    new_discarded: row.get(7)?,
-                    new_expired: row.get(8)?,
-                    label: row.get(9)?,
-                    space: row.get(10)?,
-                })
-            })?
-            .collect::<Result<_, _>>()?;
+        let rows = statement.query_map(params![endpoint], |row| {
+            Ok(LostReplies {
+                re: row.get(0)?,
+                remote_alias: row.get(1)?,
+                discarded: row.get::<_, i64>(2)?.max(0),
+                expired: row.get::<_, i64>(3)?.max(0),
+                label: row.get(4)?,
+                space: row.get(5)?,
+                recipient: row.get(6)?,
+                peer: row.get(7)?,
+            })
+        })?;
+        // B counts again under a new epoch or start, so one alias and
+        // message can have several rows, and its sender is told of all.
+        let mut lost: Vec<LostReplies> = Vec::new();
+        for row in rows {
+            let row = row?;
+            match lost.iter_mut().find(|told| {
+                (&told.label, &told.re, &told.remote_alias)
+                    == (&row.label, &row.re, &row.remote_alias)
+            }) {
+                Some(told) => {
+                    told.discarded = told.discarded.saturating_add(row.discarded);
+                    told.expired = told.expired.saturating_add(row.expired);
+                }
+                None => lost.push(row),
+            }
+        }
         Ok(lost)
     }
 
-    /// Records that `lost`'s sender was told of each reply B let go of so
-    /// far.
-    pub(crate) fn told_lost(&self, endpoint: &str, lost: &LostReplies) -> Result<(), StoreError> {
+    /// How many more new losses of `peer` `endpoint`'s senders may be told
+    /// of in the hour before `now_ms`.
+    pub(crate) fn lost_allowance(
+        &self,
+        endpoint: &str,
+        peer: &str,
+        now_ms: i64,
+    ) -> Result<i64, StoreError> {
+        let told: i64 = self.connection.query_row(
+            "SELECT COUNT(*) FROM lost_told WHERE endpoint = ?1 AND peer = ?2
+                AND told_at_ms > ?3",
+            params![endpoint, peer, now_ms - HOUR_MS],
+            |row| row.get(0),
+        )?;
+        Ok(LOST_NOTICES_PER_HOUR - told)
+    }
+
+    /// Records that `lost`'s sender was told of what B let go of from its
+    /// alias to its message, once and for good: the record outlives the
+    /// `lost` rows, so a loss B names again under a new start is not told
+    /// again, and its item, so it lasts as long as a loss can be noted.
+    pub(crate) fn told_lost(
+        &self,
+        endpoint: &str,
+        lost: &LostReplies,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
         self.connection.execute(
-            "UPDATE lost SET told_discarded = ?7, told_expired = ?8
-             WHERE endpoint = ?1 AND host_id = ?2 AND epoch = ?3 AND re = ?4
-                AND remote_alias = ?5 AND since_ms = ?6",
+            "INSERT OR IGNORE INTO lost_told (endpoint, label, re, remote_alias, peer, told_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 endpoint,
-                lost.host_id,
-                lost.epoch,
+                lost.label,
                 lost.re,
                 lost.remote_alias,
-                lost.since_ms,
-                lost.discarded,
-                lost.expired
+                lost.peer,
+                now_ms
             ],
         )?;
         Ok(())
@@ -2040,6 +2103,13 @@ impl RelayStore {
         )?;
         transaction.execute(
             "DELETE FROM lost WHERE updated_at_ms <= ?1",
+            params![now_ms - DONE_LIFETIME_MS],
+        )?;
+        // An item A accepted is dropped `DONE_LIFETIME_MS` after it was
+        // accepted, and no loss is noted or told without it, so a record
+        // made after that outlasts it.
+        transaction.execute(
+            "DELETE FROM lost_told WHERE told_at_ms <= ?1",
             params![now_ms - DONE_LIFETIME_MS],
         )?;
         transaction.execute(

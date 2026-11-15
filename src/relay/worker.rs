@@ -628,6 +628,7 @@ fn collect_replies(
             .note_lost(
                 endpoint,
                 run.label,
+                peer.name,
                 host_id,
                 &answer.epoch,
                 &answer.lost,
