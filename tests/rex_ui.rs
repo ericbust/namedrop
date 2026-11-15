@@ -1,5 +1,7 @@
 #[path = "support/binary.rs"]
 mod binary;
+#[path = "support/executable.rs"]
+mod executable;
 
 use std::{fs, os::unix::fs::PermissionsExt};
 
@@ -58,6 +60,50 @@ fn refused_config_start_and_unknown_action_write_nothing_and_call_no_host() {
         assert!(!root.join("state").exists());
         assert!(!called.exists());
         assert!(fs::read_dir(root.join("home")).unwrap().next().is_none());
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// The U6 review's F6: a palette action starts the reminder clock before it
+/// runs, as every other command does. The state holds one pending reminder,
+/// and its selected runtime only records that it was started.
+#[test]
+fn a_palette_action_starts_the_reminder_clock_as_every_command_does() {
+    let root = std::env::temp_dir().join(format!("nd-u6-clock-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let state = root.join("state");
+    fs::create_dir_all(state.join("runtime/current")).unwrap();
+    fs::create_dir_all(root.join("home")).unwrap();
+    let endpoint = "rex:/tmp/u6-clock-never-listens.sock";
+    rusqlite::Connection::open(state.join("namedrop.sqlite3"))
+        .unwrap()
+        .execute_batch(&format!(
+            "CREATE TABLE reminders (session_socket_id TEXT NOT NULL, worktree_id TEXT NOT NULL, state TEXT NOT NULL, due_at_ms INTEGER);\
+             CREATE INDEX reminders_pending ON reminders(due_at_ms) WHERE state IN ('scheduled','awaiting_delivery');\
+             INSERT INTO reminders VALUES ('{endpoint}', 'w1', 'scheduled', 99999999999999);"
+        ))
+        .unwrap();
+    let clock = state.join("runtime/current/namedrop");
+    executable::write_executable(&clock, "#!/bin/sh\necho \"$*\" >> \"$0.record\"\n");
+    let out = binary::namedrop()
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", root.join("home"))
+        .env("NAMEDROP_STATE_DIR", &state)
+        .args(["rex", "action", "name", "--endpoint", endpoint])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let record = state.join("runtime/current/namedrop.record");
+    let started = format!("reminder-clock {} {endpoint}\n", state.display());
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while fs::read_to_string(&record).ok().as_deref() != Some(started.as_str()) {
+        assert!(
+            std::time::Instant::now() < until,
+            "no reminder clock started: {:?}",
+            fs::read_to_string(&record)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
     }
     fs::remove_dir_all(root).unwrap();
 }
