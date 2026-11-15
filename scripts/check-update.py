@@ -15,6 +15,11 @@ import urllib.request
 
 DAY_MS = 86_400_000
 LIMIT = 65_536
+# The first release that ships scripts/install.sh. No release does yet, so
+# this stays above every release until the one that first ships it sets it
+# to its own version (docs/releasing.md). A standalone install is offered no
+# older tag, because an older tag has no installer.
+INSTALLER_FLOOR = '2.0.0'
 
 
 def version(value):
@@ -127,7 +132,20 @@ def version_key(value):
     return (*map(int, core.split('.')), not separator, int(serial) if separator else 0)
 
 
+def offered(release, installed):
+    """Whether a standalone install of `installed` may be offered `release`:
+    one at or above the installer floor, newer than it, and on its channel.
+    A stable install takes only stable releases. A pre-release takes the
+    later pre-releases of its own version and newer stable releases."""
+    if version_key(release) < version_key(INSTALLER_FLOOR) or version_key(release) <= version_key(installed):
+        return False
+    core, pre_release, _ = release.partition('-exp.')
+    return not pre_release or installed.startswith(core + '-exp.')
+
+
 def latest_tag(source):
+    """The commit and version of the newest release `source` is offered, or
+    `(None, None)` when the repository has none for it."""
     output = run(
         ['git', '-c', 'credential.helper=', '-c', 'core.hooksPath=/dev/null',
          'ls-remote', '--tags', f'https://github.com/{source["owner"]}/{source["repo"]}.git', 'v*'],
@@ -144,7 +162,10 @@ def latest_tag(source):
                 tags[release] = commit
     if not tags:
         raise ValueError('No release tags were found')
-    newest = max(tags, key=version_key)
+    candidates = [release for release in tags if offered(release, source['installed_version'])]
+    if not candidates:
+        return None, None
+    newest = max(candidates, key=version_key)
     return tags[newest], newest
 
 
@@ -276,8 +297,8 @@ def check(state, settings, now=None, lookup_registration=registration,
                     available = cache['remote_version']
                     if commit != cache['remote_commit'] or not version(available):
                         available = lookup_version(source, commit)
-                if not version(available):
-                    raise ValueError('Invalid remote version')
+                    if not version(available):
+                        raise ValueError('Invalid remote version')
                 cache.update(remote_commit=commit, remote_version=available, last_success_at=now)
         except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError) as error:
             # Keep diagnostics bounded and printable; failures never reach a hook.
