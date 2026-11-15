@@ -192,9 +192,10 @@ fn round(run: &mut Run<'_>, reading: &mut Reading) -> Round {
             .cannot_reply(&run.endpoint.key, run.label)
             .is_ok_and(|no| no)
     };
-    // Whether B said in a page this round that it keeps no more replies
-    // for this side. Only that fails an item, and only one never sent,
-    // since B may have accepted one sent before and still answers for it.
+    // Whether B said in its latest page this round that it keeps no more
+    // replies for this side. Only that fails an item, and only one never
+    // sent, since B may have accepted one sent before and still answers
+    // for it.
     let mut full = false;
     if !queued.is_empty() && silent() {
         // B's last page said it keeps no more replies for this side, so a
@@ -253,12 +254,14 @@ fn round(run: &mut Run<'_>, reading: &mut Reading) -> Round {
                     labels: &labels,
                 };
                 let page = collect_replies(run, &store, &peer, &answer, reading);
-                if page == Page::Read {
+                let pages = (page != Page::Fault && more)
+                    .then(|| collect(run, &store, &own, &peer, reading));
+                // Each page stores whether B has room, so the last one read
+                // says it.
+                if page == Page::Read || pages.as_ref().is_some_and(|pages| pages.read) {
                     full = silent();
                 }
-                if page == Page::Fault
-                    || more && !collect(run, &store, &own, &peer, reading).answered
-                {
+                if page == Page::Fault || pages.is_some_and(|pages| !pages.answered) {
                     kept = true;
                 }
             }

@@ -3087,6 +3087,53 @@ fn a_b_that_keeps_no_more_replies_is_sent_nothing_new_until_it_has_room() {
     );
 }
 
+/// B's room is read from its latest page: a deliver whose page said B
+/// keeps no more replies, followed in the same round by a collect whose
+/// page says it has room again, leaves the next item to be sent.
+#[test]
+fn the_next_item_is_sent_when_the_latest_page_says_b_has_room_again() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    crate::rex_bridge::remember_host_id(&space.state, &Endpoint::parse(REX), "host-a");
+    let message = rex
+        .run(|| space.send("request-1", "@bob@devbox @carol@devbox ping"))
+        .unwrap()["message_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut first = answer(
+        "accepted",
+        None,
+        json!([{"seq": 1, "re": message, "thread": "t", "from": "bob",
+            "message_id": "b-1", "text": "old 1"}]),
+    );
+    first["can_reply"] = json!(false);
+    first["more"] = json!(true);
+    rex.answer_with(first);
+    rex.answer_with(
+        json!({"host_id": "host-b", "can_reply": true, "epoch": "e1", "more": false,
+        "outbox": [{"seq": 2, "re": message, "thread": "t", "from": "bob",
+            "message_id": "b-2", "text": "old 2"}]}),
+    );
+    rex.answer_with(answer("accepted", None, json!([])));
+    work_for(&space, &rex, 1);
+    let ops: Vec<Value> = rex.requests().iter().map(|r| r["op"].clone()).collect();
+    assert_eq!(ops, ["deliver", "collect", "deliver"]);
+    assert_eq!(
+        outbound(&space)
+            .into_iter()
+            .map(|row| row.0)
+            .collect::<Vec<_>>(),
+        ["accepted", "accepted"]
+    );
+    assert!(notices(&space).is_empty());
+    assert!(
+        crate::relay::conditions(&space.state, REX)
+            .unwrap()
+            .is_empty()
+    );
+}
+
 /// A thread whose reply found no room takes none of its later replies in
 /// that page, even once a person continued it meanwhile, so it reads in
 /// order when B sends them again.
