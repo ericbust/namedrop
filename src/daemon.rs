@@ -490,6 +490,11 @@ pub(crate) mod tests {
             "Command::new(\"python3\")",
             Spawn::Other("the update check's script"),
         ),
+        (
+            "update_check.rs",
+            "Command::new(\"xcode-select\")",
+            Spawn::Other("the developer-tools probe before Apple's python3"),
+        ),
     ];
 
     /// `source` with comments removed, char literals emptied, and each string

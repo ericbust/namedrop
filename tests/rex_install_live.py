@@ -181,8 +181,12 @@ class Fixture:
         # Short socket paths fit sockaddr_un even when OUT is a long scratch path.
         self.socket = Path('/tmp') / ('nd-u7-' + TAG + '-' + name + '.sock')
         self.endpoint = 'rex:' + str(self.socket)
+        # git refuses every transport but a local one, so a fixture that
+        # forgets the opt-out above still reaches no network (the U10
+        # review's F4).
         self.env = {'HOME': str(self.home), 'PATH': '/usr/bin:/bin', 'SHELL': '/bin/none',
-                    'REX_SERVER': 'unix://' + str(self.socket), 'NAMEDROP_STATE_DIR': str(self.state)}
+                    'REX_SERVER': 'unix://' + str(self.socket), 'NAMEDROP_STATE_DIR': str(self.state),
+                    'GIT_ALLOW_PROTOCOL': 'file'}
         self.server_env = dict(self.env, HOME=str(self.server_home))
         self.args = [str(rex), '--autostart=false', '-S', 'unix://' + str(self.socket), 'server', 'run', '--listen',
                      'unix://' + str(self.socket), '--state-dir', str(self.root / 'rex-state'), '--restore=false']
