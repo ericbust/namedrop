@@ -242,6 +242,23 @@ fn placing(state: &Path) -> std::io::Result<std::fs::File> {
     Ok(lock)
 }
 
+/// Takes `<state>/relay/capture.lock`, which a capture holds from reading
+/// its cursor until it has moved it, since one may move it back.
+fn capturing(state: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let directory = state.join("relay");
+    create_relay_dir(&directory)?;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(directory.join("capture.lock"))?;
+    lock.lock()?;
+    Ok(lock)
+}
+
 /// Creates `<state>/relay`, but never the state directory itself, so a
 /// relay process whose state directory was deleted makes none again.
 fn create_relay_dir(directory: &Path) -> std::io::Result<()> {

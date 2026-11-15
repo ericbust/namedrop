@@ -24,20 +24,25 @@ use std::path::Path;
 /// the endpoint's last message, so the next capture reads only those made
 /// since. Everything it needs of the main database is read first, in one
 /// transaction, so a relay transaction never waits on the main database.
+/// Captures take turns, since one may move the cursor back.
 pub(crate) fn capture(
     state: &Path,
     endpoint: &Endpoint,
     start: &mut dyn FnMut(&str),
 ) -> Result<(), String> {
     let now = super::now_ms();
+    let _capturing = super::capturing(state).map_err(|error| error.to_string())?;
     let relay = RelayStore::open(state, now).map_err(|error| error.to_string())?;
+    let error = |error: crate::StoreError| error.to_string();
+    let anchor = relay.capture_anchor(&endpoint.key).map_err(error)?;
+    let marks = relay.capture_marks(&endpoint.key).map_err(error)?;
+    let floor = relay.capture_floor().map_err(error)?;
     let mut main = StateStore::open(state).map_err(|error| error.to_string())?;
-    let cursor = relay
-        .capture_cursor(&endpoint.key)
-        .map_err(|error| error.to_string())?;
-    let (rows, last) = main
+    let (rewind, rows, last) = main
         .transaction(|transaction| {
-            let (rows, last) = transaction.relay_recipient_messages(&endpoint.key, cursor)?;
+            let rewind = rewind(transaction, &endpoint.key, &anchor, &marks, floor)?;
+            let after = rewind.as_ref().map_or(anchor.0, |rewind| rewind.rowid);
+            let (rows, last) = transaction.relay_recipient_messages(&endpoint.key, after)?;
             let rows = rows
                 .into_iter()
                 .map(|row| {
@@ -45,16 +50,29 @@ pub(crate) fn capture(
                     Ok((row, answered))
                 })
                 .collect::<Result<Vec<_>, crate::StoreError>>()?;
-            Ok((rows, last))
+            Ok((rewind, rows, last))
         })
         .map_err(|error| error.to_string())?;
     drop(main);
+    if let Some(rewind) = &rewind {
+        relay
+            .rewind_capture(
+                &endpoint.key,
+                rewind.rowid,
+                rewind.message_id.as_deref(),
+                &rewind.gone,
+            )
+            .map_err(error)?;
+    }
     let mut labels: Vec<String> = Vec::new();
     let mut failure = None;
     for (row, answered) in &rows {
-        let captured = relay.captured(&endpoint.key, row.rowid, || {
-            capture_one(&relay, endpoint, row, answered, now)
-        });
+        let captured = relay.captured(
+            &endpoint.key,
+            row.rowid,
+            (&row.message_id, &row.space),
+            || capture_one(&relay, endpoint, row, answered, now),
+        );
         match captured {
             Ok(queued) => {
                 for label in queued {
@@ -70,8 +88,8 @@ pub(crate) fn capture(
         }
     }
     if failure.is_none()
-        && let Some(last) = last
-        && let Err(error) = relay.capture_through(&endpoint.key, last)
+        && let Some((last, message_id)) = last
+        && let Err(error) = relay.capture_through(&endpoint.key, last, &message_id)
     {
         failure = Some(error.to_string());
     }
@@ -79,6 +97,55 @@ pub(crate) fn capture(
         start(label);
     }
     failure.map_or(Ok(()), Err)
+}
+
+/// Where a capture reads again from when its cursor's message is gone.
+struct Rewind {
+    rowid: i64,
+    message_id: Option<String>,
+    /// The spaces whose mark's message is gone too.
+    gone: Vec<String>,
+}
+
+/// Where `endpoint`'s capture reads from when the message at its cursor,
+/// `anchor`, is gone, or `None` when it is still there. A purge of the
+/// newest messages lets SQLite give their rowids to the next ones, at or
+/// below the cursor. Every message after the last relay message of each
+/// space that is still there is new or no relay message, and a purge takes
+/// a space's messages together, so capture reads again from the latest of
+/// the `marks` still there, and never before `floor` or a mark with no id,
+/// which it cannot check.
+fn rewind(
+    transaction: &crate::store::StateTransaction<'_>,
+    endpoint: &str,
+    anchor: &(i64, Option<String>),
+    marks: &[(String, i64, Option<String>)],
+    floor: i64,
+) -> Result<Option<Rewind>, crate::StoreError> {
+    let (cursor, Some(message_id)) = anchor else {
+        return Ok(None);
+    };
+    if transaction.message_at(endpoint, *cursor, message_id)? {
+        return Ok(None);
+    }
+    let mut rewind = Rewind {
+        rowid: floor.min(*cursor),
+        message_id: None,
+        gone: Vec::new(),
+    };
+    for (space, rowid, id) in marks {
+        let there = match id {
+            Some(id) => transaction.message_at(endpoint, *rowid, id)?,
+            None => true,
+        };
+        if !there {
+            rewind.gone.push(space.clone());
+        } else if *rowid > rewind.rowid && rowid <= cursor {
+            rewind.rowid = *rowid;
+            rewind.message_id.clone_from(id);
+        }
+    }
+    Ok(Some(rewind))
 }
 
 /// For each relay author `row` addresses, in order, the message of that

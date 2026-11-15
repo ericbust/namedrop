@@ -364,11 +364,22 @@ fn a_version_2_database_is_brought_to_this_version_with_its_rows() {
              INSERT INTO dropped (endpoint, host_id, remote_message_id, label, space, re,
                 remote_alias, count, reason, created_at_ms)
                 VALUES ('rex:/tmp/a.sock', 'host-b', 'b-9', 'devbox', 'session:a', 'm-1',
-                    'bob', 1, 'refused', 1800000000000);",
+                    'bob', 1, 'refused', 1800000000000);
+             INSERT INTO capture (endpoint, rowid) VALUES ('rex:/tmp/a.sock', 42);",
         )
         .unwrap();
     let store = state.open(NOW);
     assert_eq!(version(&store), VERSION);
+    assert_eq!(
+        store.capture_anchor("rex:/tmp/a.sock").unwrap(),
+        (42, None),
+        "the cursor stays, with no message to check"
+    );
+    assert_eq!(
+        store.capture_marks("rex:/tmp/a.sock").unwrap(),
+        [(String::new(), 42, None)],
+        "and a capture never reads again before it"
+    );
     assert!(state.set_aside().is_empty());
     assert_eq!(count(&store, "SELECT COUNT(*) FROM peers"), 2);
     let endpoint = "rex:/tmp/a.sock";
@@ -504,7 +515,7 @@ fn a_capture_waits_for_another_relay_writer() {
     let path = state.0.clone();
     let capture = std::thread::spawn(move || {
         let store = RelayStore::read(&path).unwrap();
-        store.captured("rex:/tmp/a.sock", 1, || {
+        store.captured("rex:/tmp/a.sock", 1, ("message", "session:a"), || {
             store
                 .connection
                 .execute(

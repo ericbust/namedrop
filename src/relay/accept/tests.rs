@@ -708,7 +708,19 @@ fn bob_answers(b: &B, in_reply_to: &str, source: &str) -> Value {
 
 /// `@bob`'s reply in `session:b1`, or why Namedrop refused it.
 fn bob_tries(b: &B, in_reply_to: &str, source: &str) -> Result<Value, String> {
-    let namespace = StateNamespace::for_space(REX, "session:b1");
+    tries_as(b, "b1", "bob", in_reply_to, source)
+}
+
+/// The reply of `alias` in `session:<space>`, from block `block:<space>`.
+fn tries_as(
+    b: &B,
+    space: &str,
+    alias: &str,
+    in_reply_to: &str,
+    source: &str,
+) -> Result<Value, String> {
+    let (block, space) = (format!("block:{space}"), format!("session:{space}"));
+    let namespace = StateNamespace::for_space(REX, &space);
     let attribution = MutationAttribution::new(ActorKind::Human, "test", 3);
     StateStore::open(&b.0)
         .unwrap()
@@ -716,9 +728,9 @@ fn bob_tries(b: &B, in_reply_to: &str, source: &str) -> Result<Value, String> {
             if transaction.active_pane_bindings(&namespace)?.is_empty() {
                 transaction.bind_pane(
                     &namespace,
-                    &crate::PaneBindingId::new("binding-bob"),
-                    &PaneAddressId::new("address-session:b1-bob"),
-                    "block:b1",
+                    &crate::PaneBindingId::new(format!("binding-{alias}")),
+                    &PaneAddressId::new(format!("address-{space}-{alias}")),
+                    &block,
                     &attribution,
                 )?;
             }
@@ -726,11 +738,11 @@ fn bob_tries(b: &B, in_reply_to: &str, source: &str) -> Result<Value, String> {
         })
         .unwrap();
     let mux = crate::mux::fake::FakeMux::world()
-        .space("session:b1")
+        .space(&space)
         .checkout("/repo-b")
-        .pane("block:b1")
+        .pane(&block)
         .tab("window:b1")
-        .session("session-bob")
+        .session(&format!("session-{alias}"))
         .idle()
         .build();
     let ids = crate::ProcessIds::default();
@@ -739,8 +751,8 @@ fn bob_tries(b: &B, in_reply_to: &str, source: &str) -> Result<Value, String> {
         home_directory: None,
         agent_config: Default::default(),
         cwd: Path::new("/repo-b"),
-        workspace_id: Some("session:b1"),
-        current_pane_id: Some("block:b1"),
+        workspace_id: Some(&space),
+        current_pane_id: Some(&block),
         session_socket_id: REX,
         mux: &mux,
         clock: &crate::SystemClock,
@@ -1544,7 +1556,7 @@ fn a_capture_retried_after_its_cursor_failed_counts_a_discard_once() {
     let store = RelayStore::open(&b.0, crate::relay::now_ms()).unwrap();
     let cursor = store.capture_cursor(&endpoint.key).unwrap();
     store
-        .captured(&endpoint.key, cursor, || {
+        .captured(&endpoint.key, cursor, ("message", "session:b1"), || {
             panic!("a stale capture snapshot must not replay a committed message")
         })
         .unwrap();
@@ -1583,4 +1595,151 @@ fn an_answer_into_a_thread_b_s_limit_paused_is_taken_once_the_thread_resumes() {
         .unwrap();
     assert_eq!(outcome(&b.call(&answer)), (Status::Accepted, None));
     assert_eq!(b.messages().len(), 2);
+}
+
+/// The id of the message of `deliver`'s item that B stored, past the host
+/// notice before it.
+fn relayed_id(b: &B, item: &str) -> String {
+    b.rows(
+        "namedrop.sqlite3",
+        &format!(
+            "SELECT message_id FROM collaboration_messages
+             WHERE grammar_version <> 'relay-notice/v1' AND request_id LIKE '%{item}%'"
+        ),
+    )[0][0]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// Purges `session:<space>`, as a person does with a space they closed.
+fn purge(b: &B, space: &str) {
+    let space = format!("session:{space}");
+    let namespace = StateNamespace::for_space(REX, &space);
+    let attribution = MutationAttribution::new(ActorKind::Human, "test", 5);
+    let mut main = StateStore::open(&b.0).unwrap();
+    main.transaction(|transaction| transaction.deactivate_worktree(&namespace, &attribution))
+        .unwrap();
+    Connection::open(b.0.join("namedrop.sqlite3"))
+        .unwrap()
+        .execute(
+            "UPDATE mailbox_deliveries SET state = 'settled' WHERE worktree_id = ?1",
+            [&space],
+        )
+        .unwrap();
+    main.purge_worktree(&namespace, &space, &attribution)
+        .unwrap();
+}
+
+fn outbox_texts(b: &B) -> Vec<Vec<Value>> {
+    b.rows("relay.sqlite3", "SELECT text FROM outbox ORDER BY seq")
+}
+
+/// A purge of the newest messages lets SQLite give their rowids to the next
+/// ones, at or below the capture cursor, and even the cursor's own. Replies
+/// made after it are still kept for A.
+#[test]
+fn a_reply_made_after_a_purge_of_the_newest_messages_is_kept() {
+    let b = B::new();
+    b.call(&deliver("m1", "bob", "t1", "please answer"));
+    let real = relayed_id(&b, "m1");
+    bob_answers(&b, &real, "@alice@laptop first answer");
+    b.call(&deliver("m2", "carol", "t2", "to the other space"));
+    let endpoint = Endpoint::parse(REX);
+    super::super::capture::capture(&b.0, &endpoint, &mut |_| {}).unwrap();
+    let max = || {
+        b.rows(
+            "namedrop.sqlite3",
+            "SELECT MAX(rowid) FROM collaboration_messages",
+        )[0][0]
+            .as_i64()
+            .unwrap()
+    };
+    let cursor = max();
+    purge(&b, "b2");
+    assert!(max() < cursor - 1, "the purge took the newest rowids");
+    for answer in ["second", "third"] {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        bob_answers(&b, &real, &format!("@alice@laptop {answer} answer"));
+    }
+    assert_eq!(max(), cursor, "the last reply took the cursor's own rowid");
+    super::super::capture::capture(&b.0, &endpoint, &mut |_| {}).unwrap();
+    assert_eq!(
+        outbox_texts(&b),
+        [
+            [json!("first answer")],
+            [json!("second answer")],
+            [json!("third answer")]
+        ]
+    );
+}
+
+/// Captures take turns: one waits while another holds the capture lock,
+/// since a capture may move the cursor back under it.
+#[test]
+fn a_capture_waits_for_another_to_finish() {
+    let b = B::new();
+    b.call(&deliver("m1", "bob", "t1", "please answer"));
+    let lock = super::super::capturing(&b.0).unwrap();
+    let (state, (done, finished)) = (b.0.clone(), std::sync::mpsc::channel());
+    let capture = std::thread::spawn(move || {
+        let captured = super::super::capture::capture(&state, &Endpoint::parse(REX), &mut |_| {});
+        let _ = done.send(());
+        captured
+    });
+    assert!(
+        finished
+            .recv_timeout(std::time::Duration::from_millis(300))
+            .is_err(),
+        "it waits for the lock"
+    );
+    drop(lock);
+    assert!(
+        finished
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .is_ok()
+    );
+    capture.join().unwrap().unwrap();
+}
+
+/// When the purged space held the last relay message capture read, capture
+/// reads again from the last one of a space that is still there, so what
+/// A already took is not kept again.
+#[test]
+fn after_a_purge_capture_reads_again_from_the_last_relay_message_still_there() {
+    let b = B::new();
+    b.call(&deliver("m1", "bob", "t1", "please answer"));
+    let to_bob = relayed_id(&b, "m1");
+    bob_answers(&b, &to_bob, "@alice@laptop first answer");
+    let endpoint = Endpoint::parse(REX);
+    let capture = || super::super::capture::capture(&b.0, &endpoint, &mut |_| {}).unwrap();
+    let acked = || {
+        Connection::open(b.0.join("relay.sqlite3"))
+            .unwrap()
+            .execute("DELETE FROM outbox", [])
+            .unwrap();
+    };
+    capture();
+    acked();
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    bob_answers(&b, &to_bob, "@alice@laptop second answer");
+    capture();
+    acked();
+    b.call(&deliver("m2", "carol", "t2", "to the other space"));
+    let to_carol = relayed_id(&b, "m2");
+    tries_as(&b, "b2", "carol", &to_carol, "@alice@laptop carol's answer").unwrap();
+    capture();
+    assert_eq!(outbox_texts(&b), [[json!("carol's answer")]]);
+    acked();
+    purge(&b, "b2");
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    bob_answers(&b, &to_bob, "@alice@laptop third answer");
+    capture();
+    assert_eq!(
+        outbox_texts(&b),
+        [[json!("third answer")]],
+        "the answers A took are not kept again"
+    );
+    capture();
+    assert_eq!(outbox_texts(&b), [[json!("third answer")]]);
 }

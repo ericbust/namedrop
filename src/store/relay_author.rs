@@ -213,19 +213,22 @@ impl StateTransaction<'_> {
 
     /// The messages of `session_socket_id` after `rowid` that a relay author
     /// receives, oldest first, each with every relay author it addresses,
-    /// and the rowid of the last message of `session_socket_id` after
-    /// `rowid`, of any kind, when there is one.
+    /// and the rowid and id of the last message of `session_socket_id`
+    /// after `rowid`, of any kind, when there is one.
     pub(crate) fn relay_recipient_messages(
         &self,
         session_socket_id: &str,
         after: i64,
-    ) -> Result<(Vec<ToRelayAuthor>, Option<i64>), StoreError> {
-        let last = self.transaction.query_row(
-            "SELECT MAX(rowid) FROM collaboration_messages
-             WHERE rowid > ?2 AND +session_socket_id = ?1",
-            params![session_socket_id, after],
-            |row| row.get(0),
-        )?;
+    ) -> Result<(Vec<ToRelayAuthor>, Option<MessageAt>), StoreError> {
+        let last = self
+            .transaction
+            .query_row(
+                "SELECT rowid, message_id FROM collaboration_messages
+                 WHERE rowid > ?2 AND +session_socket_id = ?1 ORDER BY rowid DESC LIMIT 1",
+                params![session_socket_id, after],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
         let mut statement = self.transaction.prepare(TO_RELAY_AUTHORS)?;
         let mut rows = statement
             .query_map(params![session_socket_id, after], |row| {
@@ -262,6 +265,24 @@ impl StateTransaction<'_> {
                 .collect::<Result<_, _>>()?;
         }
         Ok((rows, last))
+    }
+
+    /// Whether the message of `session_socket_id` at `rowid` is still
+    /// `message_id`. SQLite gives a new message the rowid after the
+    /// highest, so one that is gone, or another, means messages at or
+    /// below it were deleted, and a later one may take their rowids.
+    pub(crate) fn message_at(
+        &self,
+        session_socket_id: &str,
+        rowid: i64,
+        message_id: &str,
+    ) -> Result<bool, StoreError> {
+        Ok(self.transaction.query_row(
+            "SELECT EXISTS (SELECT 1 FROM collaboration_messages WHERE rowid = ?2
+                AND session_socket_id = ?1 AND message_id = ?3)",
+            params![session_socket_id, rowid, message_id],
+            |row| row.get(0),
+        )?)
     }
 
     /// What a message to `author` in `thread`, before `rowid`, answers of
@@ -448,6 +469,9 @@ pub(crate) struct Relayed<'a> {
     /// first message of a thread.
     pub self_named_host: Option<&'a str>,
 }
+
+/// A main-database message by its rowid and id.
+pub(crate) type MessageAt = (i64, String);
 
 /// A message one relay author receives.
 pub(crate) struct ToRelayAuthor {

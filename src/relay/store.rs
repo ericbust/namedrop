@@ -20,8 +20,10 @@ ALTER TABLE dropped ADD COLUMN told INTEGER NOT NULL DEFAULT 0;
 /// replies for each A host it let go of, and on A, what B said it let go
 /// of and what A told the sender, whether B's Automatic Reply Limit
 /// paused an item and its sender was told, the server each cursor and
-/// reply is of, and the label whose server another one answers as. A row
-/// from before is of the first label that last found its `host_id`.
+/// reply is of, the label whose server another one answers as, and the
+/// marks a capture rewinds to. A row from before is of the first label
+/// that last found its `host_id`, and a capture cursor from before, at the
+/// last relay message it read, is a mark capture never rewinds past.
 const TO_3: &str = "
 ALTER TABLE outbound ADD COLUMN paused INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE outbound ADD COLUMN paused_told INTEGER NOT NULL DEFAULT 0;
@@ -107,6 +109,15 @@ ALTER TABLE dropped_3 RENAME TO dropped;
 CREATE TABLE capture_start (
     rowid INTEGER NOT NULL
 );
+CREATE TABLE capture_marks (
+    endpoint TEXT NOT NULL,
+    space TEXT NOT NULL,
+    rowid INTEGER NOT NULL,
+    message_id TEXT,
+    PRIMARY KEY (endpoint, space)
+);
+INSERT INTO capture_marks SELECT endpoint, '', rowid, NULL FROM capture;
+ALTER TABLE capture ADD COLUMN message_id TEXT;
 CREATE INDEX outbox_by_seq ON outbox (host_id, seq);
 CREATE TABLE outbox_lost (
     host_id TEXT NOT NULL,
@@ -193,8 +204,10 @@ pub(crate) const OTHER_LABEL_LIFETIME_MS: i64 = OUTBOX_LIFETIME_MS;
 /// `inbound`, `outbox`, its `outbox_epoch`, `remote_threads`, and the tally
 /// of the replies that expired, which Doctor reports after the items
 /// themselves are gone. Both hold `capture`, the last main-database message
-/// each endpoint's capture read, and `capture_start`, the last one when
-/// this database was made, where an endpoint's capture starts.
+/// each endpoint's capture read, by rowid and id, `capture_start`, the last
+/// one when this database was made, where an endpoint's capture starts,
+/// and `capture_marks`, the last relay message capture read in each space,
+/// where a capture whose message is gone reads again from.
 const SCHEMA: &str = "
 CREATE TABLE peers (
     label TEXT PRIMARY KEY,
@@ -303,10 +316,18 @@ CREATE TABLE outbox_expired (
 );
 CREATE TABLE capture (
     endpoint TEXT PRIMARY KEY,
-    rowid INTEGER NOT NULL
+    rowid INTEGER NOT NULL,
+    message_id TEXT
 );
 CREATE TABLE capture_start (
     rowid INTEGER NOT NULL
+);
+CREATE TABLE capture_marks (
+    endpoint TEXT NOT NULL,
+    space TEXT NOT NULL,
+    rowid INTEGER NOT NULL,
+    message_id TEXT,
+    PRIMARY KEY (endpoint, space)
 );
 CREATE TABLE outbox_epoch (
     epoch TEXT NOT NULL
@@ -425,14 +446,16 @@ fn current_layout() -> &'static Layout {
 const COLUMNS_NEW_IN_2: [(&str, &str); 2] =
     [("conditions", "other_label_at_ms"), ("dropped", "told")];
 /// The tables and indexes `TO_3` makes, and the columns it adds.
-const NEW_IN_3: [&str; 5] = [
+const NEW_IN_3: [&str; 6] = [
     "outbox_lost",
     "lost",
     "lost_told",
     "outbox_by_seq",
     "capture_start",
+    "capture_marks",
 ];
-const COLUMNS_NEW_IN_3: [(&str, &str); 7] = [
+const COLUMNS_NEW_IN_3: [(&str, &str); 8] = [
+    ("capture", "message_id"),
     ("outbound", "paused"),
     ("outbound", "paused_told"),
     ("conditions", "same_server_as"),
@@ -822,32 +845,109 @@ impl RelayStore {
     /// `endpoint`, or before any, the last one when this database was
     /// made.
     pub(crate) fn capture_cursor(&self, endpoint: &str) -> Result<i64, StoreError> {
+        Ok(self.capture_anchor(endpoint)?.0)
+    }
+
+    /// `capture_cursor`, and the id of the message at it, when capture
+    /// recorded one.
+    pub(crate) fn capture_anchor(
+        &self,
+        endpoint: &str,
+    ) -> Result<(i64, Option<String>), StoreError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT rowid, message_id FROM capture WHERE endpoint = ?1",
+                params![endpoint],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+            .unwrap_or((self.capture_floor()?, None)))
+    }
+
+    /// The last main-database message when this database was made, which
+    /// no capture reads again.
+    pub(crate) fn capture_floor(&self) -> Result<i64, StoreError> {
         Ok(self.connection.query_row(
-            "SELECT COALESCE((SELECT rowid FROM capture WHERE endpoint = ?1),
-                (SELECT MAX(rowid) FROM capture_start), 0)",
-            params![endpoint],
+            "SELECT COALESCE(MAX(rowid), 0) FROM capture_start",
+            [],
             |row| row.get(0),
         )?)
     }
 
+    /// The last relay message `endpoint`'s capture read in each space, by
+    /// rowid and id, and the cursor of a build before, at the last relay
+    /// message it read, with no id.
+    pub(crate) fn capture_marks(
+        &self,
+        endpoint: &str,
+    ) -> Result<Vec<(String, i64, Option<String>)>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT space, rowid, message_id FROM capture_marks WHERE endpoint = ?1
+             ORDER BY rowid DESC",
+        )?;
+        let marks = statement
+            .query_map(params![endpoint], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?
+            .collect::<Result<_, _>>()?;
+        Ok(marks)
+    }
+
+    /// Moves `endpoint`'s capture cursor back to `rowid`, the message
+    /// `message_id`, and forgets the marks of `gone`, the spaces whose
+    /// last relay message is gone.
+    pub(crate) fn rewind_capture(
+        &self,
+        endpoint: &str,
+        rowid: i64,
+        message_id: Option<&str>,
+        gone: &[String],
+    ) -> Result<(), StoreError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute(
+            "INSERT INTO capture (endpoint, rowid, message_id) VALUES (?1, ?2, ?3)
+             ON CONFLICT (endpoint) DO UPDATE SET rowid = excluded.rowid,
+                message_id = excluded.message_id",
+            params![endpoint, rowid, message_id],
+        )?;
+        for space in gone {
+            transaction.execute(
+                "DELETE FROM capture_marks WHERE endpoint = ?1 AND space = ?2",
+                params![endpoint, space],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     /// Moves `endpoint`'s capture cursor to the main-database message
-    /// `rowid`, once capture read every message before it.
-    pub(crate) fn capture_through(&self, endpoint: &str, rowid: i64) -> Result<(), StoreError> {
+    /// `rowid`, `message_id`, once capture read every message before it.
+    pub(crate) fn capture_through(
+        &self,
+        endpoint: &str,
+        rowid: i64,
+        message_id: &str,
+    ) -> Result<(), StoreError> {
         self.connection.execute(
-            "INSERT INTO capture (endpoint, rowid) VALUES (?1, ?2)
-             ON CONFLICT (endpoint) DO UPDATE SET rowid = MAX(rowid, excluded.rowid)",
-            params![endpoint, rowid],
+            "INSERT INTO capture (endpoint, rowid, message_id) VALUES (?1, ?2, ?3)
+             ON CONFLICT (endpoint) DO UPDATE SET rowid = excluded.rowid,
+                message_id = excluded.message_id
+             WHERE excluded.rowid >= rowid",
+            params![endpoint, rowid, message_id],
         )?;
         Ok(())
     }
 
-    /// Commits a message's relay writes, loss counts, and capture cursor
-    /// together, under the write lock from the start, so a capture that
-    /// meets another relay writer waits its turn.
+    /// Commits a message's relay writes, loss counts, capture cursor, and
+    /// the mark of its space together, under the write lock from the
+    /// start, so a capture that meets another relay writer waits its turn.
+    /// `message` is the main-database message at `rowid` and its space.
     pub(crate) fn captured(
         &self,
         endpoint: &str,
         rowid: i64,
+        message: (&str, &str),
         capture: impl FnOnce() -> Result<(Vec<String>, Vec<String>), String>,
     ) -> Result<Vec<String>, String> {
         let transaction =
@@ -870,11 +970,24 @@ impl RelayStore {
                 )
                 .map_err(|error| error.to_string())?;
         }
+        let (message_id, space) = message;
         transaction
             .execute(
-                "INSERT INTO capture (endpoint, rowid) VALUES (?1, ?2)
-             ON CONFLICT (endpoint) DO UPDATE SET rowid = MAX(rowid, excluded.rowid)",
-                params![endpoint, rowid],
+                "INSERT INTO capture (endpoint, rowid, message_id) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (endpoint) DO UPDATE SET rowid = excluded.rowid,
+                    message_id = excluded.message_id
+                 WHERE excluded.rowid > rowid",
+                params![endpoint, rowid, message_id],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "INSERT INTO capture_marks (endpoint, space, rowid, message_id)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (endpoint, space) DO UPDATE SET rowid = excluded.rowid,
+                    message_id = excluded.message_id
+                 WHERE excluded.rowid > rowid",
+                params![endpoint, space, rowid, message_id],
             )
             .map_err(|error| error.to_string())?;
         transaction.commit().map_err(|error| error.to_string())?;
