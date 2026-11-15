@@ -40,6 +40,12 @@ type Runtime<'a> = LifecycleRuntime<'a, Arc<dyn Mux>, SystemClock, ProcessIds>;
 
 fn main() -> ExitCode {
     let inherited: &dyn Inherited = &namedrop::mux::home::ThisProcess;
+    // The contract query reads no state and makes no Rex call, so an
+    // updater can ask it of any runtime, a retired state's included.
+    if env::args_os().skip(1).eq(["--runtime-info"]) {
+        println!("{}", include_str!("../runtime.json").trim());
+        return ExitCode::SUCCESS;
+    }
     let raw: Vec<_> = env::args_os().skip(1).collect();
     let raw_state = match raw.as_slice() {
         [mode, state, ..]
@@ -54,9 +60,6 @@ fn main() -> ExitCode {
             ) =>
         {
             Some(PathBuf::from(state))
-        }
-        [mode] if mode == "--runtime-info" => {
-            state_directory(&RuntimeOptions::default(), inherited)
         }
         [mode, _] if mode == "--validate-update-manifest" => {
             state_directory(&RuntimeOptions::default(), inherited)
@@ -85,10 +88,6 @@ fn main() -> ExitCode {
                 return ExitCode::from(69);
             }
         }
-    }
-    if env::args_os().skip(1).eq(["--runtime-info"]) {
-        println!("{}", include_str!("../runtime.json").trim());
-        return ExitCode::SUCCESS;
     }
     let arguments: Vec<_> = env::args_os().skip(1).collect();
     if arguments.first().is_some_and(|arg| arg == "reminder-clock") {
