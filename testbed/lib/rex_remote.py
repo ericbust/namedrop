@@ -76,7 +76,8 @@ def rex_version(binary, home):
 
 def processes():
     """This user's processes: pid to (parent pid, start time, command line)."""
-    listed = run(["ps", "-U", str(os.getuid()), "-ww", "-o", "pid=,ppid=,lstart=,command="]).stdout
+    # lstart follows TZ and LC_TIME, so pin both to read one start time.
+    listed = run(["env", "LC_ALL=C", "TZ=UTC", "ps", "-U", str(os.getuid()), "-ww", "-o", "pid=,ppid=,lstart=,command="]).stdout
     table = {}
     for line in listed.splitlines():
         fields = line.split(None, 7)
@@ -123,7 +124,8 @@ def apt_version(version):
 
 class Lab:
     def __init__(self, directory):
-        self.dir = Path(directory).expanduser().absolute()
+        # Resolved, as Namedrop names its children by the canonical path.
+        self.dir = Path(directory).expanduser().resolve()
         digest = hashlib.sha256(str(self.dir).encode()).hexdigest()[:12]
         self.container = "ndrp-rexlab-b-" + digest
         self.a_socket = Path("/tmp/nd-tb-rexremote-{}-{}.sock".format(os.getuid(), digest))
