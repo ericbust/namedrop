@@ -288,9 +288,10 @@ fn round(run: &mut Run<'_>, reading: &mut Reading) -> Round {
                 let page = collect_replies(run, &store, &peer, &answer, reading);
                 let pages = (page != Page::Fault && more)
                     .then(|| collect(run, &store, &own, &peer, reading));
-                // Each page stores whether B has room, so the last one read
-                // says it.
-                if page == Page::Read || pages.as_ref().is_some_and(|pages| pages.read) {
+                // Each page stores whether B has room, so once the collect
+                // that follows has read on, the store says what the latest
+                // page did.
+                if page == Page::Read {
                     full = silent();
                 }
                 if page == Page::Fault || pages.is_some_and(|pages| !pages.answered) {
