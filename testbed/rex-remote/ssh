@@ -1,0 +1,10 @@
+#!/bin/sh
+# The lab's `ssh`. `testbed rex-remote up` copies it to LAB/bin/ssh, first on the PATH of
+# every `rex` A runs, so Rex's ssh transport reads only the lab's config, key and known_hosts
+# and never ~/.ssh. Each call is logged, which counts Rex's tunnels per call.
+set -eu
+lab=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+config=$lab/ssh/config
+[ -f "$config" ] || { echo "lab ssh: no $config" >&2; exit 255; }
+printf '%s %s ssh %s\n' "$(date +%T)" "$$" "$*" >> "$lab/logs/ssh-calls.log"
+exec /usr/bin/ssh -F "$config" "$@"
