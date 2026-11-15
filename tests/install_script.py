@@ -67,7 +67,7 @@ class Installer(unittest.TestCase):
         self.home.mkdir()
         self.tools = self.root / 'tools'
         self.tools.mkdir()
-        for name in ('dirname', 'awk', 'mkdir', 'cp', 'chmod', 'mktemp', 'tar', 'rm', 'ln', 'shasum', 'sha256sum'):
+        for name in ('dirname', 'awk', 'mkdir', 'cp', 'chmod', 'mktemp', 'tar', 'gzip', 'rm', 'ln', 'shasum', 'sha256sum'):
             tool = shutil.which(name)
             if tool:
                 (self.tools / name).symlink_to(tool)
