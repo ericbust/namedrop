@@ -392,8 +392,10 @@ container, or with another `--b-rex` brings back only what stopped or changed:
    That wrapper runs `/usr/bin/ssh -F ssh/config`, and the
    [config](rex-remote/ssh_config) names only that key and that known_hosts,
    with no agent and no global known_hosts. Rex's ssh transport passes its own
-   `ControlMaster` and `ControlPath` on the command line, and keeps that socket
-   under `/tmp/rex-UID/`, never under `~/.ssh`. Each ssh run is logged to
+   `ControlMaster` and `ControlPath` on the command line, which win over the
+   config: its tunnels pass `ControlMaster=no`, and its first probe of a host
+   opens a control socket under `/tmp/rex-UID/<hash>/ssh/` and closes it with
+   `-O exit`. None is under `~/.ssh`. Each ssh run is logged to
    `logs/ssh-calls.log`.
 3. Builds Namedrop for both sides, and B's image from
    [rex-remote/Dockerfile](rex-remote/Dockerfile). The Dockerfile pins the
