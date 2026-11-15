@@ -18,6 +18,7 @@ fn refused_config_start_and_unknown_action_write_nothing_and_call_no_host() {
     for args in [
         vec!["rex", "ensure", "--from-server"],
         vec!["rex", "action", "future"],
+        vec!["rex", "action", "two\nlines"],
         vec!["rex", "action", "name"],
     ] {
         let out = binary::namedrop()
@@ -37,11 +38,15 @@ fn refused_config_start_and_unknown_action_write_nothing_and_call_no_host() {
         if args[1] == "ensure" {
             assert!(out.status.success());
             assert!(out.stderr.is_empty());
-        } else if args[2] == "future" {
+        } else if args[2] != "name" {
+            // The palette shows one plain line, whatever the error holds.
             assert_eq!(out.status.code(), Some(1));
             assert_eq!(
                 String::from_utf8(out.stderr).unwrap(),
-                "This Namedrop has no action future. Run sh scripts/install.sh again.\n"
+                format!(
+                    "This Namedrop has no action {}. Run sh scripts/install.sh again.\n",
+                    args[2].replace('\n', " ")
+                )
             );
         } else {
             assert_eq!(out.status.code(), Some(1));
