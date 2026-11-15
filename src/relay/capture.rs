@@ -11,7 +11,7 @@ use super::{
 use crate::{
     StateNamespace, StateStore, ThreadId,
     mux::Endpoint,
-    store::{RelayAuthor, RelayOrigin, RelayRecipient, ToRelayAuthor},
+    store::{Answered, RelayAuthor, RelayOrigin, RelayRecipient, ToRelayAuthor},
 };
 use std::path::Path;
 
@@ -155,7 +155,7 @@ fn answered(
     transaction: &crate::store::StateTransaction<'_>,
     endpoint: &Endpoint,
     row: &ToRelayAuthor,
-) -> Result<Vec<Option<String>>, crate::StoreError> {
+) -> Result<Vec<Option<Answered>>, crate::StoreError> {
     let namespace = StateNamespace::for_space(&endpoint.key, &row.space);
     row.relay_recipients
         .iter()
@@ -181,7 +181,7 @@ fn capture_one(
     relay: &RelayStore,
     endpoint: &Endpoint,
     row: &ToRelayAuthor,
-    answered: &[Option<String>],
+    answered: &[Option<Answered>],
     now: i64,
 ) -> Result<(Vec<String>, Vec<String>), String> {
     let error = |error: crate::StoreError| error.to_string();
@@ -201,13 +201,20 @@ fn capture_one(
             labels.push(origin.to_owned());
             continue;
         }
+        // An answer to the relay's own notice, which asked nothing, is no
+        // reply for A, and none that B let go of.
+        if answered.as_ref().is_some_and(|answered| answered.notice) {
+            continue;
+        }
         let kept = match &mapped {
             Some((host_id, thread)) if is(recipient, RelayOrigin::Host(host_id), alias) => {
                 keep_for(
                     relay,
                     endpoint,
                     row,
-                    answered.as_deref(),
+                    answered
+                        .as_ref()
+                        .map(|answered| answered.message_id.as_str()),
                     host_id,
                     thread,
                     now,

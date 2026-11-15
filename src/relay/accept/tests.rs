@@ -1743,3 +1743,34 @@ fn after_a_purge_capture_reads_again_from_the_last_relay_message_still_there() {
     capture();
     assert_eq!(outbox_texts(&b), [[json!("third answer")]]);
 }
+
+/// B's agent that answers the notice of a sender's self-named host, which
+/// asks nothing, makes no reply for A, and none that Doctor counts as
+/// expired. Its answer to the message itself is kept.
+#[test]
+fn an_answer_to_the_relay_s_own_notice_is_neither_kept_nor_counted() {
+    let b = B::new();
+    b.call(&deliver("m1", "bob", "t1", "please answer"));
+    let notice = b.rows(
+        "namedrop.sqlite3",
+        "SELECT message_id FROM collaboration_messages
+         WHERE grammar_version = 'relay-notice/v1'",
+    )[0][0]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    bob_answers(
+        &b,
+        &notice,
+        "@alice@laptop I received the delivery, but it contains no task",
+    );
+    let endpoint = Endpoint::parse(REX);
+    super::super::capture::capture(&b.0, &endpoint, &mut |_| {}).unwrap();
+    assert!(outbox_texts(&b).is_empty());
+    assert!(super::super::expired_replies(&b.0).is_empty());
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    bob_answers(&b, &relayed_id(&b, "m1"), "@alice@laptop the real answer");
+    super::super::capture::capture(&b.0, &endpoint, &mut |_| {}).unwrap();
+    assert_eq!(outbox_texts(&b), [[json!("the real answer")]]);
+    assert!(super::super::expired_replies(&b.0).is_empty());
+}

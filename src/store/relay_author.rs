@@ -295,11 +295,11 @@ impl StateTransaction<'_> {
         before: i64,
         author: &str,
         preferred: Option<&str>,
-    ) -> Result<Option<String>, StoreError> {
+    ) -> Result<Option<Answered>, StoreError> {
         Ok(self
             .transaction
             .query_row(
-                "SELECT message_id FROM collaboration_messages
+                "SELECT message_id, grammar_version = ?7 FROM collaboration_messages
                  WHERE session_socket_id = ?1 AND worktree_id = ?2 AND thread_id = ?3
                    AND rowid < ?4 AND author_address_id = ?5
                  ORDER BY message_id = ?6 DESC, rowid DESC LIMIT 1",
@@ -309,9 +309,15 @@ impl StateTransaction<'_> {
                     thread.as_str(),
                     before,
                     author,
-                    preferred
+                    preferred,
+                    NOTICE_GRAMMAR
                 ],
-                |row| row.get(0),
+                |row| {
+                    Ok(Answered {
+                        message_id: row.get(0)?,
+                        notice: row.get(1)?,
+                    })
+                },
             )
             .optional()?)
     }
@@ -472,6 +478,13 @@ pub(crate) struct Relayed<'a> {
 
 /// A main-database message by its rowid and id.
 pub(crate) type MessageAt = (i64, String);
+
+/// The message of a relay author's that a message to it answers, and
+/// whether it is the relay's own notice, which no agent wrote.
+pub(crate) struct Answered {
+    pub message_id: String,
+    pub notice: bool,
+}
 
 /// A message one relay author receives.
 pub(crate) struct ToRelayAuthor {
