@@ -425,14 +425,15 @@ brings its profiles down at the end unless `--keep`. `down` stops every
 
 ```sh
 ./testbed rex up --link /path/to/namedrop --profile rex-step6 --fresh --yes
-python3 -I testbed/rex-step6-live.py --profile rex-step6 --out /tmp/step6
+python3 -I rex-step6-live.py --profile rex-step6 --out /tmp/step6
 ./testbed rex down --profile rex-step6
 ```
 
 [rex-step6-live.py](rex-step6-live.py) runs UI.md's U14 on a lane that
 `rex up --fresh` just installed, before anything names a block. It checks that
 the server lists the module's eleven actions and that About Namedrop names the
-module, launcher and state the install wrote. It then runs
+module, launcher and state the install wrote, and that no pane is named and the
+session is not activated yet. It then runs
 `rex do namedrop_activate --origin palette` in the Claude Code block, and
 checks that exactly one floating layer opens, that the session is activated,
 and that Esc closes the layer. It runs `rex do namedrop_name --origin palette`
@@ -440,9 +441,14 @@ in the Claude Code block and in the Codex block, types `claude` and `codex`
 into each name screen, presses Enter on the pane type and persona screens, and
 checks each block's label and its agent's binding in the store. Last, a mention
 typed into Claude Code reaches Codex and the reply comes back, and then the same
-from Codex to Claude Code. No Namedrop command runs during that exchange: the
-driver types into the agents, reads their screens, and reads the store
-read-only. Each check prints one line. Every command is logged in
+from Codex to Claude Code. Each screen check needs a delivery prompt
+(`Namedrop message <nonce> from @<sender>`) that was not on the screen before
+the driver typed, and whose nonce the store drew for that exchange's message,
+so an earlier exchange's prompt never counts. The driver runs no Namedrop
+command during the exchanges, and a last check reads its own command list to
+show it: it types into the agents, reads their screens, and reads the store
+read-only, and the agents' Namedrop hooks carry each mention and reply. Each
+check prints one line. Every command is logged in
 `OUT/commands.log`, and `OUT/evidence.json` holds the screens, the store rows
 and the timings. The driver leaves the lane up. To run another Rex build, put
 its `rex` first on `PATH` for `rex up`, as [The Rex lane](#the-rex-lane) says.

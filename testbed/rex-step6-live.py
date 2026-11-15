@@ -12,9 +12,11 @@ usage: python3 -I testbed/rex-step6-live.py --profile rex-NAME --out DIR
    the name screen, the driver types `claude` and `codex` into it and saves, and each agent is
    then named and bound.
 4. A mention typed into Claude Code reaches Codex and Codex's reply comes back, then a mention
-   typed into Codex reaches Claude Code and its reply comes back. Nothing runs a Namedrop command
-   during the exchange: the driver types into the agents, reads their screens and reads the
-   store read-only.
+   typed into Codex reaches Claude Code and its reply comes back. The driver runs no Namedrop
+   command during the exchange, which it checks from its own command list: it types into the
+   agents, reads their screens and reads the store read-only, and the agents' Namedrop hooks
+   carry each mention and reply. Each screen check needs a delivery prompt that was not on the
+   screen before the typing and whose nonce the store drew for that exchange's message.
 
 Every rex call names the lane's server with -S and --autostart=false, from the lane's own
 environment. Claude Code runs only as the profile's token wrapper, which the lane started.
@@ -28,6 +30,7 @@ import datetime
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import sqlite3
 import subprocess
@@ -42,6 +45,9 @@ import testbed  # noqa: E402
 ACTIONS = sorted("namedrop_" + name for name in (
     "activate", "name", "manage", "doctor", "status", "tour", "channels", "pause", "resume",
     "deactivate", "about"))
+# The prompt a delivery types into the recipient's pane opens with its attempt's pointer nonce
+# and the sender (src/pointer.rs). A host may wrap it, so any whitespace separates the words.
+BANNER = re.compile(r"Namedrop\s+message\s+([0-9a-f]{8})\s+from\s+@([\w-]+)")
 
 
 class Failed(Exception):
@@ -57,7 +63,7 @@ class Run:
     def __init__(self, out):
         out.mkdir(parents=True, exist_ok=True)
         self.out, self.log = out, (out / "commands.log").open("a")
-        self.checks, self.observed = [], {}
+        self.checks, self.observed, self.commands = [], {}, []
 
     def note(self, text):
         self.log.write("[{}] {}\n".format(clock(), text))
@@ -65,6 +71,7 @@ class Run:
 
     def run(self, environment, command, cwd, timeout=120, ok=True):
         started = time.monotonic()
+        self.commands.append([str(word) for word in command])
         result = subprocess.run(testbed.env_command(environment, [str(word) for word in command]),
                                 cwd=str(cwd), text=True, stdin=subprocess.DEVNULL,
                                 capture_output=True, timeout=timeout)
@@ -174,7 +181,7 @@ class Lane:
             connection.close()
 
 
-def palette(lane, block, action, settle=3.0):
+def palette(lane, block, action, agent, settle=3.0):
     """Runs a palette action on the block and returns what it opened, after waiting `settle`
     seconds more for any second one: the new blocks of every session, and the lane session's
     new floating layers."""
@@ -186,7 +193,7 @@ def palette(lane, block, action, settle=3.0):
     after = lane.every_block()
     new = {block_id: after[block_id] for block_id in set(after) - set(before)}
     layers = {layer: value for layer, value in lane.layers().items() if layer not in layers_before}
-    lane.run.observe(action + " opened", {"exit": done.returncode, "stdout": done.stdout,
+    lane.run.observe("{} opened in the {} block".format(action, agent), {"exit": done.returncode, "stdout": done.stdout,
                                           "stderr": done.stderr, "first seen": sorted(opened),
                                           "new blocks": new, "new layers": layers})
     one = len(new) == 1 and len(layers) == 1 and [
@@ -211,11 +218,15 @@ def check_install(run, lane):
               Path(about.get("launcher", "")).parent == lane.state / "runtime", about)
     bound = lane.rows("select count(*) from pane_addresses where retired = 0")[0][0]
     run.check("no pane is named before the palette names them", bound == 0, bound)
+    activated = lane.rows("select activated, deactivated from worktrees where worktree_id = ?",
+                          lane.session)
+    run.check("the session is not activated before the palette activates it",
+              not [row for row in activated if row[0]], activated)
 
 
 def activate(run, lane):
     claude = lane.blocks["claude"]
-    done, new, one = palette(lane, claude, "namedrop_activate")
+    done, new, one = palette(lane, claude, "namedrop_activate", "claude")
     run.check("Activate Namedrop from the palette exits 0 and opens exactly one floating layer, "
               "and no other block", done.returncode == 0 and one,
               {"exit": done.returncode, "stderr": done.stderr, "new": new})
@@ -236,7 +247,7 @@ def activate(run, lane):
 
 def name_from_palette(run, lane, agent):
     block = lane.blocks[agent]
-    done, new, one = palette(lane, block, "namedrop_name")
+    done, new, one = palette(lane, block, "namedrop_name", agent)
     run.check("Name this pane in the {} block opens exactly one floating layer".format(agent),
               done.returncode == 0 and one, {"exit": done.returncode, "stderr": done.stderr,
                                              "new": new})
@@ -289,20 +300,56 @@ def thread_of(lane, author, words):
     thread = found[0][0]
     return found[0], lane.rows(
         "select m.thread_order, m.author_alias_snapshot, coalesce(m.in_reply_to, '-'), m.body, "
-        "m.grammar_version, group_concat(d.state) from collaboration_messages m left join "
-        "mailbox_deliveries d using (session_socket_id, worktree_id, message_id) where "
+        "m.grammar_version, group_concat(d.state), m.message_id from collaboration_messages m "
+        "left join mailbox_deliveries d using (session_socket_id, worktree_id, message_id) where "
         "m.thread_id = ? group by m.message_id order by m.thread_order", thread)
 
 
+def nonces(lane, message):
+    """The pointer nonces the store drew for the message's delivery attempts."""
+    return {row[0] for row in lane.rows(
+        "select s.pointer_nonce from delivery_attempt_state s join delivery_attempts a using "
+        "(session_socket_id, worktree_id, attempt_id, address_id) join mailbox_deliveries d using "
+        "(session_socket_id, worktree_id, delivery_id, address_id) where d.message_id = ? and "
+        "s.pointer_nonce is not null", message)}
+
+
+def banners(text, sender):
+    """Each delivery prompt from @sender on a screen: its nonce and the text after it."""
+    found = [match for match in BANNER.finditer(text) if match.group(2) == sender]
+    return [(match.group(1), text[match.end():found[index + 1].start()
+                                   if index + 1 < len(found) else len(text)])
+            for index, match in enumerate(found)]
+
+
+def new_banner(lane, block, sender, message, before):
+    """The nonce of a delivery prompt on the block's screen that was not there before and that
+    the store drew for `message`, with the text after it, or None."""
+    shown = [(nonce, after) for nonce, after in banners(lane.screen(block), sender)
+             if nonce not in before]
+    if not shown:
+        return None
+    drawn = nonces(lane, message)
+    return next(((nonce, after) for nonce, after in shown if nonce in drawn), None)
+
+
 def exchange(run, lane, sender, recipient, word, within=240):
-    """A mention typed into the sender's agent reaches the recipient, whose reply comes back."""
+    """A mention typed into the sender's agent reaches the recipient, whose reply comes back.
+    Each screen check needs a delivery prompt that was not on the screen before the typing and
+    whose nonce the store drew for this exchange's message, so an earlier exchange's prompt
+    never counts."""
     prompt = "@{} Please reply with exactly the word {}.".format(recipient, word)
-    lane.type_line(lane.blocks[sender], prompt)
+    to_block, from_block = lane.blocks[recipient], lane.blocks[sender]
+    on_recipient = {nonce for nonce, _ in banners(lane.screen(to_block), sender)}
+    on_sender = {nonce for nonce, _ in banners(lane.screen(from_block), recipient)}
+    lane.type_line(from_block, prompt)
     typed = time.time()
     request = wait(lambda: thread_of(lane, sender, prompt[len(recipient) + 2:]), bool,
                    "@{}'s mention in the store".format(sender), 120, 0.5)
-    reached = wait(lambda: "from @" + sender in lane.screen(lane.blocks[recipient]) and time.time(),
-                   bool, "the mention on @{}'s screen".format(recipient), within, 0.5)
+    mention = request[0][1]
+    reached_banner = wait(lambda: new_banner(lane, to_block, sender, mention, on_recipient), bool,
+                          "the mention's prompt on @{}'s screen".format(recipient), within, 0.5)
+    reached = time.time()
 
     def replied():
         rows = thread_of(lane, sender, prompt[len(recipient) + 2:])[1]
@@ -311,24 +358,40 @@ def exchange(run, lane, sender, recipient, word, within=240):
 
     rows = wait(replied, bool, "@{}'s reply in the thread".format(recipient), within, 0.5)
     answered = time.time()
-
-    def shown():
-        text = lane.screen(lane.blocks[sender])
-        return "from @" + recipient in text and word in text.split("from @" + recipient)[-1].lower()
-
-    on_screen = wait(shown, bool, "@{}'s reply on @{}'s screen".format(recipient, sender), 60, 0.5)
+    reply = next(row[6] for row in rows if row[1].lstrip("@") == recipient and
+                 word in row[3].lower())
+    shown_banner = wait(
+        lambda: (lambda found: found if found and word in found[1].lower() else None)(
+            new_banner(lane, from_block, recipient, reply, on_sender)),
+        bool, "@{}'s reply on @{}'s screen".format(recipient, sender), 60, 0.5)
     # The reply's delivery to the sender is acknowledged once the sender's agent took it.
     rows = wait(lambda: thread_of(lane, sender, prompt[len(recipient) + 2:])[1], lambda found: any(
         row[1].lstrip("@") == recipient and word in row[3].lower() and row[5] in (
             "acknowledged", "settled") for row in found), "the reply's delivery to be acknowledged",
         120, 0.5)
     run.observe("@{} to @{} thread".format(sender, recipient), rows)
-    run.observe("@{} screen after the reply".format(sender), lane.screen(lane.blocks[sender])[-2500:])
+    run.observe("@{} screen after the reply".format(sender), lane.screen(from_block)[-2500:])
     run.check("@{}'s mention reached @{} ({:.1f}s) and the {} reply came back ({:.1f}s)".format(
         sender, recipient, reached - typed, word, answered - typed),
-        request and on_screen and rows[0][1].lstrip("@") == sender and len(rows) >= 2, {
-            "typed": clock(typed), "on recipient's screen": clock(reached),
-            "reply in thread": clock(answered), "thread": rows})
+        rows[0][1].lstrip("@") == sender and rows[0][6] == mention and
+        rows[0][4] == "mention-hook/v1" and len(rows) >= 2, {
+            "typed": clock(typed), "mention": mention, "reply": reply,
+            "stale prompts on @{}'s screen".format(recipient): sorted(on_recipient),
+            "mention's prompt": reached_banner[0], "on recipient's screen": clock(reached),
+            "reply in thread": clock(answered),
+            "stale prompts on @{}'s screen".format(sender): sorted(on_sender),
+            "reply's prompt": shown_banner[0], "thread": rows})
+
+
+def check_exchange_commands(run, lane, commands):
+    """The driver's own commands during the exchanges: the lane's rex, and only capture, send and
+    send-key. The mentions and replies travel through the agents' Namedrop hooks."""
+    prefix = [str(lane.lane.binary()), "-S", lane.lane.server, "--autostart=false"]
+    kinds = sorted({command[len(prefix)] if command[:len(prefix)] == prefix else
+                    shlex.join(command) for command in commands})
+    run.check("the driver ran no Namedrop command during the exchanges, only rex capture, send "
+              "and send-key", set(kinds) <= {"capture", "send", "send-key"},
+              {"commands": len(commands), "kinds": kinds})
 
 
 def main():
@@ -352,8 +415,10 @@ def main():
         activate(run, lane)
         for agent in ("claude", "codex"):
             name_from_palette(run, lane, agent)
+        first = len(run.commands)
         exchange(run, lane, "claude", "codex", "pong")
         exchange(run, lane, "codex", "claude", "ping")
+        check_exchange_commands(run, lane, run.commands[first:])
     except (Failed, RuntimeError, subprocess.SubprocessError, OSError, KeyError, ValueError,
             sqlite3.Error) as error:
         run.note("stopped: {!r}".format(error))
