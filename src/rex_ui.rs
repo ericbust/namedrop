@@ -206,7 +206,7 @@ pub(crate) fn refresh(
     }
     let text = module_text(launcher, state)?;
     crate::install::replace_if_changed(lease, &module, &text, Some(0o600))?;
-    mark_removed_line(&mut record);
+    reinspect_line(&mut record);
     record["launcher"] = json!(launcher);
     record["state"] = json!(state);
     crate::install::replace_if_changed(
@@ -217,30 +217,47 @@ pub(crate) fn refresh(
     )
 }
 
-fn mark_removed_line(record: &mut Value) {
-    if record["line"] == "inserted"
-        && let Some(config) = record["config"].as_str()
-        && !fs::read(config).is_ok_and(|bytes| install::has_line(&bytes))
-    {
-        record["line"] = json!("removed");
+/// The state of a line this install inserted, read from the file each time:
+/// `inserted` while the file holds the line, and `removed` once a read finds
+/// it gone or finds no file. A read that fails leaves the recorded state, so
+/// an unreadable file is never taken for a removal, and a line the person
+/// adds back makes the state `inserted` again.
+fn reinspect_line(record: &mut Value) {
+    if !matches!(record["line"].as_str(), Some("inserted" | "removed")) {
+        return;
     }
+    let Some(config) = record["config"].as_str() else {
+        return;
+    };
+    let present = match fs::read(config) {
+        Ok(bytes) => install::has_line(&bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => return,
+    };
+    record["line"] = json!(if present { "inserted" } else { "removed" });
 }
 
 pub(crate) fn inspect(home: Option<&Path>, endpoint: &Endpoint) -> Option<Result<Value, String>> {
+    inspect_with(home, |record| crate::mux::rex::ui_report(endpoint, record))
+}
+
+/// `inspect`, with the server's report of `record` from `report`.
+fn inspect_with(
+    home: Option<&Path>,
+    report: impl FnOnce(&Value) -> Result<Value, String>,
+) -> Option<Result<Value, String>> {
     let mut record = match registration(home?) {
         Ok(Some(r)) if r["module"].as_str().is_some_and(|s| !s.is_empty()) => r,
         Ok(_) => return None,
         Err(e) => return Some(Err(e)),
     };
-    mark_removed_line(&mut record);
-    Some(
-        crate::mux::rex::ui_report(endpoint, &record).map(|mut report| {
-            if record["line"] == "removed" {
-                report["confirmed"] = json!(false);
-            }
-            report
-        }),
-    )
+    reinspect_line(&mut record);
+    Some(report(&record).map(|mut report| {
+        if record["line"] == "removed" {
+            report["confirmed"] = json!(false);
+        }
+        report
+    }))
 }
 
 pub(crate) fn shortcuts(home: Option<&Path>, endpoint: &Endpoint) -> Value {

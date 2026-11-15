@@ -38,7 +38,9 @@ pub(super) fn has_line(bytes: &[u8]) -> bool {
 
 fn line_state(bytes: &[u8], previous: Option<&str>, regular: bool, print: bool) -> Line {
     if has_line(bytes) {
-        return if previous == Some("inserted") {
+        // A line the person added back after removing it is the inserted
+        // line again, as the refresh and Doctor read it.
+        return if matches!(previous, Some("inserted" | "removed")) {
             Line::Inserted
         } else {
             Line::Present
@@ -104,6 +106,10 @@ pub fn install(
         ));
     }
     managed_module(&module)?;
+    // A lease that refuses refuses before the baseline, so a refused install
+    // never reloads the person's config. The lease is not held across the
+    // reload, and is taken again for the writes.
+    installed_runtime::package_guard(Some(home), state, Writer::Activation)?.require_write()?;
     let baseline = rpc(&endpoint, "server.config_reload", None)?;
     if crate::mux::rex::config_errors(&baseline) {
         return Err(format!(
@@ -128,12 +134,36 @@ pub fn install(
             let _ = e;
             Vec::new()
         }
-        Err(e) => return Err(e.to_string()),
+        Err(e) => {
+            return Err(format!(
+                "Namedrop could not read {}: {e}. Nothing was changed. Make the file readable, or put {CONFIG_LINE} on its own line in it, then run namedrop install again.",
+                config.display()
+            ));
+        }
     };
     let previous = (record["config"] == json!(config))
         .then(|| record["line"].as_str())
         .flatten();
-    let line = line_state(&bytes, previous, regular, print);
+    let mut line = line_state(&bytes, previous, regular, print);
+    let mut reason = match line {
+        Line::Printed if print => {
+            Some("namedrop install --print-config edits no Rex config file.".to_owned())
+        }
+        Line::Printed => Some(format!(
+            "{} is {}, and Namedrop edits only a regular file.",
+            config.display(),
+            if metadata.as_ref().is_ok_and(fs::Metadata::is_symlink) {
+                "a symbolic link"
+            } else {
+                "not a regular file"
+            }
+        )),
+        Line::Removed => Some(format!(
+            "The line Namedrop inserted was removed from {}, and Namedrop never adds it again.",
+            config.display()
+        )),
+        Line::Inserted | Line::Present => None,
+    };
     let shell = install_packages(&lease, home, state, &launcher, directories.agent_config())?;
     if let Some(parent) = module.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -152,13 +182,25 @@ pub fn install(
         };
         let mut after = format!("{CONFIG_LINE}{newline}").into_bytes();
         after.extend_from_slice(&bytes);
-        Some(Edit::apply(
+        // An edit that fails changes nothing, so the install goes on as
+        // --print-config does and says why.
+        match Edit::apply(
             &lease,
             &config,
             &bytes,
             after,
             metadata.as_ref().ok().map(|m| m.permissions().mode()),
-        )?)
+        ) {
+            Ok(edit) => Some(edit),
+            Err(error) => {
+                line = Line::Printed;
+                reason = Some(format!(
+                    "Namedrop could not edit {}: {error}",
+                    config.display()
+                ));
+                None
+            }
+        }
     } else {
         None
     };
@@ -186,12 +228,15 @@ pub fn install(
     if crate::mux::rex::config_errors(&reload) {
         return Err(restore(home, state, edit, &endpoint, &reload, false)?);
     }
+    if let Some(edit) = &edit {
+        edit.keep_only_its_backup();
+    }
     let report = rpc(&endpoint, "client.keymap", Some(&record))?;
     if !matches!(line, Line::Printed | Line::Removed) && report["confirmed"] != true {
         return Err(format!("Namedrop's module is not confirmed: {report}"));
     }
     Ok(
-        json!({"state_directory":state,"module":module,"config":config,"line":line.word(),"config_line":CONFIG_LINE,"manual_config":matches!(line,Line::Printed|Line::Removed),"instruction":format!("Put {CONFIG_LINE} on its own line in {}.", config.display()),"keys":report["keys"],"confirmed":report["confirmed"],"integration_packages":package_report(home),"shell_command":shell,"agent_integration_hook_activation":crate::user_hook_activation_guidance(Some(home),directories.agent_config())}),
+        json!({"state_directory":state,"module":module,"config":config,"line":line.word(),"config_line":CONFIG_LINE,"manual_config":matches!(line,Line::Printed|Line::Removed),"instruction":format!("Put {CONFIG_LINE} on its own line in {}.", config.display()),"reason":reason,"keys":report["keys"],"confirmed":report["confirmed"],"integration_packages":package_report(home),"shell_command":shell,"agent_integration_hook_activation":crate::user_hook_activation_guidance(Some(home),directories.agent_config())}),
     )
 }
 
@@ -270,6 +315,9 @@ struct Edit {
     after: Vec<u8>,
 }
 impl Edit {
+    /// Replaces `path`'s bytes `before` with `after`, as bytes, so a file
+    /// that is not UTF-8 is edited too. It fails having changed nothing:
+    /// `path` keeps its bytes, and the backup it made is gone.
     fn apply(
         lease: &PackageLease,
         path: &Path,
@@ -277,54 +325,99 @@ impl Edit {
         after: Vec<u8>,
         mode: Option<u32>,
     ) -> Result<Self, String> {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let _held = lease;
         let backup = mode.map(|_| {
             path.with_file_name(format!(
-                "{}.namedrop-{}.bak",
-                path.file_name().unwrap_or_default().to_string_lossy(),
+                "{}{}.bak",
+                backup_prefix(path),
                 installed_runtime::retirement::utc_now()
             ))
         });
-        if let Some(backup) = &backup {
+        if let (Some(backup), Some(mode)) = (&backup, mode) {
             let mut file = fs::OpenOptions::new()
                 .create_new(true)
                 .write(true)
                 .open(backup)
                 .map_err(|e| e.to_string())?;
-            use std::io::Write;
-            file.write_all(before)
-                .and_then(|_| {
-                    file.set_permissions(fs::Permissions::from_mode(mode.unwrap() & 0o777))
-                })
-                .and_then(|_| file.sync_all())
-                .map_err(|e| e.to_string())?;
+            let written = file
+                .write_all(before)
+                .and_then(|_| file.set_permissions(fs::Permissions::from_mode(mode & 0o777)))
+                .and_then(|_| file.sync_all());
+            if let Err(error) = written {
+                let _ = fs::remove_file(backup);
+                return Err(error.to_string());
+            }
         }
-        let text = std::str::from_utf8(&after).map_err(|e| e.to_string())?;
-        let _held = lease;
         let temporary = path.with_file_name(format!(
             ".namedrop-config-{}.tmp",
             SystemClock.now_unix_ms()
         ));
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = fs::OpenOptions::new()
+        let replaced = fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(mode.unwrap_or(0o600) & 0o777)
             .open(&temporary)
-            .map_err(|e| e.to_string())?;
-        let result = file
-            .write_all(text.as_bytes())
-            .and_then(|_| file.sync_all())
-            .and_then(|_| fs::rename(&temporary, path))
-            .and_then(|_| fs::File::open(path.parent().unwrap()).and_then(|f| f.sync_all()));
-        let _ = fs::remove_file(temporary);
-        result.map_err(|e| e.to_string())?;
+            .and_then(|mut file| {
+                let written = file
+                    .write_all(&after)
+                    .and_then(|_| file.sync_all())
+                    .and_then(|_| fs::rename(&temporary, path));
+                let _ = fs::remove_file(&temporary);
+                written
+            });
+        if let Err(error) = replaced {
+            if let Some(backup) = &backup {
+                let _ = fs::remove_file(backup);
+            }
+            return Err(error.to_string());
+        }
+        // The edit stands once the rename is done. Syncing the folder only
+        // makes it durable sooner.
+        if let Some(folder) = path.parent() {
+            let _ = fs::File::open(folder).and_then(|f| f.sync_all());
+        }
         Ok(Self {
             path: path.to_owned(),
             backup,
             after,
         })
     }
+
+    /// Once the edit stands, deletes the backups older than its own, so the
+    /// folder keeps only the newest. A newer one, of an edit still running,
+    /// stays.
+    fn keep_only_its_backup(&self) {
+        let (Some(folder), Some(name)) = (
+            self.path.parent(),
+            self.backup
+                .as_ref()
+                .and_then(|b| b.file_name())
+                .and_then(|n| n.to_str()),
+        ) else {
+            return;
+        };
+        let prefix = backup_prefix(&self.path);
+        for entry in fs::read_dir(folder).into_iter().flatten().flatten() {
+            let file = entry.file_name();
+            if file.to_str().is_some_and(|file| {
+                file.starts_with(&prefix) && file.ends_with(".bak") && file < name
+            }) && entry.file_type().is_ok_and(|t| t.is_file())
+            {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
+/// `init.lua.namedrop-`: a backup's name is this and the UTC time, so names
+/// sort in the order the backups were made.
+fn backup_prefix(path: &Path) -> String {
+    format!(
+        "{}.namedrop-",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    )
 }
 
 fn restore(
@@ -515,11 +608,18 @@ mod tests {
         );
         for prior in ["inserted", "removed"] {
             assert_eq!(line_state(b"", Some(prior), true, false), Line::Removed);
+            // The line the person added back, as Doctor said, is ours again.
+            assert_eq!(
+                line_state(CONFIG_LINE.as_bytes(), Some(prior), true, false),
+                Line::Inserted
+            );
         }
-        assert_eq!(
-            line_state(b"", Some("printed"), true, false),
-            Line::Inserted
-        );
+        // Only a line this install inserted stays out once removed. The
+        // person asked to install, so their own line, or a printed one, that
+        // is now gone is inserted.
+        for prior in ["printed", "present"] {
+            assert_eq!(line_state(b"", Some(prior), true, false), Line::Inserted);
+        }
         assert_eq!(
             line_state(CONFIG_LINE.as_bytes(), Some("printed"), true, false),
             Line::Present

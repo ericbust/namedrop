@@ -1,6 +1,9 @@
 use super::*;
 use crate::cli::UiMode;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::{
+    os::unix::fs::PermissionsExt,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 struct Fixture(std::path::PathBuf);
 impl Fixture {
@@ -236,8 +239,66 @@ fn refresh_remembers_a_removed_managed_line_without_restoring_it() {
         fs::read_to_string(&config).unwrap(),
         "-- the person removed the line\n"
     );
-    let mut restored = saved;
-    fs::write(&config, format!("{CONFIG_LINE}\n")).unwrap();
-    mark_removed_line(&mut restored);
-    assert_eq!(restored["line"], "removed");
+}
+
+/// The U7 review's F1: only a read that finds the file without the line, or
+/// finds no file, counts as removed, and a line the person adds back, as
+/// Doctor says, clears `removed`.
+#[test]
+fn the_line_state_is_read_from_init_lua_each_time_and_a_failed_read_changes_nothing() {
+    let f = Fixture::new();
+    let config = f.0.join("init.lua");
+    let module = f.0.join("namedrop.lua");
+    let path = crate::locator::rex_registration(&f.0);
+    let state = f.0.join("state");
+    let refresh_with = |line: &str| {
+        fs::write(
+            &path,
+            json!({"config":config,"module":module,"line":line}).to_string(),
+        )
+        .unwrap();
+        refresh(&f.lease(), &f.0, Path::new("/runtime/namedrop"), &state).unwrap();
+        registration(&f.0).unwrap().unwrap()["line"].clone()
+    };
+    let confirmed =
+        |record: &Value| Ok::<_, String>(json!({"confirmed":true,"line":record["line"]}));
+    // A file the refresh cannot read keeps the state, whatever it holds.
+    fs::create_dir(&config).unwrap();
+    assert_eq!(refresh_with("inserted"), "inserted");
+    assert_eq!(
+        inspect_with(Some(&f.0), confirmed).unwrap().unwrap()["confirmed"],
+        true
+    );
+    assert_eq!(refresh_with("removed"), "removed");
+    fs::remove_dir(&config).unwrap();
+    fs::write(&config, format!("{CONFIG_LINE}\n-- mine\n")).unwrap();
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read(&config).is_err() {
+        assert_eq!(refresh_with("inserted"), "inserted");
+    }
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+    // The person adds the removed line back: refresh and Doctor read it.
+    assert_eq!(refresh_with("removed"), "inserted");
+    fs::write(
+        &path,
+        json!({"config":config,"module":module,"line":"removed"}).to_string(),
+    )
+    .unwrap();
+    let report = inspect_with(Some(&f.0), confirmed).unwrap().unwrap();
+    assert_eq!(report["confirmed"], true, "{report}");
+    assert_eq!(report["line"], "inserted");
+    // A read that finds the line gone, or the file gone, is a removal.
+    fs::write(&config, "-- mine\n").unwrap();
+    assert_eq!(
+        inspect_with(Some(&f.0), confirmed).unwrap().unwrap()["confirmed"],
+        false
+    );
+    assert_eq!(refresh_with("inserted"), "removed");
+    fs::remove_file(&config).unwrap();
+    assert_eq!(refresh_with("inserted"), "removed");
+    // A line the person owns, or one printed, is never re-read.
+    for line in ["present", "printed"] {
+        assert_eq!(refresh_with(line), line);
+    }
+    assert!(!config.exists());
 }
