@@ -565,6 +565,132 @@ fn a_binding_hook_queued_behind_the_handoff_gate_stays_quiet() {
     assert_eq!(fs::read_dir(&state).unwrap().count(), 1);
 }
 
+/// UI.md's lock order: the helpers wait for their state's shared command gate
+/// with no bound, and end quietly when they get it and find the state
+/// retired, while the subagent hook, the Stop hook and the Stop worker take
+/// no gate at all (the U7 review's F7).
+#[test]
+fn helpers_wait_for_the_gate_and_end_quietly_while_three_hooks_take_none() {
+    use std::{
+        process::{Child, Stdio},
+        time::{Duration, Instant},
+    };
+    let f = Fixture::new();
+    let state = f.0.join("state");
+    let state_arg = state.to_str().unwrap();
+    let gate_path = state.join("runtime/commands.lock");
+    let gate = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&gate_path)
+        .unwrap();
+    gate.lock().unwrap();
+    let start = |args: &[&str]| -> Child {
+        let mut child = binary::namedrop()
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", f.0.join("home"))
+            .env("NAMEDROP_STATE_DIR", &state)
+            .env("HERDR_BIN_PATH", f.0.join("host"))
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(child.stdin.take());
+        child
+    };
+    let finished = |mut child: Child, within: Duration| {
+        let until = Instant::now() + within;
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() >= until {
+                let _ = child.kill();
+                panic!(
+                    "PID {} did not finish: {:?}",
+                    child.id(),
+                    child.wait_with_output()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        child.wait_with_output().unwrap()
+    };
+    for args in [
+        vec![
+            "hook",
+            "subagent",
+            "--state-directory",
+            state_arg,
+            "--runtime",
+            "codex",
+        ],
+        vec!["hook", "stop", "--state-directory", state_arg],
+        vec!["hook", "stop-worker", "--state-directory", state_arg],
+    ] {
+        let output = finished(start(&args), Duration::from_secs(20));
+        assert!(output.status.success(), "{args:?}: {output:?}");
+    }
+    let tree = || {
+        let mut paths = Vec::new();
+        let mut folders = vec![state.clone()];
+        while let Some(folder) = folders.pop() {
+            for entry in fs::read_dir(folder).unwrap().flatten() {
+                if entry.file_type().unwrap().is_dir() {
+                    folders.push(entry.path());
+                }
+                paths.push(entry.path());
+            }
+        }
+        paths.sort();
+        paths
+    };
+    let mut before = tree();
+    let endpoint = "rex:/tmp/u7-gate-never.sock";
+    let helpers: Vec<_> = [
+        vec!["reminder-clock", state_arg, endpoint],
+        vec!["--deferred-worker", state_arg, endpoint],
+        vec!["rex", "bridge", "--endpoint", endpoint],
+        vec!["relay", "worker", "--host", "b", "--endpoint", endpoint],
+        vec!["hook", "agent-status-worker"],
+    ]
+    .into_iter()
+    .map(|args| (start(&args), args))
+    .collect();
+    let until = Instant::now() + Duration::from_secs(10);
+    for (child, args) in &helpers {
+        while !namedrop::test_process_opens(child.id(), &gate_path) {
+            assert!(Instant::now() < until, "{args:?} never reached the gate");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    std::thread::sleep(Duration::from_secs(1));
+    let mut helpers: Vec<_> = helpers
+        .into_iter()
+        .map(|(mut child, args)| {
+            assert!(child.try_wait().unwrap().is_none(), "{args:?} did not wait");
+            (child, args)
+        })
+        .collect();
+    fs::write(
+        state.join("runtime/retired.json"),
+        json!({"reason":"removed","successor":null,"at":"now"}).to_string(),
+    )
+    .unwrap();
+    drop(gate);
+    for (child, args) in helpers.drain(..) {
+        let output = finished(child, Duration::from_secs(10));
+        assert!(
+            output.status.success() && output.stdout.is_empty() && output.stderr.is_empty(),
+            "{args:?}: {output:?}"
+        );
+    }
+    before.push(state.join("runtime/retired.json"));
+    before.sort();
+    assert_eq!(tree(), before, "a helper wrote into the retired state");
+}
+
 fn child_opens_gate(pid: u32, path: &std::path::Path) -> bool {
     namedrop::test_process_opens(pid, path)
 }

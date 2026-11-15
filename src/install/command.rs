@@ -1,7 +1,12 @@
 use super::{conflict, replace_if_changed, shell_single_quote};
 use crate::installed_runtime::PackageLease;
 use serde_json::{Value, json};
-use std::{env, fs, io::ErrorKind, os::unix::fs::PermissionsExt, path::Path};
+use std::{
+    env, fs,
+    io::ErrorKind,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+};
 
 const OWNER: &str = "#!/bin/sh\n# Managed by Namedrop: shell command.\n";
 const PATH_SETUP: &str = "# Namedrop CLI\ncase \":$PATH:\" in\n  *:\"$HOME/.local/bin\":*) ;;\n  *) export PATH=\"$HOME/.local/bin:$PATH\" ;;\nesac\n";
@@ -36,30 +41,7 @@ pub(crate) fn install_shell_command(
         ));
     }
 
-    let shell = env::var("SHELL").unwrap_or_default();
-    let mut startup_files = Vec::new();
-    match Path::new(&shell).file_name().and_then(|name| name.to_str()) {
-        Some("zsh") => {
-            let directory = env::var_os("ZDOTDIR")
-                .filter(|s| !s.is_empty())
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| home.to_path_buf());
-            // A custom startup directory outside HOME needs manual PATH setup.
-            // Never write into another profile from an isolated activation.
-            if directory.is_absolute() && directory.starts_with(home) {
-                startup_files.push(directory.join(".zshrc"));
-            }
-        }
-        Some("bash") => {
-            startup_files.push(home.join(".bashrc"));
-            let login = [".bash_profile", ".bash_login", ".profile"]
-                .into_iter()
-                .find(|name| home.join(name).exists())
-                .unwrap_or(".profile");
-            startup_files.push(home.join(login));
-        }
-        _ => {}
-    }
+    let startup_files = shell_startup_files(home);
     // Validate every target before changing either the command or shell files.
     let updates = startup_files
         .iter()
@@ -98,6 +80,36 @@ pub(crate) fn install_shell_command(
             "Open a new terminal, or run the current_shell command in this terminal."
         }
     }))
+}
+
+/// The startup files that get the PATH lines, chosen from `SHELL` and
+/// `ZDOTDIR`. The install's confirmation lists these same files.
+pub(crate) fn shell_startup_files(home: &Path) -> Vec<PathBuf> {
+    let shell = env::var("SHELL").unwrap_or_default();
+    let mut startup_files = Vec::new();
+    match Path::new(&shell).file_name().and_then(|name| name.to_str()) {
+        Some("zsh") => {
+            let directory = env::var_os("ZDOTDIR")
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.to_path_buf());
+            // A custom startup directory outside HOME needs manual PATH setup.
+            // Never write into another profile from an isolated activation.
+            if directory.is_absolute() && directory.starts_with(home) {
+                startup_files.push(directory.join(".zshrc"));
+            }
+        }
+        Some("bash") => {
+            startup_files.push(home.join(".bashrc"));
+            let login = [".bash_profile", ".bash_login", ".profile"]
+                .into_iter()
+                .find(|name| home.join(name).exists())
+                .unwrap_or(".profile");
+            startup_files.push(home.join(login));
+        }
+        _ => {}
+    }
+    startup_files
 }
 
 fn read_target(home: &Path, target: &Path) -> Result<Option<(String, u32)>, String> {

@@ -233,23 +233,33 @@ fn confirm(home: &Path, state: &Path, old: &Path) -> Value {
                 }
             }
         }
-        let lease = installed_runtime::package_guard(Some(home), state, Writer::Handoff)?;
-        if let Some(mut record) = registration(home)?
-            && let Some(entries) = record["predecessors"].as_array_mut()
-        {
-            for entry in entries {
-                if entry["state"]
-                    .as_str()
-                    .is_some_and(|s| same(Path::new(s), old))
-                {
-                    entry["sealed"] = json!(true);
-                }
-            }
-            save(&lease, home, &record)?;
-        }
-        Ok::<_, String>(json!({"status":"confirmed","sealed":true}))
+        seal(home, state, old)
     })();
     result.unwrap_or_else(|error| json!({"status":"not_confirmed","error":error,"sealed":false}))
+}
+
+/// Marks `old`'s entry sealed under the lease, reading `rex.json` again. An
+/// entry or a file removed meanwhile stays removed, and is reported so.
+fn seal(home: &Path, state: &Path, old: &Path) -> Result<Value, String> {
+    let lease = installed_runtime::package_guard(Some(home), state, Writer::Handoff)?;
+    let Some(mut record) = registration(home)? else {
+        return Ok(json!({"status":"removed"}));
+    };
+    let mut sealed = false;
+    for entry in record["predecessors"].as_array_mut().into_iter().flatten() {
+        if entry["state"]
+            .as_str()
+            .is_some_and(|s| same(Path::new(s), old))
+        {
+            entry["sealed"] = json!(true);
+            sealed = true;
+        }
+    }
+    if !sealed {
+        return Ok(json!({"status":"removed"}));
+    }
+    save(&lease, home, &record)?;
+    Ok(json!({"status":"confirmed","sealed":true}))
 }
 
 pub(crate) fn predecessor_warnings(home: &Path, state: &Path) -> Vec<String> {
@@ -295,9 +305,14 @@ mod tests {
     #[test]
     fn confirmation_seals_without_a_module_or_server_and_never_recreates_a_removed_record() {
         let (root, home, state) = fixture("offline");
+        // A server listens on the recorded socket, so a call would connect.
+        let socket = root.join("listening.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let listening = json!(format!("rex:{}", socket.display()));
         for (line, server) in [
-            ("printed", json!("rex:/tmp/u7-forbidden.sock")),
-            ("removed", json!("rex:/tmp/u7-forbidden.sock")),
+            ("printed", listening.clone()),
+            ("removed", listening),
             ("inserted", Value::Null),
             (
                 "inserted",
@@ -306,9 +321,14 @@ mod tests {
         ] {
             record(&home, &state, line, server);
             let result = confirm(&home, &state, Path::new("/old"));
-            assert_eq!(result["sealed"], true, "{result}");
+            assert_eq!(result["sealed"], true, "{line}: {result}");
             let saved = registration(&home).unwrap().unwrap();
             assert_eq!(saved["predecessors"][0]["sealed"], true);
+            assert_eq!(
+                listener.accept().map(|_| ()).unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock,
+                "{line}: step 6 connected to the server"
+            );
         }
         fs::remove_file(crate::locator::rex_registration(&home)).unwrap();
         assert_eq!(
@@ -316,6 +336,29 @@ mod tests {
             "removed"
         );
         assert!(registration(&home).unwrap().is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_seal_never_reports_sealed_for_a_record_or_entry_removed_meanwhile() {
+        let (root, home, state) = fixture("vanished");
+        assert_eq!(
+            seal(&home, &state, Path::new("/old")).unwrap(),
+            json!({"status":"removed"})
+        );
+        assert!(registration(&home).unwrap().is_none());
+        let path = crate::locator::rex_registration(&home);
+        fs::write(
+            &path,
+            json!({"predecessors":[{"state":"/other","sealed":false}]}).to_string(),
+        )
+        .unwrap();
+        let before = fs::read(&path).unwrap();
+        assert_eq!(
+            seal(&home, &state, Path::new("/old")).unwrap(),
+            json!({"status":"removed"})
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
         fs::remove_dir_all(root).unwrap();
     }
     #[test]

@@ -1,5 +1,8 @@
 #!/bin/sh
 set -eu
+# Imports must not create config or cache files before confirmation. The
+# Python calls here also pass -B, because -I ignores this variable.
+export PYTHONDONTWRITEBYTECODE=1
 namedrop_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 yes=no
 while [ "$#" -gt 0 ]; do
@@ -10,15 +13,17 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
-case "$(uname -s) $(uname -m)" in
+platform="$(uname -s 2>/dev/null || :) $(uname -m 2>/dev/null || :)"
+case "$platform" in
   'Darwin arm64'|'Linux x86_64'|'Linux aarch64') ;;
   *)
+    [ "$platform" = ' ' ] && platform='no platform (uname did not run)'
     printf '%s\n' \
-      "Namedrop supports macOS on Apple silicon and GNU/Linux on x86_64 or aarch64; this machine reports $(uname -s) $(uname -m)." \
+      "Namedrop supports macOS on Apple silicon and GNU/Linux on x86_64 or aarch64; this machine reports $platform." \
       'On a Mac, build from a native arm64 terminal rather than an Intel-emulated one.' >&2
     exit 69 ;;
 esac
-if ! python3 -c 'import sys' >/dev/null 2>&1; then
+if ! python3 -B -I -c 'import sys' >/dev/null 2>&1; then
   printf '%s\n' 'Namedrop needs Python 3. On macOS, install the Command Line Tools with xcode-select --install, then run sh scripts/install.sh again.' >&2
   exit 69
 fi
@@ -31,12 +36,13 @@ if ! command -v rex >/dev/null 2>&1; then
     exit 69
   fi
 fi
-# Imports must not create config or cache files before confirmation.
-export PYTHONDONTWRITEBYTECODE=1
-python3 - "$namedrop_root" "$yes" 3<&0 <<'PY'
+# The answer is read from fd 3. A closed stdin answers no.
+if (exec 9<&0) 2>/dev/null; then exec 3<&0; else exec 3</dev/null; fi
+python3 -B -I - "$namedrop_root" "$yes" <<'PY'
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
 import sys
 
@@ -55,17 +61,45 @@ def owner(state):
     return value
 
 
+def recorded_state(record):
+    """The state the record names, read as the binary reads it
+    (locator::read_install_record, and packages.rs's stale rule)."""
+    try:
+        text = record.read_bytes().decode()
+    except (OSError, UnicodeDecodeError):
+        return None
+    state = Path(text[:-1] if text.endswith('\n') else text)
+    if not text or not state.is_absolute():
+        return None
+    try:
+        launcher = os.lstat(state / 'runtime/namedrop')
+    except OSError:
+        return None
+    return state if stat.S_ISREG(launcher.st_mode) and launcher.st_mode & 0o111 else None
+
+
+def failure(stdout):
+    """The message of a failed command's envelope, or its text."""
+    try:
+        return json.loads(stdout)['error']['message']
+    except (ValueError, KeyError, TypeError):
+        return stdout.strip()
+
+
+def show_targets(targets):
+    for target in targets:
+        print(f"  {target['what']}: {target['path']}")
+
+
+AGENTS = {'codex': 'Codex', 'claude-code': 'Claude Code'}
+started = False
 try:
-    root, yes = sys.argv[1:]
+    root, yes = Path(sys.argv[1]), sys.argv[2]
+    require(os.environ.get('HOME'), 'Namedrop install needs HOME set to your home directory.')
     home = Path(os.environ['HOME'])
     require(home.is_absolute(), 'Namedrop install needs an absolute HOME.')
     record = home / '.config/namedrop/state-directory'
-    state = None
-    if record.exists():
-        recorded = Path(record.read_text().strip())
-        launcher = recorded / 'runtime/namedrop'
-        if recorded.is_absolute() and launcher.is_file() and os.access(launcher, os.X_OK):
-            state = recorded
+    state = recorded_state(record)
     recorded = state is not None
     if state is None:
         state = Path(os.environ.get('NAMEDROP_STATE_DIR') or
@@ -80,24 +114,42 @@ try:
     require(recorded or selected_owner != 'herdr',
             "ND-INSTALL-002: Namedrop's shared agent packages belong to Herdr's install in "
             f'{state}. Run Activate Namedrop in Herdr to update them.')
+    if not recorded:
+        # Herdr releases before step 6 write no record. Herdr keeps a
+        # plugin's state in $XDG_STATE_HOME/herdr/plugins/<id>, else
+        # ~/.local/state/herdr/plugins/<id> (herdr's config::state_dir).
+        base = Path(os.environ.get('XDG_STATE_HOME') or '')
+        herdr = (base if base.is_absolute() else home / '.local/state') / 'herdr/plugins/namedrop'
+        require(owner(herdr) != 'herdr',
+                f'Namedrop is already installed in Herdr ({herdr}). '
+                'Update Namedrop in Herdr first, then run sh scripts/install.sh again.')
     launcher = state / 'runtime/namedrop'
     decision = 'adopt' if recorded and selected_owner == 'herdr' else 'update' if recorded else 'new'
     if decision == 'adopt':
-        result = subprocess.run([str(launcher), '--runtime-info'], capture_output=True, text=True)
+        result = subprocess.run([str(launcher), '--runtime-info'], capture_output=True, text=True,
+                                stdin=subprocess.DEVNULL)
         try:
             supported = result.returncode == 0 and json.loads(result.stdout).get('rex_ui') == 1
         except (ValueError, AttributeError):
             supported = False
         require(supported, 'Update Namedrop in Herdr first, then run sh scripts/install.sh again.')
-    print(f'Namedrop Rex install: {decision}\nState directory: {state}\nLauncher: {launcher}')
+    # The archive's own binary finds the Rex server as `namedrop install`
+    # does, and names what that install writes. It writes nothing.
+    staged = root / 'bin/namedrop'
+    binary = staged if staged.is_file() else root / 'target/aarch64-apple-darwin/release/namedrop'
+    require(binary.is_file(), 'No built Namedrop executable was found. Run sh scripts/build.sh, or unpack the release archive again.')
+    preview = subprocess.run([str(binary), '--install-preview'], capture_output=True, text=True,
+                             stdin=subprocess.DEVNULL)
+    if preview.returncode:
+        print(preview.stderr.strip() or f'{binary} --install-preview failed with status {preview.returncode}.',
+              file=sys.stderr)
+        sys.exit(69)
+    plan = json.loads(preview.stdout)
+    print(f'Namedrop Rex install: {decision}\nState directory: {state}\nLauncher: {launcher}\nRex server: {plan["server"]}')
     print('Files to install or update:')
     if decision != 'adopt':
-        print(f'  {state}/runtime (releases, current, owner, source.json and migration records)')
-    print(f'  {record}\n  {home}/.config/namedrop/rex.json')
-    print('  namedrop.lua and the Namedrop line in init.lua beside the running Rex server\'s config')
-    print(f'  {home}/.local/bin/namedrop')
-    print(f'  Agent packages and permissions under {os.environ.get("CLAUDE_CONFIG_DIR") or home / ".claude"}')
-    print(f'  Agent packages, rules, config and sandbox root under {os.environ.get("CODEX_HOME") or home / ".codex"}')
+        print(f'  Runtime: {state}/runtime (releases, current, owner, source.json and migration records) and the store')
+    show_targets(plan['targets'])
     if decision == 'adopt':
         print("Herdr keeps its runtime and updates it. This archive publishes no runtime.")
     if yes != 'yes':
@@ -107,32 +159,65 @@ try:
         if not confirmed:
             print('Installation cancelled; no files changed.')
             sys.exit(0)
+    started = True
     if decision == 'adopt':
         command = [str(launcher), '--plugin-state', str(state), '--json', 'install',
                    '--input-json', '{"confirmed":true}']
+        print('Installing the Rex module and agent packages with Herdr\'s runtime…', flush=True)
     else:
         state.mkdir(parents=True, exist_ok=True)
-        command = [sys.executable, str(Path(root) / 'scripts/runtime.py'), root,
+        command = [sys.executable, str(root / 'scripts/runtime.py'), str(root),
                    '--state-dir', str(state), '--verify', 'install']
-    result = subprocess.run(command, capture_output=True, text=True)
-    if result.stderr:
-        print(result.stderr, end='', file=sys.stderr)
+        print('Publishing the Namedrop runtime and installing it for Rex…', flush=True)
+    # Progress and warnings go straight to the terminal; stdout is the report.
+    result = subprocess.run(command, stdout=subprocess.PIPE, text=True, stdin=subprocess.DEVNULL)
     if result.returncode:
-        if result.stdout:
-            print(result.stdout, end='', file=sys.stderr)
+        message = failure(result.stdout)
+        if message:
+            print(message, file=sys.stderr)
         sys.exit(result.returncode)
     report = json.loads(result.stdout)
     require(report.get('status') == 'ok' and report.get('operation') == 'install',
             'Namedrop did not return an installation report. Inspect setup before retrying.')
     data = report['data']
-    print(f'Module: {data["module"]}\nConfig: {data["config"]}\ninit.lua line: {data["line"]}')
-    print('Keys in effect: ' + json.dumps(data['keys'], ensure_ascii=False))
+    print(f'Namedrop is installed for Rex.\nModule: {data["module"]}\nConfig: {data["config"]} (init.lua line: {data["line"]})')
+    print('Installed or updated:')
+    if decision != 'adopt':
+        print(f'  Runtime: {state}/runtime and the store')
+    show_targets(data.get('targets') or plan['targets'])
     if data.get('manual_config'):
+        if data.get('reason'):
+            print(data['reason'])
         print(data['instruction'])
+    keys = data.get('keys') or []
+    if keys:
+        print('Keys:')
+    for key in keys:
+        status = key.get('status')
+        effect = ('in effect' if status == 'in_effect'
+                  else f"shadowed by {key.get('effective_action')} from {key.get('source')}" if status == 'shadowed'
+                  else 'not bound')
+        print(f"  {key.get('key')}: {key.get('action')} ({effect})")
+    shell = data.get('shell_command')
+    if isinstance(shell, dict):
+        print(f"Shell command: {shell.get('path')}")
+        if shell.get('next_step'):
+            print(f"  {shell['next_step']}")
+        if shell.get('current_shell'):
+            print(f"  current_shell: {shell['current_shell']}")
     guidance = data.get('agent_integration_hook_activation')
     if guidance:
-        print('Agent hook approval: ' + json.dumps(guidance, ensure_ascii=False))
+        print('Agent hooks:')
+        for agent, value in guidance.items():
+            steps = value.get('steps') if isinstance(value, dict) else None
+            print(f'  {AGENTS.get(agent, agent)}:')
+            for step in steps or []:
+                print(f'    {step}')
     print('In the Rex palette, run Activate Namedrop, then Name this pane. Start new agent sessions.')
+except KeyboardInterrupt:
+    print('\nNamedrop Rex installation interrupted. Run sh scripts/install.sh again to finish it.' if started
+          else '\nInstallation cancelled; no files changed.', file=sys.stderr)
+    sys.exit(130)
 except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError) as error:
     print(f'Namedrop Rex installation stopped: {error}', file=sys.stderr)
     sys.exit(2)

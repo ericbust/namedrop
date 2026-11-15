@@ -89,9 +89,19 @@ fn command_guard_inner(
     }
     retirement::check(state, allow_removed)?;
     if fs::symlink_metadata(runtime.join("migration.json")).is_ok() {
-        return Err("Namedrop activation was interrupted. Reopen Update Namedrop to finish; this command made no changes.".into());
+        return Err(interrupted(state));
     }
     Ok(Some(guard))
+}
+
+/// The refusal while `migration.json` waits for the next runtime.py run,
+/// worded for the host whose install that run is.
+fn interrupted(state: &std::path::Path) -> String {
+    if retirement::standalone(state).unwrap_or(false) {
+        "Namedrop installation was interrupted. Run sh scripts/install.sh again to finish; this command made no changes.".into()
+    } else {
+        "Namedrop activation was interrupted. Reopen Update Namedrop to finish; this command made no changes.".into()
+    }
 }
 
 /// A long-lived process that holds the command gate calls this right after

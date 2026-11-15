@@ -46,6 +46,23 @@ fn main() -> ExitCode {
         println!("{}", include_str!("../runtime.json").trim());
         return ExitCode::SUCCESS;
     }
+    // install.sh asks this before its confirmation. Like the contract query,
+    // it reads no state and writes nothing.
+    if env::args_os().skip(1).eq(["--install-preview"]) {
+        return match namedrop::rex_ui::install_preview(
+            &namedrop::InheritedDirectories::from_environment(),
+            inherited,
+        ) {
+            Ok(preview) => {
+                println!("{preview}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                ExitCode::from(69)
+            }
+        };
+    }
     let raw: Vec<_> = env::args_os().skip(1).collect();
     let raw_state = match raw.as_slice() {
         [mode, state, ..]
@@ -265,7 +282,11 @@ fn main() -> ExitCode {
     }
     if cli.rex_ensure_from_server() {
         let parent = unsafe { libc::getppid() } as u32;
-        let Some(endpoint) = namedrop::rex_ui::server_start_endpoint(inherited, parent) else {
+        let Some(endpoint) = namedrop::rex_ui::server_start_endpoint(
+            inherited,
+            parent,
+            namedrop::rex_ui::local_endpoint,
+        ) else {
             return ExitCode::SUCCESS;
         };
         let state = selected_state;
@@ -436,9 +457,6 @@ fn main() -> ExitCode {
             cli.result_format(io::stdout().is_terminal()),
         );
     }
-    if let Some(name) = cli.rex_action() {
-        return rex_action_result(run_rex_action(name, &cli.runtime, inherited));
-    }
     if cli.dashboard_tailscale() == Some(false) {
         let result = selected_state
             .as_deref()
@@ -457,6 +475,11 @@ fn main() -> ExitCode {
             .clone()
             .or_else(|| endpoint_of(location(&cli.runtime, inherited)));
         let _ = namedrop::reminder::ensure_clock(state, socket.as_deref(), Starter::Caller);
+    }
+    // After the reminder clock, which a palette action starts as its command
+    // does.
+    if let Some(name) = cli.rex_action() {
+        return rex_action_result(run_rex_action(name, &cli.runtime, inherited));
     }
     if cli.is_dashboard_server() {
         let Some(state) = selected_state else {
@@ -1096,7 +1119,6 @@ fn run_rex_action(
     options: &RuntimeOptions,
     inherited: &dyn Inherited,
 ) -> Result<serde_json::Value, String> {
-    use namedrop::rex_ui::Action;
     if options
         .endpoint
         .as_deref()
@@ -1105,26 +1127,32 @@ fn run_rex_action(
     {
         return Err("Namedrop Rex actions need a rex: --endpoint".into());
     }
-    match namedrop::rex_ui::action(name)? {
-        Action::Popup(mode) => naming_ui::launch(options, inherited, mode),
-        Action::Activate => with_runtime_options(options, inherited, rex_activate),
-        Action::Channels => with_runtime_options(options, inherited, |runtime| {
-            namedrop::dashboard::open(runtime, true, None, None)
-        }),
-        Action::Pause | Action::Resume => run_operation(
-            if name == "pause" {
-                "worktree.pause"
-            } else {
-                "worktree.resume"
-            },
-            serde_json::json!({}),
-            OperationKind::Control,
-            options,
-            inherited,
-        ),
-        Action::Deactivate => {
-            run_lifecycle("deactivate", serde_json::json!({}), options, inherited)
+    let action = namedrop::rex_ui::action(name)?;
+    with_runtime_options(options, inherited, |runtime| rex_action_in(runtime, action))
+}
+
+/// A palette action, run as its command runs, with the helpers that command
+/// starts: activation starts the deferred-command worker, as `activate` does.
+fn rex_action_in(
+    runtime: &Runtime<'_>,
+    action: namedrop::rex_ui::Action,
+) -> Result<serde_json::Value, String> {
+    use namedrop::rex_ui::Action;
+    let empty = serde_json::json!({});
+    match action {
+        Action::Popup(mode) => naming_ui::launch_in_runtime(runtime, mode),
+        Action::Activate => {
+            let report = rex_activate(runtime);
+            let _ = namedrop::deferred_commands::ensure_worker(
+                runtime.state_directory,
+                runtime.session_socket_id,
+            );
+            report
         }
+        Action::Channels => namedrop::dashboard::open(runtime, true, None, None),
+        Action::Pause => execute_control_operation("worktree.pause", empty, runtime),
+        Action::Resume => execute_control_operation("worktree.resume", empty, runtime),
+        Action::Deactivate => execute_lifecycle_operation("deactivate", empty, runtime),
     }
 }
 
@@ -1217,6 +1245,65 @@ mod rex_action_tests {
                 }]
             );
             assert!(!root.join("home/.config/herdr/config.toml").exists());
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    /// The U6 review's F3: each palette action runs its own command, and an
+    /// activation whose setup needs attention fails with the line that says so.
+    #[test]
+    fn palette_actions_run_their_own_commands_and_an_incomplete_activation_fails() {
+        use namedrop::rex_ui::Action;
+        for complete in [true, false] {
+            let root =
+                env::temp_dir().join(format!("nd-u6-actions-{}-{complete}", std::process::id()));
+            fs::create_dir_all(root.join("home")).unwrap();
+            if !complete {
+                // Codex's package cannot go where a file stands.
+                fs::write(root.join("home/.agents"), "").unwrap();
+            }
+            let fake = FakeMux::world()
+                .endpoint("rex:/tmp/u6-no-server.sock")
+                .space("s1")
+                .pane("p1")
+                .tab("window:w")
+                .build();
+            let mux: Arc<dyn Mux> = Arc::new(fake);
+            let ids = ProcessIds::default();
+            let home_directory = root.join("home");
+            let runtime = LifecycleRuntime {
+                state_directory: &root.join("state"),
+                home_directory: Some(&home_directory),
+                agent_config: namedrop::AgentConfigDirectories::default(),
+                cwd: &root,
+                workspace_id: Some("s1"),
+                current_pane_id: Some("p1"),
+                session_socket_id: "rex:/tmp/u6-no-server.sock",
+                mux: &mux,
+                clock: &SystemClock,
+                ids: &ids,
+            };
+            let activated = rex_action_in(&runtime, Action::Activate);
+            if !complete {
+                // The space is active, and the line says what remains.
+                assert_eq!(
+                    activated.unwrap_err(),
+                    "Namedrop is active, but part of its setup needs attention. Namedrop Doctor lists the repair."
+                );
+                fs::remove_dir_all(root).unwrap();
+                continue;
+            }
+            activated.unwrap();
+            for (action, paused) in [
+                (Action::Pause, true),
+                (Action::Resume, false),
+                (Action::Pause, true),
+            ] {
+                let report = rex_action_in(&runtime, action).unwrap();
+                assert_eq!(report["state"]["paused"], paused, "{action:?}: {report}");
+            }
+            let report = rex_action_in(&runtime, Action::Deactivate).unwrap();
+            assert_eq!(report["deactivated"], true, "{report}");
             fs::remove_dir_all(root).unwrap();
         }
     }

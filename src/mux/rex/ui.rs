@@ -74,6 +74,20 @@ fn fault(fault: Fault) -> MuxError {
     super::wire::mux_error(fault, Gone::Pane)
 }
 
+/// Whether the loaded module's path and the registered one name one file:
+/// the same text, or the same file once links are resolved, as `/tmp` and
+/// `/private/tmp` are on macOS.
+fn same_file(loaded: Option<&str>, registered: Option<&str>) -> bool {
+    let (Some(loaded), Some(registered)) = (loaded, registered) else {
+        return false;
+    };
+    loaded == registered
+        || matches!(
+            (std::fs::canonicalize(loaded), std::fs::canonicalize(registered)),
+            (Ok(a), Ok(b)) if a == b
+        )
+}
+
 fn readback(record: &Value, keymap: &Value, about: Result<Value, Fault>) -> Value {
     let error = about.as_ref().err().map(|e| fault(e.clone()).to_string());
     let about = about.unwrap_or(Value::Null);
@@ -86,14 +100,10 @@ fn readback(record: &Value, keymap: &Value, about: Result<Value, Fault>) -> Valu
     let module = about["module"]
         .as_str()
         .map(|p| p.strip_prefix('@').unwrap_or(p));
-    let confirmed = module
-        .is_some_and(|p| Path::new(p).is_absolute() && Some(p) == record["module"].as_str())
-        && about["launcher"]
-            .as_str()
-            .is_some_and(|s| Some(s) == record["launcher"].as_str())
-        && about["state"]
-            .as_str()
-            .is_some_and(|s| Some(s) == record["state"].as_str())
+    let confirmed = module.is_some_and(|p| Path::new(p).is_absolute())
+        && same_file(module, record["module"].as_str())
+        && same_file(about["launcher"].as_str(), record["launcher"].as_str())
+        && same_file(about["state"].as_str(), record["state"].as_str())
         && actions_complete;
     let bindings = keymap["bindings"].as_array().cloned().unwrap_or_default();
     let keys: Vec<_> = crate::rex_ui::ACTIONS
@@ -108,13 +118,13 @@ fn readback(record: &Value, keymap: &Value, about: Result<Value, Fault>) -> Valu
                 })
                 .collect();
             let bound = on_key.iter().any(|b| b["action"] == action);
-            let top = on_key.into_iter().find(|b| {
-                b["action"]
-                    .as_str()
-                    .is_some_and(|name| name.contains('.') || present(name))
-            });
+            // The newest binding wins, whatever it names: one whose action
+            // no file defines still shadows Namedrop's (the U6 review's F5).
+            let top = on_key.into_iter().next();
+            // Skipped at load, as for a key bound before the module, or
+            // removed since with `rex.unbind`: the keymap cannot tell which.
             let status = if !bound {
-                "skipped"
+                "not_bound"
             } else if top.is_some_and(|b| b["action"] == action) {
                 "in_effect"
             } else {
@@ -222,6 +232,27 @@ mod tests {
             readback(&record(), &keymap(), Err(Fault::Closed("no about".into())))["confirmed"],
             false
         );
+        // Two spellings of one launcher and state are one install.
+        let root = std::env::temp_dir().join(format!("nd-u6-spelling-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("real/runtime")).unwrap();
+        std::fs::write(root.join("real/runtime/namedrop"), "").unwrap();
+        std::os::unix::fs::symlink(root.join("real"), root.join("alias")).unwrap();
+        let mut spelled = record();
+        spelled["launcher"] = json!(root.join("real/runtime/namedrop"));
+        spelled["state"] = json!(root.join("real"));
+        let mut loaded = about();
+        loaded["launcher"] = json!(root.join("alias/runtime/namedrop"));
+        loaded["state"] = json!(root.join("alias"));
+        assert_eq!(
+            readback(&spelled, &keymap(), Ok(loaded.clone()))["confirmed"],
+            true
+        );
+        loaded["state"] = json!(root.join("alias/runtime"));
+        assert_eq!(
+            readback(&spelled, &keymap(), Ok(loaded))["confirmed"],
+            false
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -229,13 +260,20 @@ mod tests {
         let report = readback(&record(), &keymap(), Ok(about()));
         let keys = report["keys"].as_array().unwrap();
         assert_eq!(keys.len(), 5);
-        assert_eq!(keys[0]["status"], "in_effect");
+        // A newer binding of an action no file defines shadows the key too.
+        assert_eq!(keys[0]["status"], "shadowed");
+        assert_eq!(keys[0]["source"], "init.lua:9");
+        assert_eq!(keys[0]["effective_action"], "not_available");
         assert_eq!(keys[1]["status"], "shadowed");
         assert_eq!(keys[1]["source"], "init.lua:3");
         assert_eq!(keys[1]["effective_action"], "mine");
         assert_eq!(keys[2]["status"], "in_effect");
-        assert_eq!(keys[3]["status"], "skipped");
-        assert_eq!(keys[4]["status"], "skipped");
+        assert_eq!(keys[3]["status"], "not_bound");
+        assert_eq!(keys[4]["status"], "not_bound");
+        let mut map = keymap();
+        map["bindings"].as_array_mut().unwrap().remove(0);
+        let report = readback(&record(), &map, Ok(about()));
+        assert_eq!(report["keys"][0]["status"], "in_effect");
         for client_action in ["client.key.forward", "pane.split"] {
             let mut map = keymap();
             map["bindings"].as_array_mut().unwrap().insert(
