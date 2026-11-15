@@ -507,25 +507,13 @@ impl RemoteHosts for NoRemoteHosts {
 
 /// The labels `rex hosts list --json` prints, byte for byte, and the
 /// addresses each one dials, each in the one spelling of `address_spelling`,
-/// sorted, and whether it reached the home that keeps them, with what
-/// `rex` warned about the list.
-#[derive(Debug)]
+/// sorted, with what `rex` warned about the list, as when it could not
+/// reach the home that keeps them.
+#[derive(Debug, Default)]
 pub(crate) struct Hosts {
     labels: Vec<String>,
     addresses: Vec<Vec<String>>,
-    home_reached: bool,
     warnings: Vec<String>,
-}
-
-impl Default for Hosts {
-    fn default() -> Self {
-        Self {
-            labels: Vec::new(),
-            addresses: Vec::new(),
-            home_reached: true,
-            warnings: Vec::new(),
-        }
-    }
 }
 
 impl RemoteHosts for Hosts {
@@ -556,7 +544,6 @@ impl Hosts {
         let mut hosts = Self::default();
         let home = &listed["home"];
         if home["reached"] == false {
-            hosts.home_reached = false;
             hosts.warnings.push(format!(
                 "rex hosts list could not reach your Rex home {}, so its hosts may be missing.",
                 home["label"].as_str().unwrap_or("")
@@ -607,10 +594,12 @@ impl Hosts {
         same
     }
 
-    /// Whether the list may lack a host it would list: one it could not
-    /// read from the home that keeps it.
+    /// Whether the list may lack a host it would list: `rex` warned about
+    /// it, as when it could not read the home that keeps the hosts, or this
+    /// machine's own server, whose hosts it then leaves out, or showed a
+    /// server's hosts from an old copy.
     pub(crate) fn incomplete(&self) -> bool {
-        !self.home_reached
+        !self.warnings.is_empty()
     }
 
     #[cfg(test)]

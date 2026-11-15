@@ -516,6 +516,41 @@ fn an_item_stays_queued_while_rex_hosts_list_cannot_reach_your_home() {
     );
 }
 
+/// A host list that reached the home but warns that this machine's own
+/// server, and so its hosts, were not, may lack the label too, so an item
+/// for it stays queued until the list comes without the warning.
+#[test]
+fn an_item_stays_queued_while_rex_hosts_list_misses_this_machine_s_hosts() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    sent(&space, &rex);
+    let listed = |warnings: Value| {
+        fs::write(
+            rex.directory.join("hosts.json"),
+            json!({"home": {"label": "a.s", "endpoint": "unix:///tmp/a.sock",
+                    "this_machine": false, "reached": true},
+                "hosts": [], "warnings": warnings})
+            .to_string(),
+        )
+        .unwrap();
+    };
+    listed(
+        json!([{"server": "this machine", "message": "its hosts are missing because its \
+        server is not reachable: no Rex server is running at /x/server.sock, and autostart \
+        is disabled"}]),
+    );
+    let (waits, _) = work_for(&space, &rex, 2);
+    assert_eq!(waits, [BACKOFF[0], BACKOFF[1]]);
+    assert_eq!(outbound(&space)[0].0, "queued");
+    assert!(rex.requests().is_empty());
+    listed(json!([]));
+    work_for(&space, &rex, 1);
+    assert_eq!(
+        outbound(&space)[0].1.as_deref(),
+        Some("devbox is no longer in your Rex hosts")
+    );
+}
+
 #[test]
 fn an_item_pinned_to_one_host_id_is_sent_to_it_after_the_label_moved() {
     let space = Space::new(REX);

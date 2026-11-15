@@ -164,8 +164,9 @@ fn round(run: &mut Run<'_>, reading: &mut Reading) -> Round {
             let labels = hosts.same_host(run.label);
             (hosts, labels)
         }
-        // The home that keeps the label was not read, so it may still be
-        // listed there.
+        // `rex` warned that the list may lack hosts, as when it could not
+        // read the home or this machine's own server, so the label may
+        // still be listed there.
         Ok(hosts) if hosts.incomplete() => return Round::Kept,
         Ok(_) => {
             let reason = format!("{} is no longer in your Rex hosts", run.label);
