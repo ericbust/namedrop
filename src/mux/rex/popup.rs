@@ -17,8 +17,9 @@ impl<W: Wire> RexMux<W> {
                 launcher.display()
             )));
         }
-        let mut call = self.call()?;
         let target = &popup.target;
+        let (title, from) = words(popup.screen);
+        let mut call = self.call()?;
         call.attach(target.space.as_str())?;
         let process: ProcessReply = wire::parse(call.block(
             target.space.as_str(),
@@ -26,16 +27,20 @@ impl<W: Wire> RexMux<W> {
             "process",
             json!({}),
         )?)?;
-        match process.foreground.as_ref().map(|p| p.name.as_str()) {
-            Some("herdr") => {
-                return Err(MuxError::Unavailable(
-                    "This pane is running Herdr. Use Herdr's own Name this pane.".into(),
-                ));
+        match process.foreground.as_ref() {
+            Some(foreground) if foreground.name == "herdr" => {
+                return Err(MuxError::Unavailable(format!(
+                    "This pane is running Herdr. Use Herdr's own {title}."
+                )));
             }
-            Some("namedrop") => {
-                return Err(MuxError::Unavailable(
-                    "This pane is running Namedrop. Run this action from the pane to name.".into(),
-                ));
+            // A launch typed in the target pane is that pane's foreground
+            // itself. The server is proven local, so its pids are ours.
+            Some(foreground)
+                if foreground.name == "namedrop" && foreground.pid != std::process::id() =>
+            {
+                return Err(MuxError::Unavailable(format!(
+                    "This pane is running Namedrop. Open {title} from {from}."
+                )));
             }
             _ => {}
         }
@@ -55,6 +60,21 @@ impl<W: Wire> RexMux<W> {
         });
         call.request("session.new_layer", request, Gone::Pane)
             .map(Applied::Opened)
+    }
+}
+
+/// Each screen's title, as Herdr's menu and the palette name it, and the pane
+/// it is opened from.
+fn words(screen: PopupScreen) -> (&'static str, &'static str) {
+    match screen {
+        PopupScreen::Name => ("Name this pane", "the pane to name"),
+        PopupScreen::Manage => (
+            "Manage Namedrop names and agents",
+            "a pane in the space to manage",
+        ),
+        PopupScreen::Doctor => ("Namedrop Doctor", "the pane to check"),
+        PopupScreen::Status => ("Agent status", "the agent's pane"),
+        PopupScreen::Tour => ("Namedrop tour", "a pane in the space"),
     }
 }
 
@@ -237,28 +257,79 @@ mod tests {
         );
     }
 
+    fn opened_layer(mux: &RexMux<Script>) -> bool {
+        mux.wire
+            .calls()
+            .iter()
+            .any(|s| s.starts_with("session.new_layer"))
+    }
+
+    fn layer_script(facts: Value) -> Script {
+        let base = one_block(facts);
+        Script::new(move |request, events| {
+            if request.short() == "session.new_layer" {
+                Ok(json!({"block_ids":["layer:b"]}))
+            } else {
+                base.answer(request, events)
+            }
+        })
+    }
+
     #[test]
-    fn herdr_and_any_namedrop_foreground_are_refused_before_a_layer_request() {
-        for (name, message) in [
-            ("herdr", "Use Herdr's own Name this pane"),
-            ("namedrop", "from the pane to name"),
+    fn herdr_and_any_other_namedrop_foreground_are_refused_before_a_layer_request() {
+        for (screen, herdr, namedrop) in [
+            (
+                PopupScreen::Name,
+                "This pane is running Herdr. Use Herdr's own Name this pane.",
+                "This pane is running Namedrop. Open Name this pane from the pane to name.",
+            ),
+            (
+                PopupScreen::Manage,
+                "This pane is running Herdr. Use Herdr's own Manage Namedrop names and agents.",
+                "This pane is running Namedrop. Open Manage Namedrop names and agents from a pane in the space to manage.",
+            ),
+            (
+                PopupScreen::Doctor,
+                "This pane is running Herdr. Use Herdr's own Namedrop Doctor.",
+                "This pane is running Namedrop. Open Namedrop Doctor from the pane to check.",
+            ),
+            (
+                PopupScreen::Status,
+                "This pane is running Herdr. Use Herdr's own Agent status.",
+                "This pane is running Namedrop. Open Agent status from the agent's pane.",
+            ),
+            (
+                PopupScreen::Tour,
+                "This pane is running Herdr. Use Herdr's own Namedrop tour.",
+                "This pane is running Namedrop. Open Namedrop tour from a pane in the space.",
+            ),
         ] {
-            let state = State::new();
-            let launcher = launcher(&state);
-            let mut facts = fixture("idle-login");
-            facts["process"]["foreground"]["name"] = json!(name);
-            let mux = rex(one_block(facts), &state, Local::default());
-            let error = mux
-                .open_popup(&popup(PopupScreen::Name, &state), &launcher)
-                .unwrap_err();
-            assert!(error.to_string().contains(message), "{error}");
-            assert!(
-                !mux.wire
-                    .calls()
-                    .iter()
-                    .any(|s| s.starts_with("session.new_layer"))
-            );
+            for (name, message) in [("herdr", herdr), ("namedrop", namedrop)] {
+                let state = State::new();
+                let launcher = launcher(&state);
+                let mut facts = fixture("idle-login");
+                facts["process"]["foreground"]["name"] = json!(name);
+                let mux = rex(layer_script(facts), &state, Local::default());
+                let error = mux
+                    .open_popup(&popup(screen, &state), &launcher)
+                    .unwrap_err();
+                assert_eq!(error.to_string(), message);
+                assert!(!opened_layer(&mux));
+            }
         }
+    }
+
+    #[test]
+    fn a_launch_typed_in_the_target_pane_opens_its_layer() {
+        let state = State::new();
+        let launcher = launcher(&state);
+        let mut facts = fixture("idle-login");
+        facts["process"]["foreground"]["name"] = json!("namedrop");
+        facts["process"]["foreground"]["pid"] = json!(std::process::id());
+        let mux = rex(layer_script(facts), &state, Local::default());
+        mux.open_popup(&popup(PopupScreen::Doctor, &state), &launcher)
+            .unwrap();
+        assert!(opened_layer(&mux));
     }
 
     #[test]
