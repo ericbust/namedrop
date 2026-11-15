@@ -247,6 +247,13 @@ class ActivationChecks(unittest.TestCase):
             self.assertEqual(os.readlink(chosen / 'runtime/current'), selected)
             self.assertEqual(foreign.read_text(), 'preserve')
             owner.unlink()
+            misspelled = [*args[:5], '--verifiy', *args[6:]]
+            refused = subprocess.run(misspelled, env=env, cwd=base, capture_output=True, text=True, timeout=60)
+            self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
+                             (2, '', 'Namedrop runtime activation stopped: Usage: runtime.py ROOT '
+                                     '[--state-dir DIR --verify activate] [ARGUMENT...]\n'))
+            self.assertEqual(os.readlink(chosen / 'runtime/current'), selected)
+            self.assertFalse(owner.exists())
             args[args.index('activate')] = 'install'
             rejected = subprocess.run(args, env=env, cwd=base, capture_output=True, text=True, timeout=60)
             self.assertEqual((rejected.returncode, rejected.stdout, rejected.stderr),
@@ -303,7 +310,24 @@ class ActivationChecks(unittest.TestCase):
             self.assertEqual(json.loads(result.stdout)['data']['state_directory'], env['HERDR_PLUGIN_STATE_DIR'])
             self.assertEqual((base / 'state/runtime/owner').read_text(), 'herdr\n')
 
-    def test_run_sh_forwards_state_and_pane(self):
+    def test_run_sh_is_the_released_one(self):
+        # Every released updater calls an update live only when the new
+        # scripts/run.sh is byte for byte the installed one (prepare_target),
+        # so an edit makes the update to that release a session refresh. This
+        # digest is run.sh in v1.7.9 through v1.11.1; change it only with a
+        # release that is meant to need a session refresh.
+        self.assertEqual(hashlib.sha256((REPO / 'scripts/run.sh').read_bytes()).hexdigest(),
+                         'f71ed068a60e14590a1d056b5fe7dd8ce96ec8f229c0dab3cdc9896c047fadc7')
+
+    def test_scripts_import_no_socket_module(self):
+        # macOS's system Python caches each newly imported module under HOME;
+        # update.py imports socket only when a Rex session needs checking.
+        result = subprocess.run([sys.executable, '-I', '-B', '-c', 'import sys; sys.path.insert(0, sys.argv[1]); '
+                                 'import runtime, update; print("socket" in sys.modules)', str(REPO / 'scripts')],
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual((result.returncode, result.stdout), (0, 'False\n'), result.stderr)
+
+    def test_run_sh_passes_the_pane_and_arguments(self):
         with tempfile.TemporaryDirectory(prefix='namedrop-u4-') as directory:
             base = Path(directory)
             env = environment(base)
@@ -361,7 +385,14 @@ class ActivationChecks(unittest.TestCase):
                     update.preflight()
             schema(path)
             socket = 'rex:' + listening
-            rex_agent(path, socket, 'block', alias='alpha', runtime='claude-code', status='working')
+            rex_agent(path, socket, 'block', alias='alpha', runtime='claude-code', status='idle')
+            with contextlib.closing(sqlite3.connect(path)) as db, db:
+                # The kind is the session's own registration, and the status
+                # its latest observation.
+                db.execute("INSERT INTO integration_registrations VALUES (?, 's', 'older', 'block-address', "
+                           "'older-session', 'codex', 'v', 'p', 1)", (socket,))
+                db.execute("INSERT INTO agent_session_observations VALUES (?, 's', 'newer', 'block-address', "
+                           "'block-session', 'working', 6)", (socket,))
             # A Herdr binding with an observed session: Herdr's own survey
             # reports it, so the store's copy must not count a second time.
             rex_agent(path, listening, 'herdr-pane', alias='beta', runtime='claude-code', status='idle')
@@ -394,17 +425,17 @@ class ActivationChecks(unittest.TestCase):
                 migration.write_text(json.dumps(dict(sessions=[], codex_ready=False, packages_ready=True)))
                 self.assertTrue(update.ready(*update.preflight(live=True)))
                 with sqlite3.connect(path) as db:
-                    db.execute("UPDATE integration_registrations SET runtime='codex'")
+                    db.execute("UPDATE integration_registrations SET runtime='codex' WHERE agent_session_id='block-session'")
                 self.assertFalse(update.ready(*update.preflight(live=True)))
                 with sqlite3.connect(path) as db:
-                    db.execute("INSERT INTO agent_session_observations VALUES (?, 's','ended','block-address','','unknown',5)", (socket,))
+                    db.execute("INSERT INTO agent_session_observations VALUES (?, 's','ended','block-address','','unknown',7)", (socket,))
                 self.assertTrue(update.ready(*update.preflight()))
                 with sqlite3.connect(path) as db:
                     db.execute("DELETE FROM agent_session_observations WHERE observation_id='ended'")
                     db.execute('UPDATE pane_bindings SET active=0')
                 self.assertTrue(update.ready(*update.preflight()))
                 with sqlite3.connect(path) as db:
-                    db.execute('UPDATE pane_bindings SET active=1, bound_at_ms=6')
+                    db.execute('UPDATE pane_bindings SET active=1, bound_at_ms=7')
                 self.assertTrue(update.ready(*update.preflight()))
                 with sqlite3.connect(path) as db:
                     db.execute('UPDATE pane_bindings SET bound_at_ms=5')
