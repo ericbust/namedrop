@@ -76,6 +76,8 @@ def plugin(p, **extra):
 
 report = []
 STEP_FAILURES = []
+# Each build refuses these remote-shaped sends by design; any other exit fails the flow.
+EXPECTED_EXIT = {"send-remote-shaped-0": 64, "send-remote-shaped-2": 65, "send-remote-shaped-3": 64}
 
 import socket as _socket
 import threading
@@ -127,7 +129,7 @@ def run(label, env, args, stdin="", settle=0.5):
     except subprocess.TimeoutExpired:
         code, stdout, stderr = "TIMEOUT", "", ""
     time.sleep(settle)
-    if code != 0 and label != "doctor":
+    if label != "doctor" and code != EXPECTED_EXIT.get(label, 0):
         STEP_FAILURES.append((label, code))
     report.append(f"## {label}\nexit={code}\n--stdout\n{norm(stdout)}\n--stderr\n{norm(stderr)}")
     return stdout
