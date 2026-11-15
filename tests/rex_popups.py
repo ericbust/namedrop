@@ -269,7 +269,13 @@ def main():
         stopped = stop_probe_processes(root)
         if server.poll() is None:
             server.terminate()
-            server.wait(timeout=10)
+            try:
+                server.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                # Still scan for strays and write the report.
+                server.kill()
+                server.wait()
+                evidence["server_killed"] = True
         server_log.close()
         stopped += [p for p in stop_probe_processes(root, quiet=5) if p not in stopped]
         evidence["stopped"] = stopped
