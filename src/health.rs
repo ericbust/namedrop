@@ -1329,7 +1329,7 @@ fn status_queue_issues(queue: &std::path::Path, now_ms: u64) -> Vec<HealthIssue>
 }
 
 /// One notice for the replies the relay kept for other machines that
-/// expired before those machines collected them.
+/// expired before those machines acknowledged them.
 fn expired_replies_issue(expired: &[(String, i64)]) -> Option<HealthIssue> {
     if expired.is_empty() {
         return None;
@@ -1342,9 +1342,9 @@ fn expired_replies_issue(expired: &[(String, i64)]) -> Option<HealthIssue> {
     Some(issue(
         "ND-RELAY-001",
         HealthSeverity::Info,
-        "Replies for another machine expired before its Namedrop collected them.",
+        "Replies for another machine expired before its Namedrop acknowledged them.",
         &format!(
-            "This machine keeps each reply for a remote sender for 7 days, until that sender's Namedrop collects it. These expired: {senders}."
+            "This machine keeps each reply for a remote sender for 7 days, until that sender's Namedrop acknowledges it. These expired: {senders}."
         ),
         HealthRepairKind::HumanDecision,
         "Nothing needs doing. A remote sender collects replies while it has a thread open with this machine.",
@@ -1399,11 +1399,11 @@ fn relay_conditions_issue(conditions: &[crate::relay::store::Conditions]) -> Opt
             match condition.lost {
                 0 => {}
                 1 => found.push(
-                    "it let go of 1 reply for this machine before this machine collected it"
+                    "it let go of 1 reply for this machine before this machine acknowledged it"
                         .to_owned(),
                 ),
                 count => found.push(format!(
-                    "it let go of {count} replies for this machine before this machine collected them"
+                    "it let go of {count} replies for this machine before this machine acknowledged them"
                 )),
             }
             if condition.cannot_reply {
@@ -1753,7 +1753,7 @@ mod tests {
         let paused = "Namedrop holds as many of its replies as it can for threads the Automatic Reply Limit paused, so it keeps the rest until a person's message or Continue resumes them";
         assert!(
             notice.explanation.ends_with(&format!(
-                "By host: devbox: 3 replies answered a message sent to another host, and were dropped, and {paused}; studio: {paused}; lab: it keeps no more replies for this machine, so Namedrop sends it nothing new until this machine collects them; pi: 1 reply answered a message sent to another host, and was dropped; mini: it let go of 4 replies for this machine before this machine collected them; nano: it let go of 1 reply for this machine before this machine collected it, and it keeps no more replies for this machine, so Namedrop sends it nothing new until this machine collects them."
+                "By host: devbox: 3 replies answered a message sent to another host, and were dropped, and {paused}; studio: {paused}; lab: it keeps no more replies for this machine, so Namedrop sends it nothing new until this machine collects them; pi: 1 reply answered a message sent to another host, and was dropped; mini: it let go of 4 replies for this machine before this machine acknowledged them; nano: it let go of 1 reply for this machine before this machine acknowledged it, and it keeps no more replies for this machine, so Namedrop sends it nothing new until this machine collects them."
             )),
             "{}",
             notice.explanation

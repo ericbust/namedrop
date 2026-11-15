@@ -166,7 +166,7 @@ pub(crate) struct Reply {
 
 /// The replies of `from` to the A message `re` that B let go of: those it
 /// discarded because it kept `OUTBOX_LIMIT` replies for A, and those that
-/// expired before A collected them, counted since `since`.
+/// expired before A acknowledged them, counted since `since`.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct Lost {
     pub re: String,

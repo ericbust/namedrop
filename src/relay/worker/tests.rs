@@ -587,15 +587,15 @@ fn a_sender_is_told_once_of_each_new_loss_b_names() {
     work_for(&space, &rex, 1);
     assert_eq!(
         told()[1][3],
-        "The machine of @bob@devbox let go of 1 reply to this message that waited 7 days for \
-         this machine to collect them."
+        "The machine of @bob@devbox let go of 1 reply to this message that stayed in its outbox \
+         for 7 days without acknowledgement."
     );
     work_for(&space, &rex, 1);
     assert_eq!(
         told()[2][3],
         "The machine of @bob@devbox let go of 5 replies to this message: 3 because it already \
-         kept 10,000 replies for this machine, and 2 that waited 7 days for this machine to \
-         collect them."
+         kept 10,000 replies for this machine, and 2 that stayed in its outbox for 7 days \
+         without acknowledgement."
     );
     assert_eq!(doctor()[0].lost, 8);
 }

@@ -1,7 +1,7 @@
 //! The notices a sender on A gets in its thread from a remote agent's relay
 //! author: that an item for that agent failed or expired, that the
 //! Automatic Reply Limit holds that agent's replies, that A refused one or
-//! let held ones expire, or that B let go of replies before A collected
+//! let held ones expire, or that B let go of replies before A acknowledged
 //! them.
 
 use super::{
@@ -95,8 +95,8 @@ pub(crate) fn tell(
     }
 }
 
-/// The notice that B let go of replies to a message before A collected
-/// them.
+/// The notice that B let go of replies to a message before A acknowledged
+/// them. A may have collected one that expired and not yet acknowledged it.
 fn lost_notice(lost: &LostReplies) -> Notice<'_> {
     let replies = |count: i64| {
         if count == 1 {
@@ -107,7 +107,7 @@ fn lost_notice(lost: &LostReplies) -> Notice<'_> {
     };
     let (alias, label) = (&lost.remote_alias, &lost.label);
     const FULL: &str = "because it already kept 10,000 replies for this machine";
-    const WAITED: &str = "that waited 7 days for this machine to collect them";
+    const WAITED: &str = "that stayed in its outbox for 7 days without acknowledgement";
     let why = match (lost.new_discarded, lost.new_expired) {
         (discarded, 0) => format!("{} to this message {FULL}", replies(discarded)),
         (0, expired) => format!("{} to this message {WAITED}", replies(expired)),
