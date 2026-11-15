@@ -1,0 +1,13 @@
+# The lab's ssh config. `testbed rex-remote up` writes it to LAB/ssh/config with @LAB@ replaced
+# by the lab's directory. Nothing here reads ~/.ssh: one key, one known_hosts, no agent, no
+# global known_hosts, and no shared control socket.
+Host *
+  IdentityFile @LAB@/ssh/id_lab
+  IdentitiesOnly yes
+  IdentityAgent none
+  UserKnownHostsFile @LAB@/ssh/known_hosts
+  GlobalKnownHostsFile /dev/null
+  StrictHostKeyChecking accept-new
+  ControlMaster no
+  ControlPath none
+  LogLevel ERROR

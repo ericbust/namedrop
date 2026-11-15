@@ -1203,6 +1203,11 @@ def cmd_rex(args):
     say("Stop it with: ./testbed rex down --profile " + profile.name)
 
 
+def cmd_rex_remote(args):
+    import rex_remote
+    rex_remote.main(args)
+
+
 def cmd_status(args):
     profile = chosen_profile(args.profile)
     profile.owned()
@@ -1412,6 +1417,21 @@ def main():
                           "and the server")
     add_source_options(rex)
     rex.add_argument("--agents", help="comma-separated agents (default: claude,codex)")
+    remote = command("rex-remote", cmd_rex_remote,
+                     "run the remote-host lab: scratch Rex A here, Linux Rex B in Docker over ssh",
+                     profile=None)
+    remote.add_argument("action", choices=("up", "check", "down"),
+                        help="up builds and starts A and B; check runs the lab checks; down stops "
+                             "both and removes B's container")
+    remote.add_argument("--dir", help="the lab's directory (default: TESTBED_HOME/rex-remote)")
+    remote.add_argument("--link", metavar="PATH",
+                        help="the Namedrop checkout to build (default: this kit's checkout)")
+    remote.add_argument("--rex-bin", metavar="PATH", help="A's macOS rex (default: REX_BIN or rex on PATH)")
+    remote.add_argument("--b-rex", metavar="VERSION",
+                        help="B's Rex version, such as 0.1.0-preview.19 (default: A's version)")
+    remote.add_argument("--only", metavar="N,...", help="run only these lab checks")
+    remote.add_argument("--fresh", action="store_true",
+                        help="with up: start from new keys, hosts, names and state, keeping the builds")
     command("attach", cmd_attach, "open the profile's Herdr from a plain terminal")
     command("status", cmd_status, "show the server, plugin, names and doctor")
     command("stop", cmd_stop, "stop the profile's server and keep its files")

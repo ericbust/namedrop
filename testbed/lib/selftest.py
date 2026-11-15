@@ -24,6 +24,7 @@ from unittest.mock import patch
 import livetest as live
 import rex_lane
 import rex_live
+import rex_remote
 import source as sources
 import selftest_daily
 import testbed
@@ -431,6 +432,38 @@ def check_rex_live_up_and_down(scratch):
             assert not profile.dir.exists(), profile.dir
     return ("Rex live up and down: a failed up stops what it started, a second up proves a fresh "
             "block, down stops the profile's Herdr, and a failed log copy still stops it")
+
+
+def check_rex_remote_lab(scratch):
+    """The lab's ssh wrapper reads only the lab's config, and that config names only the lab's
+    key and known_hosts, with no agent and no shared control socket."""
+    lab = rex_remote.Lab(scratch / "remote-lab")
+    for name in ("logs", "home-a"):
+        lab.path(name).mkdir(parents=True)
+    lab.ssh_files()
+    config = lab.path("ssh/config").read_text()
+    assert "@LAB@" not in config and "~" not in config and ".ssh" not in config, config
+    named = re.findall(r"^\s*(IdentityFile|UserKnownHostsFile)\s+(\S+)", config, re.M)
+    assert named == [("IdentityFile", str(lab.path("ssh/id_lab"))),
+                     ("UserKnownHostsFile", str(lab.path("ssh/known_hosts")))], named
+    for setting in ("IdentitiesOnly yes", "IdentityAgent none", "GlobalKnownHostsFile /dev/null",
+                    "ControlPath none"):
+        assert setting in config, setting
+    fake = scratch / "remote-lab-fake-ssh"
+    fake.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+    fake.chmod(0o755)
+    wrapper = lab.path("bin/ssh").read_text().replace("exec /usr/bin/ssh", "exec " + str(fake))
+    lab.path("bin/ssh").write_text(wrapper)
+    seen = subprocess.run([str(lab.path("bin/ssh")), "-p", "2222", "nd@127.0.0.1", "true"], text=True,
+                          capture_output=True, env={"PATH": "/usr/bin:/bin"}, check=True).stdout.split()
+    assert seen[:2] == ["-F", str(lab.path("ssh/config"))], seen
+    assert "ssh -p 2222" in lab.path("logs/ssh-calls.log").read_text()
+    assert rex_remote.apt_version("0.1.0-preview.18") == "0.1.0~preview.18"
+    dockerfile = (rex_remote.FILES / "Dockerfile").read_text()
+    assert re.search(r"^ARG REX_KEY_FINGERPRINT=[0-9A-F]{40}$", dockerfile, re.M), "the key's fingerprint is pinned"
+    assert '"rex=$REX_VERSION"' in dockerfile and "authorized_keys" not in dockerfile.split("COPY")[-1]
+    return ("remote lab: its ssh runs with the lab's config, key and known_hosts only, and B's image "
+            "pins Rex's version and signing key")
 
 
 def check_syntax(kit):
@@ -1466,6 +1499,7 @@ def run(kit):
                   ("Rex live hooks", lambda: check_rex_live_hooks(base)),
                   ("Rex live up and down", lambda: check_rex_live_up_and_down(base)),
                   ("Rex live down", lambda: check_rex_live_down_after_a_failed_stop(base)),
+                  ("remote lab", lambda: check_rex_remote_lab(base)),
                   ("syntax", lambda: check_syntax(kit)),
                   ("screens", check_screens),
                   ("transcripts", check_transcripts),

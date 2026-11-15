@@ -302,6 +302,7 @@ With exactly one profile, every command picks it without `--profile`.
 | `report` | Prints one line for Namedrop's [compatibility page](https://github.com/ericbust/namedrop/blob/main/docs/compatibility.md) |
 | `shell` | Opens a Bash shell with only the profile's environment |
 | `rex up`, `rex down` | Runs Claude Code and Codex in blocks of a scratch Rex server, in a `rex-` profile. See [The Rex lane](#the-rex-lane) |
+| `rex-remote up`, `check`, `down` | Runs the relay between a scratch Rex server here and a Linux Rex server in Docker, over `ssh://`. See [The remote-host lab](#the-remote-host-lab) |
 
 Options for `up`:
 
@@ -357,6 +358,66 @@ and Namedrop records no hook run for them. `up` then prints the `rex` lines
 that start more of the profile's agents, with Claude Code's wrapper named in
 full. `rex down` kills every session, stops the server and
 any Codex app server, and keeps the profile.
+
+### The remote-host lab
+
+```sh
+./testbed rex-remote up --rex-bin "/Applications/Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex"
+./testbed rex-remote check
+./testbed rex-remote down
+```
+
+The lab tests Namedrop's relay between two Rex servers over `ssh://`, with no
+model and no machine outside this one. A is a scratch Rex server on this
+machine. B is a Debian container that runs Superlogical's signed apt Rex
+package and an sshd. A reaches B as the host `labb`, with
+`rex hosts add labb ssh://nd@127.0.0.1:PORT`. Each side runs its own
+Namedrop: a macOS build on A, and a Linux build made in Docker's `rust:1.97.0`
+image on B.
+
+It needs Docker, Git, Cargo, and a macOS `rex`. `--rex-bin` names A's `rex`,
+otherwise `REX_BIN` or the `rex` on PATH. B runs A's Rex version unless
+`--b-rex 0.1.0-preview.19` names another. `--link PATH` names the checkout to
+build, by default this kit's own, and the lab builds its last commit.
+
+`up` does these steps, and running it again starts only what stopped:
+
+1. Makes an ed25519 key, an ssh config, and an empty known_hosts in the lab's
+   `ssh/` directory, and copies [rex-remote/ssh](rex-remote/ssh) to `bin/ssh`.
+   That wrapper runs `/usr/bin/ssh -F ssh/config`, and the
+   [config](rex-remote/ssh_config) names only that key and that known_hosts,
+   with no agent, no global known_hosts, and no shared control socket. Each
+   ssh run is logged to `logs/ssh-calls.log`.
+2. Builds Namedrop for both sides, and B's image from
+   [rex-remote/Dockerfile](rex-remote/Dockerfile). The Dockerfile pins the Rex
+   package version and the fingerprint of Superlogical's signing key, and the
+   build stops when the downloaded keyring holds another key or the installed
+   package is not Superlogical's.
+3. Starts B's container with sshd and Rex ports on `127.0.0.1` only. The
+   public key is mounted read-only, and the image holds no key. It starts B's
+   Rex server as the user `nd`, because a container has no systemd.
+4. Starts A's server on `/tmp/nd-tb-rexremote-UID-HASH.sock` with
+   `HOME=LAB/home-a`, adds `labb`, names a terminal `@lead` on A and a terminal
+   `@bterm` on B, opts B in to terminal recipients with
+   `relay/allow-terminals`, and starts both bridges.
+
+Every `rex` that A runs starts from `env -i` with the lab's `HOME`, the lab's
+`bin` first on PATH, `REX_HOME` naming A's socket, `--autostart=false`, and an
+explicit `-S`. So no lab call reaches your own Rex server, your Rex hosts list,
+or `~/.ssh`.
+
+`check` runs the lab checks that `experimental/rex/PORT.md` lists for PLAN #11
+and prints `ok`, `FAIL`, or `known` for each, with the evidence it read. A
+`known` result is a behavior that PORT.md records as a caveat. `--only 2,3`
+runs some of them. The report is in `LAB/reports/`.
+
+`down` stops A's server and A's Namedrop processes by pid, removes B's
+container and the tunnel directory under `/tmp/rex-UID` that A's ssh log
+names, and keeps the lab's directory, so the next `up` reuses its builds.
+`up --fresh` after `down` starts from a new key, hosts list, names, and state,
+and still reuses the builds.
+The lab's directory is `TESTBED_HOME/rex-remote` unless `--dir` names
+another. The images, `ndrp-rexlab:rex-VERSION`, stay for the next run.
 
 ## Where profiles live
 
