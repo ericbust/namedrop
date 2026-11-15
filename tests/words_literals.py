@@ -347,26 +347,33 @@ def scan(root):
 
 def relocate(allowlist_path, literals):
     entries = json.loads(allowlist_path.read_text())
-    by_file = {}
+    found = {}
     for literal in literals:
-        by_file.setdefault((literal['file'], literal['text']), []).append(literal['line'])
-    moved = 0
+        found.setdefault((literal['file'], literal['text']), []).append(literal['line'])
+    # Every pinned row of one text in one file, so a text that occurs more
+    # than once moves as a set: the rows keep their order.
+    pinned = {}
 
-    def move(item, file, text):
-        nonlocal moved
-        lines = by_file.get((file, text), [])
-        if item[0] not in lines and len(lines) == 1:
-            item[0] = lines[0]
-            moved += 1
-        return item[0]
+    def pin(file, text, line, put):
+        pinned.setdefault((file, text), []).append((line, put))
 
     for entry in entries['printed']:
         for source in entry['sources']:
-            source['line'] = move([source['line']], source['file'], source['source'])
+            pin(source['file'], source['source'], source['line'], lambda line, s=source: s.__setitem__('line', line))
     for group in entries['unprinted']:
-        group['literals'] = [[move([line, text], group['file'], text), text] for line, text in group['literals']]
+        for index, (line, text) in enumerate(group['literals']):
+            pin(group['file'], text, line, lambda line, g=group, i=index, t=text: g['literals'].__setitem__(i, [line, t]))
     for entry in entries['unstaged']:
-        entry['line'] = move([entry['line']], entry['file'], entry['text'])
+        pin(entry['file'], entry['text'], entry['line'], lambda line, e=entry: e.__setitem__('line', line))
+    moved = 0
+    for key, rows in pinned.items():
+        lines = sorted(found.get(key, []))
+        if len(lines) != len(rows) or sorted(line for line, _ in rows) == lines:
+            continue
+        for (old, put), line in zip(sorted(rows, key=lambda row: row[0]), lines):
+            if old != line:
+                put(line)
+                moved += 1
     allowlist_path.write_text(dumped(entries))
     print(f'{moved} entries relocated', file=sys.stderr)
 
