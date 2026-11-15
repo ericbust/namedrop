@@ -17,6 +17,8 @@ mutations = [
     ("help", "src/cli.rs", "collaborate inside Rex", "collaborate inside Herdr", "rex_words_sweep"),
     ("roster", "src/persona.rs", "Current named agents in this {} space", "Current named agents in this Herdr {} space", "rex_words_sweep"),
     ("registration", "src/integration.rs", "rex_catalog_value(&mut operation.input_schema);", "let _ = &operation.input_schema;", "rex_words_sweep"),
+    ("update notice", "src/update_check.rs", '"download Namedrop {} and run sh scripts/install.sh",', '"download Namedrop {} and run herdr plugin action invoke update",', "rex_words_update_notice_and_doctor"),
+    ("update doctor", "src/health.rs", 'format!("Update: {instruction}")', 'format!("Update outside Herdr: {instruction}")', "rex_words_update_notice_and_doctor"),
     ("runtime", "scripts/runtime.py", "action = 'installation' if verify == 'install' else 'activation'", "action = 'activation'", "rex_words_screens_and_runtime_failures"),
 ]
 results = []

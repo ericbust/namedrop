@@ -1,6 +1,10 @@
 #![cfg(feature = "test-support")]
 #[path = "support/binary.rs"]
 mod binary;
+#[path = "support/cleanup.rs"]
+mod cleanup;
+#[path = "support/update_profile.rs"]
+mod update_profile;
 
 use clap::CommandFactory;
 use namedrop::{
@@ -334,6 +338,81 @@ fn herdr_words_are_unchanged() {
             "install".into(),
             "claude".into()
         ])
+    );
+}
+
+/// The update notice and Doctor's update issues, on a standalone (Rex) state.
+/// Settings live under HOME, so the test reruns itself with its own HOME.
+#[test]
+fn rex_words_update_notice_and_doctor() {
+    let root = update_profile::root(
+        std::env::temp_dir().join(format!("nd-words-update-{}", std::process::id())),
+    );
+    let home = root.join("home");
+    let state = root.join("state");
+    fs::create_dir_all(state.join("runtime")).unwrap();
+    fs::create_dir_all(&home).unwrap();
+    if update_profile::isolate(&root, &home) {
+        update_profile::cleanup(&root);
+        return;
+    }
+    fs::write(state.join("runtime/owner"), "standalone\n").unwrap();
+    fs::write(
+        state.join("update-check.json"),
+        json!({"schema_version":1,"checked_at":100,"last_success_at":100,"last_error":null,
+            "source":{"kind":"standalone","installed_version":env!("CARGO_PKG_VERSION")},
+            "remote_version":"9.10.0"})
+        .to_string(),
+    )
+    .unwrap();
+    let notice = namedrop::update_check::session_notice(
+        r#"{"hook_event_name":"SessionStart","source":"startup"}"#,
+        &state,
+        1000,
+        None,
+    )
+    .expect("a standalone state shows the update notice");
+    words("update notice", notice.to_string());
+    let mux = FakeMux::world()
+        .endpoint("rex:/tmp/words.sock")
+        .space("s1")
+        .pane("p1")
+        .tab("window:w")
+        .claude()
+        .build();
+    let ids = ProcessIds::default();
+    let runtime = LifecycleRuntime {
+        state_directory: &state,
+        home_directory: Some(&home),
+        agent_config: AgentConfigDirectories::default(),
+        cwd: &root,
+        workspace_id: Some("s1"),
+        current_pane_id: Some("p1"),
+        session_socket_id: "rex:/tmp/words.sock",
+        mux: &mux,
+        clock: &SystemClock,
+        ids: &ids,
+    };
+    execute_lifecycle_operation("activate", json!({"confirmed":true}), &runtime).unwrap();
+    let report = diagnose_collaboration(&runtime);
+    assert!(report.issues.iter().any(|i| i.code == "ND-UPDATE-001"));
+    words(
+        "doctor update json",
+        serde_json::to_string(&report).unwrap(),
+    );
+    words("doctor update text", render_health_report_to_text(&report));
+    let settings = home.join(".config/namedrop/settings.json");
+    fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    fs::write(&settings, "{").unwrap();
+    let report = diagnose_collaboration(&runtime);
+    assert!(report.issues.iter().any(|i| i.code == "ND-UPDATE-002"));
+    words(
+        "doctor invalid settings json",
+        serde_json::to_string(&report).unwrap(),
+    );
+    words(
+        "doctor invalid settings text",
+        render_health_report_to_text(&report),
     );
 }
 
