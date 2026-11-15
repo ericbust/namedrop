@@ -22,9 +22,6 @@ def load(path, drop):
         if "--allow-package-lock" in sys.argv and section == "## files (set)":
             if cleaned == json.dumps({"path": "<ROOT>/home/.config/namedrop/packages.lock", "text": ""}, sort_keys=True):
                 continue
-        if "--allow-runtime-owner" in sys.argv and section == "## files (set)":
-            if cleaned == json.dumps({"path": "<STATE>-runtime/runtime/owner", "text": "herdr\n"}, sort_keys=True):
-                continue
         if section == "## herdr calls (set)" and cleaned.startswith('{"args"'):
             call = json.loads(cleaned)
             args = call["args"]
@@ -32,12 +29,19 @@ def load(path, drop):
                 continue
         out.append((section, cleaned))
     return out
+OWNER = ("## files (set)", json.dumps({"path": "<STATE>-runtime/runtime/owner", "text": "herdr\n"}, sort_keys=True))
 MARKERS = SCRUB - {"NAMEDROP_HERDR_TIMEOUT_MS", "NAMEDROP_REX_TIMEOUT_MS"}
 for title, drop in (("with the scrub's names removed and both timeouts kept", MARKERS),):
     a, b = load(sys.argv[1], drop), load(sys.argv[2], drop)
     sa, sb = set(a), set(b)
+    missing = "--allow-runtime-owner" in sys.argv and OWNER not in sb
+    if "--allow-runtime-owner" in sys.argv:
+        # U4's pin for a base from before U4: the right report must write the
+        # file, and the left one, which is compared as usual, must not.
+        sb.discard(OWNER)
     print("==", title, ": only-left", len(sa - sb), "only-right", len(sb - sa))
     for sec, line in sorted(sa - sb): print("<", sec[:28], "|", line[:330])
     for sec, line in sorted(sb - sa): print(">", sec[:28], "|", line[:330])
+    if missing: print("> missing the pinned", OWNER[1])
 
-raise SystemExit(1 if sa != sb else 0)
+raise SystemExit(1 if sa != sb or missing else 0)

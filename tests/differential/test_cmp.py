@@ -57,6 +57,8 @@ class Comparison(unittest.TestCase):
         pin=row("<STATE>-runtime/runtime/owner", "herdr\n")
         self.assertNotEqual(self.compare(prefix,prefix+pin),0)
         self.assertEqual(self.compare(prefix,prefix+pin,["--allow-runtime-owner"]),0)
+        self.assertNotEqual(self.compare(prefix,prefix,["--allow-runtime-owner"]),0)
+        self.assertNotEqual(self.compare(prefix+pin,prefix+pin,["--allow-runtime-owner"]),0)
         self.assertNotEqual(self.compare(prefix,prefix+row("<STATE>-runtime/runtime/owner", "standalone\n"),["--allow-runtime-owner"]),0)
         self.assertNotEqual(self.compare(prefix,prefix+row("<STATE>/runtime/owner", "herdr\n"),["--allow-runtime-owner"]),0)
 

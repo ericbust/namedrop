@@ -22,6 +22,8 @@ for label, binary in zip(("base", "head"), sys.argv[1:3]):
 failed = False
 for left, right in itertools.combinations(reports, 2):
     with (root / (left.parent.name + "-" + right.parent.name + ".diff")).open("w") as log:
-        compared = subprocess.run([sys.executable, "-I", str(tools / "cmp.py"), str(left), str(right), *sys.argv[4:]], env=env, stdout=log, stderr=subprocess.STDOUT)
+        # An allowance describes base against head, so only those pairs take it.
+        crossed = left.parent.name.startswith("base") and right.parent.name.startswith("head")
+        compared = subprocess.run([sys.executable, "-I", str(tools / "cmp.py"), str(left), str(right), *(sys.argv[4:] if crossed else [])], env=env, stdout=log, stderr=subprocess.STDOUT)
     failed |= compared.returncode != 0
 raise SystemExit(1 if failed else 0)
