@@ -1340,7 +1340,8 @@ def section_updates():
             module = Path(registration(f)['module'])
             contents = module.read_bytes()
             module.write_text('-- foreign module: fixture install must refuse\n')
-            failed = publish(candidate, code=1)
+            # install.sh exits with the launcher's own code, 65 for a refused install.
+            failed = publish(candidate, code=65)
             module.write_bytes(contents)
             after = os.readlink(f.state / 'runtime/current')
             if migrated_failure:
