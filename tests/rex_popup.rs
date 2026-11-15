@@ -295,7 +295,11 @@ fn herdr_screen_errors_exit_65_without_the_rex_key_wait() {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        child.stdin.take().unwrap().write_all(b"x\n").unwrap();
+        // A Herdr screen exits without reading a key, so it can close its
+        // stdin before the key arrives. A broken pipe is that exit.
+        if let Err(error) = child.stdin.take().unwrap().write_all(b"x\n") {
+            assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe, "{mode}");
+        }
         let output = child.wait_with_output().unwrap();
         let error = String::from_utf8_lossy(&output.stderr);
         assert_eq!(output.status.code(), Some(65), "{mode}: {error}");
