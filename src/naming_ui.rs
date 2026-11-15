@@ -1580,3 +1580,181 @@ mod tests {
         assert_eq!(wrap_exact("", 9), [""]);
     }
 }
+
+/// `name_prompt` reads the popup's own stdin, so each case runs it in a child
+/// copy of this test binary whose stdin and stdout are pipes, against an
+/// in-memory Rex host.
+#[cfg(test)]
+mod rex_name_prompt_tests {
+    use super::name_prompt;
+    use namedrop::{
+        AgentConfigDirectories, LifecycleRuntime, ProcessIds, StateNamespace, StateStore,
+        SystemClock,
+        mux::{Effect, Mux, fake::FakeMux},
+    };
+    use serde_json::{Value, json};
+    use std::{
+        env, fs,
+        io::Write,
+        path::{Path, PathBuf},
+        process::{Command, Stdio},
+        sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering},
+        },
+    };
+
+    const CASE: &str = "NAMEDROP_TEST_REX_NAME_PROMPT";
+    const ROOT: &str = "NAMEDROP_TEST_REX_NAME_ROOT";
+    const OFFER: &str =
+        "Namedrop is not active in this session. Press Enter to activate it, or Esc to cancel.";
+    const ENDPOINT: &str = "rex:/tmp/nd-name-prompt.sock";
+
+    fn mux() -> FakeMux {
+        FakeMux::world()
+            .endpoint(ENDPOINT)
+            .space("s1")
+            .pane("p1")
+            .terminal("t1")
+            .tab("window:w")
+            .claude()
+            .session("agent-1")
+            .idle()
+            .build()
+    }
+
+    fn activated(state: &Path) -> bool {
+        StateStore::open_read_only(state)
+            .unwrap()
+            .and_then(|mut store| {
+                store
+                    .transaction(|tx| tx.worktree_state(&StateNamespace::for_space(ENDPOINT, "s1")))
+                    .unwrap()
+            })
+            .is_some_and(|state| state.activated)
+    }
+
+    /// The child's half: one `name_prompt` on the piped stdin, then what it
+    /// left behind, as one marked JSON line.
+    #[test]
+    fn child_runs_one_name_prompt() {
+        let Ok(case) = env::var(CASE) else { return };
+        let root = PathBuf::from(env::var(ROOT).unwrap());
+        let (state, home) = (root.join("state"), root.join("home"));
+        let fake = mux();
+        let shared: Arc<dyn Mux> = Arc::new(fake.clone());
+        let ids = ProcessIds::default();
+        let runtime = LifecycleRuntime {
+            state_directory: &state,
+            home_directory: Some(&home),
+            agent_config: AgentConfigDirectories::default(),
+            cwd: &root,
+            workspace_id: Some("s1"),
+            current_pane_id: Some("p1"),
+            session_socket_id: ENDPOINT,
+            mux: &shared,
+            clock: &SystemClock,
+            ids: &ids,
+        };
+        if case == "active" {
+            namedrop::activate_from_naming_screen(&runtime).unwrap();
+        }
+        let result = name_prompt(&runtime, "t1");
+        let popups = fake
+            .attempted_effects()
+            .iter()
+            .filter(|effect| matches!(effect, Effect::OpenPopup(_)))
+            .count();
+        println!(
+            "\nREPORT {}",
+            json!({
+                "result": result,
+                "activated": activated(&state),
+                "popups": popups,
+                "tour_shown": namedrop::tour::is_shown(&state, namedrop::tour::CURRENT_ID).unwrap(),
+            })
+        );
+    }
+
+    /// The parent's half: what the person saw, and the child's report.
+    fn run(case: &str, keys: &[u8]) -> (String, Value) {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let root = env::temp_dir().join(format!(
+            "nd-rex-name-prompt-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("home")).unwrap();
+        let mut command = Command::new(env::current_exe().unwrap());
+        for name in ["REX_BLOCK", "REX_SESSION", "REX_SERVER", "REX_CLIENT"] {
+            command.env_remove(name);
+        }
+        let mut child = command
+            .args([
+                "naming_ui::rex_name_prompt_tests::child_runs_one_name_prompt",
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CASE, case)
+            .env(ROOT, &root)
+            .env("HOME", root.join("home"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(keys).unwrap();
+        let output = child.wait_with_output().unwrap();
+        fs::remove_dir_all(&root).unwrap();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(
+            output.status.success(),
+            "{stdout}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let (shown, report) = stdout
+            .rsplit_once("\nREPORT ")
+            .unwrap_or_else(|| panic!("no report: {stdout}"));
+        let report = report.lines().next().unwrap();
+        (shown.to_owned(), serde_json::from_str(report).unwrap())
+    }
+
+    #[test]
+    fn an_inactive_rex_session_offers_activation_and_enter_activates_without_a_tour() {
+        let (shown, report) = run("inactive", b"\nu5-term\nt\n");
+        let offer = shown.find(OFFER).expect(&shown);
+        let naming = shown.find("Name this pane").expect(&shown);
+        assert!(offer < naming, "{shown}");
+        assert_eq!(
+            report["result"]["Ok"], "Named @u5-term as terminal.",
+            "{report}"
+        );
+        assert_eq!(report["activated"], true);
+        assert_eq!(report["popups"], 0, "activation opened a popup");
+        assert_eq!(report["tour_shown"], false, "activation claimed the tour");
+    }
+
+    #[test]
+    fn escape_at_the_offer_names_nothing_and_activates_nothing() {
+        let (shown, report) = run("inactive", b"\x1b");
+        assert!(shown.contains(OFFER), "{shown}");
+        assert!(!shown.contains("Name this pane"), "{shown}");
+        assert_eq!(report["result"], json!({"Ok": null}));
+        assert_eq!(report["activated"], false);
+        assert_eq!(report["popups"], 0);
+    }
+
+    #[test]
+    fn an_active_rex_session_goes_straight_to_naming() {
+        let (shown, report) = run("active", b"u5-term\nt\n");
+        assert!(!shown.contains(OFFER), "{shown}");
+        assert!(shown.contains("Name this pane"), "{shown}");
+        assert_eq!(
+            report["result"]["Ok"], "Named @u5-term as terminal.",
+            "{report}"
+        );
+        assert_eq!(report["popups"], 0);
+    }
+}
