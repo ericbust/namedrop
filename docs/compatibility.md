@@ -49,6 +49,34 @@ To fix one session only, leave the setting on and start that Codex with `codex -
 
 Namedrop reports this as ND-SESSION-003 in `namedrop doctor`, when you name a Codex pane, during activation, and at the start of an affected Codex session.
 
+## Rex (experimental)
+
+Rex support is on the `experimental` branch only, and no release includes it. On Rex, Namedrop does not need Herdr. See [Run Namedrop on Rex](rex.md).
+
+Namedrop speaks Rex's control protocol, `rex.control.v1`, at API revision 12 only. It offers revision 12 to the server and refuses any other answer with `the server's welcome is not one for rex.control.v1 revision 12`. `rex version` prints a server's revision and the range it supports. Support for revision 13 is planned.
+
+| Rex | API revision | Status |
+|---|---|---|
+| `0.1.0-preview.14`, commit `7e460d0` | 12, supports 0 to 12 | Supported. The spike and the adapter's design probes ran on it |
+| `0.1.0-preview.18`, commit `baf79e0` | 13, supports 0 to 13 | Works at revision 12, which the server agrees to when Namedrop offers only 12. Tested without agents and without the relay |
+
+Rex has been tested only on macOS on Apple silicon. The testbed's Rex lanes use the `rex` that the testbed finds, and their logs do not record its version.
+
+### What has been tested on Rex
+
+- **Rex preview.14, 2026-11-11 to 2026-11-13**, in scratch Rex servers: Claude Code 2.1.322 and 2.1.323 on Haiku, and Codex 0.163.0 with and without `--no-daemon`. A prompt pasted into a block arrived as one draft and submitted in both agents, and both agents reported their status to Rex with no integration installed.
+- **The adapter and the bridge**, on the testbed's Rex lane. Claude Code on Opus 5.5 and Codex `--no-daemon` were named through the CLI in one session. A mention typed in Claude Code reached Codex, and Codex's answer came back, with no manual command. A closed named block lost its name within a second. A mention queued to a working Codex was delivered a second after Codex reported `idle`. After a server restart, the mail in flight to both replaced agents was held, and a new Claude Code in the same block bound and was named again.
+- **The relay**, with two scratch Rex servers on one Mac standing in for two machines. Claude Code on Haiku 5.5 on A mentioned Codex `--no-daemon` on B, and a four-message conversation went back and forth. A retried send was accepted once. With B's bridge stopped, A kept the message until the bridge started again. A refused to type into B's blocks through a forwarded socket. Later checks without a model, up to commit `7c89d9a`, covered `relay/allow-terminals`, the Automatic Reply Limit pausing a relayed thread and holding its replies until `thread continue`, and B and A on different relay builds.
+- **Rex preview.14 and preview.18, 2026-11-14**, Namedrop at commit `329c278b`, in scratch Rex servers, without agents. On both, Doctor reported `ND-SETUP-001`, `activate` succeeded, and a terminal block was named.
+
+Not recorded on Rex: the relay and agents on preview.18. The testbed's Rex lanes do not log their Rex version, so their runs do not show which preview they used. Not tested on Rex: TLS to a real remote Rex server, Linux, two real machines, the Rex app's command palette, and a restart of the Rex app as opposed to the server.
+
+### Herdr inside Rex
+
+You can run Herdr as the program of a Rex block and use Namedrop in Herdr's panes as usual. Herdr's panes inherit the block's `REX_*` variables, so Namedrop chooses between the two. It uses the terminal host whose server is the nearest ancestor of the process. For a Herdr pane, that is Herdr. When Namedrop is in doubt about Herdr, it uses Herdr.
+
+Tested on macOS on 2026-11-14 at commit `3c18cb9`: Herdr 0.9.5 as the program of a block of a scratch Rex server, Codex 0.163.0 with gpt-6-sol, and Claude Code 2.1.325 with claude-sonnet-5-5. The testbed checklist passed 10 of 10, and Namedrop never connected to the Rex server as a client.
+
 ## Not tested
 
 - The archives aren't signed or notarized, and nobody has checked how macOS treats a downloaded one.
