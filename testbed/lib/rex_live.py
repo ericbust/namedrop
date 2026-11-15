@@ -247,7 +247,9 @@ def shell_finds_no_herdr(lane, session, blocks, timeout=20):
     if found.exists():
         found.unlink()
     target = shlex.quote(str(found))
-    lane.rex("send-key", "-s", session, "-b", blocks["shell"], KEYS["ctrl+u"])
+    # ctrl+c, not ctrl+u: it also ends a continuation prompt, a read and a
+    # reverse search, and clears a line whose cursor is at its start.
+    lane.rex("send-key", "-s", session, "-b", blocks["shell"], KEYS["c-c"])
     lane.rex("send", "-s", session, "-b", blocks["shell"],
              "command -v herdr > {0} || echo none > {0}".format(target))
     lane.rex("send-key", "-s", session, "-b", blocks["shell"], "enter")
