@@ -103,3 +103,16 @@ INSTALL_PLANS = {
 
 def install_plan(source):
     return INSTALL_PLANS[source["kind"]](source)
+
+
+def clone_plan(source):
+    """A plan that clones the source, for a lane that builds it itself."""
+    plan = install_plan(source)
+    if plan["method"] == "link":
+        return plan
+    if source["kind"] == "pr":
+        return {"method": "link", "clone": "https://github.com/{}.git".format(source["repo"]),
+                "fetch": "pull/{}/head:pr-{}".format(source["number"], source["number"]),
+                "checkout": "pr-{}".format(source["number"])}
+    return {"method": "link", "clone": "https://github.com/{}.git".format(plan["repo"]),
+            "fetch": None, "checkout": plan["ref"]}

@@ -301,7 +301,7 @@ With exactly one profile, every command picks it without `--profile`.
 | `list` | Lists every profile with its server state, Namedrop version and source |
 | `report` | Prints one line for Namedrop's [compatibility page](https://github.com/ericbust/namedrop/blob/main/docs/compatibility.md) |
 | `shell` | Opens a Bash shell with only the profile's environment |
-| `rex up`, `rex down` | Runs Claude Code and Codex in blocks of a scratch Rex server, in a `rex-` profile. See [The Rex lane](#the-rex-lane) |
+| `rex up`, `rex down` | Installs the build with its archive's `install.sh`, with no Herdr, and runs Claude Code and Codex in blocks of a scratch Rex server, in a `rex-` profile. See [The Rex lane](#the-rex-lane) |
 | `rex-remote up`, `check`, `down` | Runs the relay between a scratch Rex server here and a Linux Rex server in Docker, over `ssh://`. See [The remote-host lab](#the-remote-host-lab) |
 
 Options for `up`:
@@ -333,20 +333,50 @@ when `up` or `reset` starts the agent again.
 ./testbed rex down --link /path/to/namedrop
 ```
 
-`rex up` builds the source and activates it in the profile's own Herdr, which
-installs the Claude Code and Codex packages with every hook baked to the
-profile's state directory. It then stops that Herdr and starts a scratch Rex
-server under `env -i`, with the profile's environment minus its `HERDR_*`
-names and with `REX_SERVER` naming the server. So a block's only location
-names are the `REX_*` the server gives it, and the server's own files stay in
-the profile's `HOME`. Claude Code in a block starts as `PROFILE/bin/claude`,
-the profile's token wrapper, named in full because a block's shell can put
-another `claude` ahead of the profile's `bin`. A scratch server started by hand needs the same wrapper and its own `HOME`, with
-no keychain link, as the probe recipe in
+`rex up` installs Namedrop as a machine with Rex and no Herdr does. The
+profile gets no `herdr`: its `bin` links none, and the lane's `PATH` drops each
+host directory that holds one, such as Homebrew's. `rex up` prints that `PATH`
+and stops if a `herdr` is still on it or beside the lane's `rex`, whose
+directory the Rex server puts on every block's `PATH`. A `herdr` in `/usr/bin`,
+`/bin`, `/usr/sbin` or `/sbin` stops the lane with an error that says so,
+because the build and the install need those directories. Every command the
+testbed runs in a `rex-` profile, `env.sh` and `testbed shell` included, gets
+the lane's environment. It starts a scratch Rex server under
+`env -i`, with the profile's environment minus its `HERDR_*` names and with
+`REX_SERVER` and `REX_HOME` naming the server. So a block's only location names are the
+`REX_*` the server gives it, and the server's own files stay in the profile's
+`HOME`. It then clones the source into the profile, builds the release archive
+with the source's own `scripts/package-release.sh`, checks the archive's
+checksum, unpacks it, and runs its `scripts/install.sh --yes` with the
+lane's `rex` first on `PATH`, so the install takes that `rex` and no other. The install's report follows: it puts
+the state in `PROFILE/state/namedrop`, the module and the `require` line in
+the scratch server's `init.lua`, and the Claude Code and Codex packages into
+the profile with every hook baked to that state directory. A profile installs
+once, so a new build needs `--fresh`. A profile that an older testbed
+activated in a profile Herdr is refused. The release build and the install
+log to `logs/package-release.log` and `logs/install.log`. Claude Code in a
+block starts as `PROFILE/bin/claude`, the profile's token wrapper, named in
+full because a block's shell can put another `claude` ahead of the profile's
+`bin`. A scratch server started by hand needs the same wrapper and its own
+`HOME`, with no keychain link, as the probe recipe in
 [ADAPTER.md](../experimental/rex/ADAPTER.md#reproduce-the-probes) shows.
 
-The session `testbed-rex` gets a shell block and one block per agent, Claude
-Code as `PROFILE/bin/claude` and Codex as `codex --no-daemon`, whose model settings are in
+The lane runs the first `rex` on `PATH`, and a profile keeps the one it first
+ran. To run another Rex build, put its `rex` first on `PATH` and pass `--fresh`.
+
+A login shell runs `/etc`'s `path_helper`, which puts the host's directories,
+such as Homebrew's through `/etc/paths.d/homebrew`, back on `PATH`. Codex's and
+Claude Code's tool shells are login shells. So `rex up` writes a `PATH` filter
+first in the profile `HOME`'s `.zprofile`, `.bash_profile` and `.profile`,
+and keeps the rest of each file. It then runs `command -v herdr` in a login
+`zsh`, `bash` and `sh` in the lane's environment, and each must find none.
+
+The session `testbed-rex` gets a shell block and one block per agent. The
+shell block runs `bash --noprofile` with the profile's `.bashrc`, and `up`
+types a `herdr` lookup into it, which must find none. On a repeat `up`, a saved
+shell block whose foreground is a program gets nothing typed, and `up` says so.
+A saved shell block at its prompt has its typed line cleared first. Claude Code runs as
+`PROFILE/bin/claude` and Codex as `codex --no-daemon`, whose model settings are in
 the profile's `codex/config.toml`. The lane answers the first-run prompts the
 Herdr lane knows, starts Codex again after it trusts its hooks, and sends Codex
 the Herdr lane's warm-up prompt, because Codex runs its hooks only from its
@@ -357,7 +387,7 @@ that passes the profile's state directory: Codex's hook run is recorded in
 and Namedrop records no hook run for them. `up` then prints the `rex` lines
 that start more of the profile's agents, with Claude Code's wrapper named in
 full. `rex down` kills every session, stops the server and
-any Codex app server, and keeps the profile.
+any Codex app server, and keeps the profile. No Herdr runs on this lane.
 
 ### The remote-host lab
 
