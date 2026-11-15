@@ -999,6 +999,11 @@ fn lost_reports_validate_authority_fields_and_bound_the_page() {
         .unwrap();
     assert_eq!(count(&store, "SELECT COUNT(*) FROM lost"), LOST_LIMIT);
     assert_eq!(
+        count(&store, "SELECT MAX(since_ms) FROM lost"),
+        LOST_LIMIT - 1,
+        "B names its latest first, so A keeps the first 32 of the answer"
+    );
+    assert_eq!(
         store.lost_untold(endpoint).unwrap().len(),
         LOST_LIMIT as usize
     );
