@@ -224,6 +224,24 @@ fn open_lock(state: &Path) -> std::io::Result<std::fs::File> {
         .open(directory.join("open.lock"))
 }
 
+/// Takes `<state>/relay/place.lock`, which a worker holds while it looks
+/// for what it made of a reply and makes it, so two workers of one server
+/// never both take a reply they each found new.
+fn placing(state: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let directory = state.join("relay");
+    create_relay_dir(&directory)?;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(directory.join("place.lock"))?;
+    lock.lock()?;
+    Ok(lock)
+}
+
 /// Creates `<state>/relay`, but never the state directory itself, so a
 /// relay process whose state directory was deleted makes none again.
 fn create_relay_dir(directory: &Path) -> std::io::Result<()> {

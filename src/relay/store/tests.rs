@@ -577,6 +577,41 @@ fn b_counts_what_it_lets_go_of_per_a_message() {
     );
 }
 
+/// A reply to a message sent by two labels of one server goes to the
+/// label sent to its agent, and otherwise to the first by name, whichever
+/// of them collects it.
+#[test]
+fn a_reply_answers_one_label_whichever_label_collects_it() {
+    let state = State::new();
+    let store = state.open(NOW);
+    for label in ["studio", "devbox"] {
+        store
+            .connection
+            .execute(
+                "INSERT INTO outbound (label, message_id, recipient, endpoint, space, sender,
+                    thread, text, state, host_id, created_at_ms, updated_at_ms)
+                 VALUES (?1, 'm1', 'bob', 'rex:/tmp/a.sock', 'session:a', 'alice',
+                    'thread-1', 'hi', 'accepted', 'host-b', ?2, ?2)",
+                params![label, NOW],
+            )
+            .unwrap();
+    }
+    let label = |from: &str, labels: [&str; 2]| {
+        let labels = labels.map(str::to_owned);
+        match store
+            .sent_from("m1", "host-b", "rex:/tmp/a.sock", from, &labels)
+            .unwrap()
+        {
+            Answers::Sent { label, .. } => label,
+            _ => panic!("not sent"),
+        }
+    };
+    for from in ["bob", "carol"] {
+        assert_eq!(label(from, ["studio", "devbox"]), "devbox", "{from}");
+        assert_eq!(label(from, ["devbox", "studio"]), "devbox", "{from}");
+    }
+}
+
 /// A reply from a third agent to a message whose item for one recipient
 /// is accepted and for another still queued goes to the accepted one,
 /// whichever row comes first, and a recipient's own reply waits for its

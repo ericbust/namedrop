@@ -723,7 +723,9 @@ enum Placed {
 /// endpoint's, left on B when it answers an item A has not settled or
 /// follows a reply of its thread this pass left, found as A placed it
 /// before, held behind its thread's held replies or by the Automatic
-/// Reply Limit, or else taken. An error is a store fault.
+/// Reply Limit, or else taken. It looks and makes under the placement
+/// lock, so another worker of the server finds what this one made. An
+/// error is a store fault.
 fn place(
     run: &mut Run<'_>,
     store: &RelayStore,
@@ -764,6 +766,7 @@ fn place(
         thread: thread.1.clone(),
         reply: reply.clone(),
     };
+    let _placing = super::placing(run.state).map_err(drop)?;
     if store.placed(&held).map_err(drop)? {
         return Ok(Placed::Done);
     }
@@ -818,6 +821,9 @@ pub(crate) fn release(
         if paused.contains(&thread) {
             continue;
         }
+        let Ok(_placing) = super::placing(state) else {
+            return labels;
+        };
         match take(state, gate, held) {
             Ok(Taken::Inserted(message_id)) => {
                 if collected(&store, held, &message_id)

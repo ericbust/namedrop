@@ -1841,8 +1841,8 @@ fn a_reply_for_another_label_of_the_same_server_reaches_its_thread() {
 }
 
 /// One message sent to two labels of one server is answered by the label
-/// it was sent to the replying agent by, and otherwise by the collecting
-/// worker's own label.
+/// it was sent to the replying agent by, and otherwise by the first of
+/// them by name, whichever label's worker collects it.
 #[test]
 fn a_reply_to_a_message_sent_by_two_labels_of_one_server_names_its_agent_s_label() {
     let space = Space::new(REX);
@@ -1883,6 +1883,100 @@ fn a_reply_to_a_message_sent_by_two_labels_of_one_server_names_its_agent_s_label
              WHERE request_id LIKE 'relay-reply:%' ORDER BY rowid"
         ),
         [["eve@studio"], ["carol@devbox"]]
+    );
+}
+
+/// Two workers of one server, one for each label it was sent by, take one
+/// reply once, even when the label it answers changes between their
+/// reads: the second finds what the first made of it.
+#[test]
+fn two_workers_of_one_server_take_one_reply_once() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox", "studio"]);
+    listed_at(
+        &rex,
+        &[
+            ("devbox", &["10.0.0.2:7297"]),
+            ("studio", &["10.0.0.2:7297"]),
+        ],
+    );
+    crate::rex_bridge::remember_host_id(&space.state, &Endpoint::parse(REX), "host-a");
+    let message = rex
+        .run(|| space.send("request-1", "@bob@devbox @bob@studio ping"))
+        .unwrap()["message_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let relay = Connection::open(space.state.join("relay.sqlite3")).unwrap();
+    relay
+        .execute_batch(
+            "UPDATE outbound SET host_id = 'host-b';
+             UPDATE outbound SET state = 'accepted' WHERE label = 'studio';",
+        )
+        .unwrap();
+    let page = json!({"host_id": "host-b", "can_reply": true, "epoch": "e1", "more": false,
+        "outbox": [{"seq": 1, "re": message, "thread": "t", "from": "bob",
+            "message_id": "b-1", "text": "bob here"}]});
+    rex.answer_with(page.clone());
+    rex.answer_with(page);
+    // Studio's worker places the reply as studio's, whose item alone is
+    // accepted. Before it inserts it, devbox's item is accepted too, and
+    // devbox's worker, which would place it as devbox's, the first by
+    // name, runs its own round.
+    let gates = std::cell::Cell::new(0);
+    let other = std::cell::RefCell::new(None);
+    let gate = || {
+        gates.set(gates.get() + 1);
+        if gates.get() == 2 {
+            relay
+                .execute(
+                    "UPDATE outbound SET state = 'accepted' WHERE label = 'devbox'",
+                    [],
+                )
+                .unwrap();
+            let (state, program) = (space.state.clone(), rex.directory.join("rex"));
+            let (done, finished) = std::sync::mpsc::channel();
+            *other.borrow_mut() = Some(std::thread::spawn(move || {
+                crate::relay::tests_support::with_program(program, || {
+                    work(&mut Run {
+                        state: &state,
+                        endpoint: &Endpoint::parse(REX),
+                        label: "devbox",
+                        gate: &|| Ok(None),
+                        pause: &mut |_| false,
+                        woken: &std::cell::RefCell::default(),
+                        wake: &mut |_| {},
+                    });
+                });
+                let _ = done.send(());
+            }));
+            let _ = finished.recv_timeout(Duration::from_millis(500));
+        }
+        Ok(None)
+    };
+    rex.run(|| {
+        work(&mut Run {
+            state: &space.state,
+            endpoint: &Endpoint::parse(REX),
+            label: "studio",
+            gate: &gate,
+            pause: &mut |_| false,
+            woken: &std::cell::RefCell::default(),
+            wake: &mut |_| {},
+        });
+    });
+    other.take().unwrap().join().unwrap();
+    assert_eq!(rex.requests().len(), 2, "both workers collected");
+    assert_eq!(
+        space.main(
+            "SELECT author_alias_snapshot, body FROM collaboration_messages
+             WHERE request_id LIKE 'relay-reply:%'"
+        ),
+        [["bob@studio", "bob here"]]
+    );
+    assert_eq!(
+        relay_rows(&space, "SELECT label, seq FROM collected"),
+        [[json!("studio"), json!(1)]]
     );
 }
 

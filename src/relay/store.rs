@@ -1493,11 +1493,12 @@ impl RelayStore {
     /// Where a reply to the A message `message_id` goes, when `endpoint`
     /// sent it to one of `labels` for the server `host_id`, which accepted
     /// it, so B answers only what was sent to it. `labels` are the
-    /// collecting worker's own, first, and those that dial its addresses,
-    /// which share its server's outbox, so a reply goes to the label its
-    /// message was sent by: the one sent to `from` first, and then the
-    /// worker's own. A message still queued but pinned to `host_id` was
-    /// sent there, and is unsettled.
+    /// collecting worker's own and those that dial its addresses, which
+    /// share its server's outbox, so a reply goes to the label its message
+    /// was sent by: the one sent to `from` first, then an accepted one, and
+    /// then the first by name, so every worker of that server places it
+    /// alike. A message still queued but pinned to `host_id` was sent
+    /// there, and is unsettled.
     pub(crate) fn sent_from(
         &self,
         message_id: &str,
@@ -1528,7 +1529,7 @@ impl RelayStore {
             .iter()
             .filter(|(label, _, _, _, pinned, _)| *pinned && labels.contains(label))
             .max_by_key(|(label, recipient, .., accepted)| {
-                (recipient == from, *accepted, *label == labels[0])
+                (recipient == from, *accepted, std::cmp::Reverse(label))
             });
         Ok(match best {
             Some((label, _, space, thread, _, true)) => Answers::Sent {
