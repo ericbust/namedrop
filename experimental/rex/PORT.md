@@ -1506,8 +1506,8 @@ Step 6 follows [UI.md](UI.md) and its units. Each PR's description holds its evi
 - **U5** (#213). Namedrop's popups open as Rex floating layers.
 - **U6** (#216). The Namedrop module, `namedrop rex action`, the guarded start, and Doctor's Rex report.
 - **U7** (#219, with the U6 and U7 review fixes in #220). `namedrop install`, retirement, the handoff, and removal.
-- **U8** (pending, `exp/rex-ui-u8`). `runtime.py --verify install`.
-- **U9** (pending, `exp/rex-ui-u9`). `scripts/install.sh` and the archive.
+- **U8** (#221). `runtime.py --verify install`: the standalone publish, its preflight and migration record, and a removed state kept retired until a reinstall completes.
+- **U9** (#223). `scripts/install.sh` and the archive, with `--install-preview` listing every file the install writes.
 - **U10** (pending, `exp/rex-ui-u10`). Standalone updates.
 - **U11** (not built). The sweep test of UI.md's Words.
 - **U12** (`5a277299`, fix round `b64d0f36`, on `exp/rex-ui-u12`, cut from U9). The testbed's Rex lane installs without Herdr:
