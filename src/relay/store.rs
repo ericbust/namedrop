@@ -7,7 +7,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, pa
 use std::{fs, os::unix::fs::PermissionsExt, path::Path, time::Duration};
 
 const FILE: &str = "relay.sqlite3";
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 /// What version 1 lacks: when a reply for another label was last dropped,
 /// and whether the sender of a reply A let go of was told, so the row
 /// stays as the refusal's tombstone.
@@ -153,6 +153,16 @@ CREATE TABLE lost_told (
     PRIMARY KEY (endpoint, label, re, remote_alias)
 );
 ";
+
+/// What version 3 lacks: the id and creation time of the message at
+/// capture's floor, and of each mark's, so a capture can tell that one is
+/// gone and read what was made after it. A database before has neither,
+/// and its first capture fills them in from the messages at their rowids.
+const TO_4: &str = "
+ALTER TABLE capture_start ADD COLUMN message_id TEXT;
+ALTER TABLE capture_start ADD COLUMN created_at_ms INTEGER;
+ALTER TABLE capture_marks ADD COLUMN created_at_ms INTEGER;
+";
 /// B's replies for A after `after`, a range of `outbox_by_seq` read in
 /// `seq` order, which B stops at the page's end.
 const PAGE: &str = "SELECT seq, re, thread, sender, message_id, text FROM outbox
@@ -205,9 +215,11 @@ pub(crate) const OTHER_LABEL_LIFETIME_MS: i64 = OUTBOX_LIFETIME_MS;
 /// of the replies that expired, which Doctor reports after the items
 /// themselves are gone. Both hold `capture`, the last main-database message
 /// each endpoint's capture read, by rowid and id, `capture_start`, the last
-/// one when this database was made, where an endpoint's capture starts,
-/// and `capture_marks`, the last relay message capture read in each space,
-/// where a capture whose message is gone reads again from.
+/// one when this database was made, by rowid, id and creation time, where
+/// an endpoint's capture starts, and `capture_marks`, the last relay
+/// message capture read in each space, where a capture whose message is
+/// gone reads again from. A mark of no space is a version 2 cursor's, a
+/// floor of its endpoint, with the creation time of its message.
 const SCHEMA: &str = "
 CREATE TABLE peers (
     label TEXT PRIMARY KEY,
@@ -320,13 +332,16 @@ CREATE TABLE capture (
     message_id TEXT
 );
 CREATE TABLE capture_start (
-    rowid INTEGER NOT NULL
+    rowid INTEGER NOT NULL,
+    message_id TEXT,
+    created_at_ms INTEGER
 );
 CREATE TABLE capture_marks (
     endpoint TEXT NOT NULL,
     space TEXT NOT NULL,
     rowid INTEGER NOT NULL,
     message_id TEXT,
+    created_at_ms INTEGER,
     PRIMARY KEY (endpoint, space)
 );
 CREATE TABLE outbox_epoch (
@@ -454,6 +469,12 @@ const NEW_IN_3: [&str; 6] = [
     "capture_start",
     "capture_marks",
 ];
+/// The columns `TO_4` adds.
+const COLUMNS_NEW_IN_4: [(&str, &str); 3] = [
+    ("capture_start", "message_id"),
+    ("capture_start", "created_at_ms"),
+    ("capture_marks", "created_at_ms"),
+];
 const COLUMNS_NEW_IN_3: [(&str, &str); 8] = [
     ("capture", "message_id"),
     ("outbound", "paused"),
@@ -474,17 +495,19 @@ fn upgrade(connection: &mut Connection, path: &Path) -> Result<bool, StoreError>
     let start = if layout(connection)?.is_empty() {
         main_end(path)?
     } else {
-        0
+        Place::default()
     };
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let version: u32 = transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if matches!(version, 1 | 2) {
+    if matches!(version, 1..=3) {
         let expected: Layout = current_layout()
             .iter()
             .filter(|(table, column, ..)| {
                 let column = (table.as_str(), column.as_str());
-                !NEW_IN_3.contains(&table.as_str())
-                    && !COLUMNS_NEW_IN_3.contains(&column)
+                !COLUMNS_NEW_IN_4.contains(&column)
+                    && !(version < 3
+                        && (NEW_IN_3.contains(&table.as_str())
+                            || COLUMNS_NEW_IN_3.contains(&column)))
                     && !(version == 1 && COLUMNS_NEW_IN_2.contains(&column))
             })
             .cloned()
@@ -504,12 +527,13 @@ fn upgrade(connection: &mut Connection, path: &Path) -> Result<bool, StoreError>
                 )],
             )?;
             transaction.execute(
-                "INSERT INTO capture_start (rowid) VALUES (?1)",
-                params![start],
+                "INSERT INTO capture_start (rowid, message_id, created_at_ms) VALUES (?1, ?2, ?3)",
+                params![start.rowid, start.message_id, start.created_at_ms],
             )?;
         }
-        1 => transaction.execute_batch(&format!("{TO_2}{TO_3}"))?,
-        2 => transaction.execute_batch(TO_3)?,
+        1 => transaction.execute_batch(&format!("{TO_2}{TO_3}{TO_4}"))?,
+        2 => transaction.execute_batch(&format!("{TO_3}{TO_4}"))?,
+        3 => transaction.execute_batch(TO_4)?,
         VERSION => (),
         newer if newer > VERSION => {
             return Err(StoreError::invalid_input(format!(
@@ -527,14 +551,14 @@ fn upgrade(connection: &mut Connection, path: &Path) -> Result<bool, StoreError>
     Ok(true)
 }
 
-/// The rowid of the last message in the main database beside the relay's
-/// at `path`, or 0 when it has none. A new relay database captures only
-/// the messages after it, so one made again, or after one was set aside,
-/// never queues or keeps the history before it a second time.
-fn main_end(path: &Path) -> Result<i64, StoreError> {
+/// The last message in the main database beside the relay's at `path`,
+/// or rowid 0 when it has none. A new relay database captures only the
+/// messages after it, so one made again, or after one was set aside, never
+/// queues or keeps the history before it a second time.
+fn main_end(path: &Path) -> Result<Place, StoreError> {
     let main = path.with_file_name(crate::store::DATABASE_FILE_NAME);
     if !main.is_file() {
-        return Ok(0);
+        return Ok(Place::default());
     }
     let connection = Connection::open_with_flags(&main, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     connection.busy_timeout(Duration::from_secs(2))?;
@@ -544,13 +568,23 @@ fn main_end(path: &Path) -> Result<i64, StoreError> {
         |row| row.get(0),
     )?;
     if !made {
-        return Ok(0);
+        return Ok(Place::default());
     }
-    Ok(connection.query_row(
-        "SELECT COALESCE(MAX(rowid), 0) FROM collaboration_messages",
-        [],
-        |row| row.get(0),
-    )?)
+    Ok(connection
+        .query_row(
+            "SELECT rowid, message_id, created_at_ms FROM collaboration_messages
+             ORDER BY rowid DESC LIMIT 1",
+            [],
+            |row| {
+                Ok(Place {
+                    rowid: row.get(0)?,
+                    message_id: row.get(1)?,
+                    created_at_ms: row.get(2)?,
+                })
+            },
+        )
+        .optional()?
+        .unwrap_or_default())
 }
 
 /// Moves the database at `path` to `relay.sqlite3.unreleased-<now_ms>`, so
@@ -583,6 +617,40 @@ pub(crate) fn set_aside_in(state: &Path) -> Vec<String> {
 
 pub(crate) struct RelayStore {
     connection: Connection,
+}
+
+/// A main-database message by which capture keeps its place: its rowid,
+/// and its id and creation time where capture knows them.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct Place {
+    pub rowid: i64,
+    pub message_id: Option<String>,
+    pub created_at_ms: Option<i64>,
+}
+
+/// The last relay message capture read in `space`, or with no space, the
+/// cursor of a version 2 build: the last relay message it read, which is a
+/// floor of its endpoint.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Mark {
+    pub space: String,
+    pub place: Place,
+}
+
+/// What a capture found before it read, which `settle_capture` writes.
+#[derive(Debug, Default)]
+pub(crate) struct Found {
+    /// Where the cursor goes, when capture reads again or for the first
+    /// time.
+    pub cursor: Option<(i64, Option<String>)>,
+    /// The spaces whose mark's message is gone.
+    pub gone: Vec<String>,
+    /// The floor, with the id and creation time of its message, when the
+    /// database did not have them.
+    pub floor: Option<Place>,
+    /// The marks with no id, with the id and creation time of the message
+    /// at their rowid.
+    pub marks: Vec<Mark>,
 }
 
 /// An item queued on A for one label.
@@ -845,15 +913,18 @@ impl RelayStore {
     /// `endpoint`, or before any, the last one when this database was
     /// made.
     pub(crate) fn capture_cursor(&self, endpoint: &str) -> Result<i64, StoreError> {
-        Ok(self.capture_anchor(endpoint)?.0)
+        match self.capture_anchor(endpoint)? {
+            Some((rowid, _)) => Ok(rowid),
+            None => Ok(self.capture_floor()?.rowid),
+        }
     }
 
-    /// `capture_cursor`, and the id of the message at it, when capture
-    /// recorded one.
+    /// `capture_cursor`, and the id of the message at it when capture
+    /// recorded one, or `None` before `endpoint`'s first capture.
     pub(crate) fn capture_anchor(
         &self,
         endpoint: &str,
-    ) -> Result<(i64, Option<String>), StoreError> {
+    ) -> Result<Option<(i64, Option<String>)>, StoreError> {
         Ok(self
             .connection
             .query_row(
@@ -861,60 +932,90 @@ impl RelayStore {
                 params![endpoint],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
-            .optional()?
-            .unwrap_or((self.capture_floor()?, None)))
+            .optional()?)
     }
 
     /// The last main-database message when this database was made, which
-    /// no capture reads again.
-    pub(crate) fn capture_floor(&self) -> Result<i64, StoreError> {
-        Ok(self.connection.query_row(
-            "SELECT COALESCE(MAX(rowid), 0) FROM capture_start",
-            [],
-            |row| row.get(0),
-        )?)
+    /// no capture reads again, or rowid 0 when there was none.
+    pub(crate) fn capture_floor(&self) -> Result<Place, StoreError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT rowid, message_id, created_at_ms FROM capture_start
+                 ORDER BY rowid DESC LIMIT 1",
+                [],
+                |row| {
+                    Ok(Place {
+                        rowid: row.get(0)?,
+                        message_id: row.get(1)?,
+                        created_at_ms: row.get(2)?,
+                    })
+                },
+            )
+            .optional()?
+            .unwrap_or_default())
     }
 
-    /// The last relay message `endpoint`'s capture read in each space, by
-    /// rowid and id, and the cursor of a build before, at the last relay
-    /// message it read, with no id.
-    pub(crate) fn capture_marks(
-        &self,
-        endpoint: &str,
-    ) -> Result<Vec<(String, i64, Option<String>)>, StoreError> {
+    /// The last relay message `endpoint`'s capture read in each space, and
+    /// the cursor of a build before, at the last relay message it read,
+    /// as a mark of no space.
+    pub(crate) fn capture_marks(&self, endpoint: &str) -> Result<Vec<Mark>, StoreError> {
         let mut statement = self.connection.prepare(
-            "SELECT space, rowid, message_id FROM capture_marks WHERE endpoint = ?1
-             ORDER BY rowid DESC",
+            "SELECT space, rowid, message_id, created_at_ms FROM capture_marks
+             WHERE endpoint = ?1 ORDER BY rowid DESC",
         )?;
         let marks = statement
             .query_map(params![endpoint], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                Ok(Mark {
+                    space: row.get(0)?,
+                    place: Place {
+                        rowid: row.get(1)?,
+                        message_id: row.get(2)?,
+                        created_at_ms: row.get(3)?,
+                    },
+                })
             })?
             .collect::<Result<_, _>>()?;
         Ok(marks)
     }
 
-    /// Moves `endpoint`'s capture cursor back to `rowid`, the message
-    /// `message_id`, and forgets the marks of `gone`, the spaces whose
-    /// last relay message is gone.
-    pub(crate) fn rewind_capture(
-        &self,
-        endpoint: &str,
-        rowid: i64,
-        message_id: Option<&str>,
-        gone: &[String],
-    ) -> Result<(), StoreError> {
+    /// Writes what `endpoint`'s capture found before it read, together:
+    /// its cursor, the marks whose message is gone, and the ids and
+    /// creation times found for the floor and the marks that had none.
+    pub(crate) fn settle_capture(&self, endpoint: &str, found: &Found) -> Result<(), StoreError> {
         let transaction = self.connection.unchecked_transaction()?;
-        transaction.execute(
-            "INSERT INTO capture (endpoint, rowid, message_id) VALUES (?1, ?2, ?3)
-             ON CONFLICT (endpoint) DO UPDATE SET rowid = excluded.rowid,
-                message_id = excluded.message_id",
-            params![endpoint, rowid, message_id],
-        )?;
-        for space in gone {
+        if let Some((rowid, message_id)) = &found.cursor {
+            transaction.execute(
+                "INSERT INTO capture (endpoint, rowid, message_id) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (endpoint) DO UPDATE SET rowid = excluded.rowid,
+                    message_id = excluded.message_id",
+                params![endpoint, rowid, message_id],
+            )?;
+        }
+        for space in &found.gone {
             transaction.execute(
                 "DELETE FROM capture_marks WHERE endpoint = ?1 AND space = ?2",
                 params![endpoint, space],
+            )?;
+        }
+        if let Some(floor) = &found.floor {
+            transaction.execute(
+                "UPDATE capture_start SET message_id = ?2, created_at_ms = ?3
+                 WHERE rowid = ?1 AND message_id IS NULL",
+                params![floor.rowid, floor.message_id, floor.created_at_ms],
+            )?;
+        }
+        for mark in &found.marks {
+            transaction.execute(
+                "UPDATE capture_marks SET message_id = ?4, created_at_ms = ?5
+                 WHERE endpoint = ?1 AND space = ?2 AND rowid = ?3 AND message_id IS NULL",
+                params![
+                    endpoint,
+                    mark.space,
+                    mark.place.rowid,
+                    mark.place.message_id,
+                    mark.place.created_at_ms
+                ],
             )?;
         }
         transaction.commit()?;

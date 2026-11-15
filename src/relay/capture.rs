@@ -5,13 +5,13 @@
 //! only, and idempotent by message id.
 
 use super::{
-    store::{Outbound, RelayStore},
+    store::{Found, Mark, Outbound, Place, RelayStore},
     wire::{self, Reply},
 };
 use crate::{
     StateNamespace, StateStore, ThreadId,
     mux::Endpoint,
-    store::{Answered, RelayAuthor, RelayOrigin, RelayRecipient, ToRelayAuthor},
+    store::{RelayAuthor, RelayOrigin, RelayRecipient, ToRelayAuthor},
 };
 use std::path::Path;
 
@@ -38,10 +38,9 @@ pub(crate) fn capture(
     let marks = relay.capture_marks(&endpoint.key).map_err(error)?;
     let floor = relay.capture_floor().map_err(error)?;
     let mut main = StateStore::open(state).map_err(|error| error.to_string())?;
-    let (rewind, rows, last) = main
+    let (found, rows, last) = main
         .transaction(|transaction| {
-            let rewind = rewind(transaction, &endpoint.key, &anchor, &marks, floor)?;
-            let after = rewind.as_ref().map_or(anchor.0, |rewind| rewind.rowid);
+            let (after, found) = read_from(transaction, &endpoint.key, anchor, marks, floor)?;
             let (rows, last) = transaction.relay_recipient_messages(&endpoint.key, after)?;
             let rows = rows
                 .into_iter()
@@ -50,20 +49,11 @@ pub(crate) fn capture(
                     Ok((row, answered))
                 })
                 .collect::<Result<Vec<_>, crate::StoreError>>()?;
-            Ok((rewind, rows, last))
+            Ok((found, rows, last))
         })
         .map_err(|error| error.to_string())?;
     drop(main);
-    if let Some(rewind) = &rewind {
-        relay
-            .rewind_capture(
-                &endpoint.key,
-                rewind.rowid,
-                rewind.message_id.as_deref(),
-                &rewind.gone,
-            )
-            .map_err(error)?;
-    }
+    relay.settle_capture(&endpoint.key, &found).map_err(error)?;
     let mut labels: Vec<String> = Vec::new();
     let mut failure = None;
     for (row, answered) in &rows {
@@ -99,53 +89,107 @@ pub(crate) fn capture(
     failure.map_or(Ok(()), Err)
 }
 
-/// Where a capture reads again from when its cursor's message is gone.
-struct Rewind {
-    rowid: i64,
-    message_id: Option<String>,
-    /// The spaces whose mark's message is gone too.
-    gone: Vec<String>,
-}
-
-/// Where `endpoint`'s capture reads from when the message at its cursor,
-/// `anchor`, is gone, or `None` when it is still there. A purge of the
-/// newest messages lets SQLite give their rowids to the next ones, at or
-/// below the cursor. Every message after the last relay message of each
-/// space that is still there is new or no relay message, and a purge takes
-/// a space's messages together, so capture reads again from the latest of
-/// the `marks` still there, and never before `floor` or a mark with no id,
-/// which it cannot check.
-fn rewind(
+/// Where `endpoint`'s capture reads from, after the rowid it returns, and
+/// what it found on the way, which it writes before it reads.
+///
+/// A cursor is good while the message at it is the one it read. A purge
+/// of the newest messages lets SQLite give their rowids to the next ones,
+/// at or below the cursor, so when its message is gone, capture reads
+/// again from the latest place still there that it read: the last relay
+/// message of a space, its mark, since a purge takes a space's messages
+/// together, or a floor. Every relay message after the place is new, and
+/// it never reads one again.
+///
+/// A floor is the last message when the relay database was made, and a
+/// version 2 build's cursor, which this build reads as a mark of no
+/// space. Capture never reads the history before a floor. When a purge
+/// takes a floor's message too, the next messages may take rowids below
+/// it, so capture reads after the last message made before the floor's
+/// was. A floor or mark with no id, from a build before, takes the id of
+/// the message at its rowid at the first capture. A cursor with no id
+/// cannot be checked, so capture reads again as after one that is gone,
+/// unless it is at rowid 0, before which nothing is made. Before an
+/// endpoint's first capture, it reads after the latest floor.
+fn read_from(
     transaction: &crate::store::StateTransaction<'_>,
     endpoint: &str,
-    anchor: &(i64, Option<String>),
-    marks: &[(String, i64, Option<String>)],
-    floor: i64,
-) -> Result<Option<Rewind>, crate::StoreError> {
-    let (cursor, Some(message_id)) = anchor else {
-        return Ok(None);
-    };
-    if transaction.message_at(endpoint, *cursor, message_id)? {
-        return Ok(None);
+    anchor: Option<(i64, Option<String>)>,
+    mut marks: Vec<Mark>,
+    mut floor: Place,
+) -> Result<(i64, Found), crate::StoreError> {
+    let mut found = Found::default();
+    if floor.message_id.is_none()
+        && floor.rowid > 0
+        && let Some(made) = transaction.message_made(None, floor.rowid)?
+    {
+        (floor.message_id, floor.created_at_ms) = (Some(made.0), Some(made.1));
+        found.floor = Some(floor.clone());
     }
-    let mut rewind = Rewind {
-        rowid: floor.min(*cursor),
-        message_id: None,
-        gone: Vec::new(),
-    };
-    for (space, rowid, id) in marks {
-        let there = match id {
-            Some(id) => transaction.message_at(endpoint, *rowid, id)?,
-            None => true,
-        };
-        if !there {
-            rewind.gone.push(space.clone());
-        } else if *rowid > rewind.rowid && rowid <= cursor {
-            rewind.rowid = *rowid;
-            rewind.message_id.clone_from(id);
+    for mark in &mut marks {
+        if mark.place.message_id.is_none()
+            && let Some(made) = transaction.message_made(Some(endpoint), mark.place.rowid)?
+        {
+            (mark.place.message_id, mark.place.created_at_ms) = (Some(made.0), Some(made.1));
+            found.marks.push(mark.clone());
         }
     }
-    Ok(Some(rewind))
+    match anchor {
+        Some((cursor, Some(message_id)))
+            if transaction.message_at(endpoint, cursor, &message_id)? =>
+        {
+            return Ok((cursor, found));
+        }
+        Some((0, None)) => return Ok((0, found)),
+        _ => {}
+    }
+    let mut start = after_floor(transaction, endpoint, &floor, false)?;
+    for Mark { space, place } in &marks {
+        let place = if space.is_empty() {
+            after_floor(transaction, endpoint, place, true)?
+        } else {
+            match &place.message_id {
+                Some(message_id)
+                    if !transaction.message_at(endpoint, place.rowid, message_id)? =>
+                {
+                    found.gone.push(space.clone());
+                    continue;
+                }
+                message_id => (place.rowid, message_id.clone()),
+            }
+        };
+        if place.0 > start.0 {
+            start = place;
+        }
+    }
+    found.cursor = Some(start.clone());
+    Ok((start.0, found))
+}
+
+/// Where a capture reads after for `floor`, and the id of the message
+/// there: the floor while its message is there, and when it is gone, the
+/// last message of `endpoint` made before it. A floor with no message id
+/// is one capture cannot check, so it reads after it. The database's floor
+/// is a message of any endpoint, and a mark's, of its own.
+fn after_floor(
+    transaction: &crate::store::StateTransaction<'_>,
+    endpoint: &str,
+    floor: &Place,
+    own: bool,
+) -> Result<(i64, Option<String>), crate::StoreError> {
+    let (Some(message_id), Some(created_at_ms)) = (&floor.message_id, floor.created_at_ms) else {
+        return Ok((floor.rowid, floor.message_id.clone()));
+    };
+    let there = if own {
+        transaction.message_at(endpoint, floor.rowid, message_id)?
+    } else {
+        transaction.message_is(floor.rowid, message_id)?
+    };
+    if there {
+        return Ok((floor.rowid, Some(message_id.clone())));
+    }
+    Ok(transaction
+        .last_made_by(endpoint, created_at_ms)?
+        .map_or((0, None), |(rowid, message_id)| (rowid, Some(message_id))))
 }
 
 /// For each relay author `row` addresses, in order, the message of that
@@ -155,7 +199,7 @@ fn answered(
     transaction: &crate::store::StateTransaction<'_>,
     endpoint: &Endpoint,
     row: &ToRelayAuthor,
-) -> Result<Vec<Option<Answered>>, crate::StoreError> {
+) -> Result<Vec<Option<String>>, crate::StoreError> {
     let namespace = StateNamespace::for_space(&endpoint.key, &row.space);
     row.relay_recipients
         .iter()
@@ -181,7 +225,7 @@ fn capture_one(
     relay: &RelayStore,
     endpoint: &Endpoint,
     row: &ToRelayAuthor,
-    answered: &[Option<Answered>],
+    answered: &[Option<String>],
     now: i64,
 ) -> Result<(Vec<String>, Vec<String>), String> {
     let error = |error: crate::StoreError| error.to_string();
@@ -201,20 +245,13 @@ fn capture_one(
             labels.push(origin.to_owned());
             continue;
         }
-        // An answer to the relay's own notice, which asked nothing, is no
-        // reply for A, and none that B let go of.
-        if answered.as_ref().is_some_and(|answered| answered.notice) {
-            continue;
-        }
         let kept = match &mapped {
             Some((host_id, thread)) if is(recipient, RelayOrigin::Host(host_id), alias) => {
                 keep_for(
                     relay,
                     endpoint,
                     row,
-                    answered
-                        .as_ref()
-                        .map(|answered| answered.message_id.as_str()),
+                    answered.as_deref(),
                     host_id,
                     thread,
                     now,

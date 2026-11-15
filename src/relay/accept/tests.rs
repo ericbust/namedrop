@@ -1744,13 +1744,15 @@ fn after_a_purge_capture_reads_again_from_the_last_relay_message_still_there() {
     assert_eq!(outbox_texts(&b), [[json!("third answer")]]);
 }
 
-/// B's agent that answers the notice of a sender's self-named host, which
-/// asks nothing, makes no reply for A, and none that Doctor counts as
-/// expired. Its answer to the message itself is kept.
+/// B's agent may answer the notice of a sender's self-named host, which the
+/// relay put before the message, rather than the message itself. What it
+/// says is its answer, so it is kept for A as an answer to that message,
+/// and nothing is counted as let go of.
 #[test]
-fn an_answer_to_the_relay_s_own_notice_is_neither_kept_nor_counted() {
+fn an_answer_to_the_relay_s_own_notice_answers_the_message_it_told_about() {
     let b = B::new();
-    b.call(&deliver("m1", "bob", "t1", "please answer"));
+    b.call(&deliver("m1", "bob", "t1", "what is 2+2?"));
+    b.call(&deliver("m2", "bob", "t1", "and 3+3?"));
     let notice = b.rows(
         "namedrop.sqlite3",
         "SELECT message_id FROM collaboration_messages
@@ -1759,18 +1761,355 @@ fn an_answer_to_the_relay_s_own_notice_is_neither_kept_nor_counted() {
         .as_str()
         .unwrap()
         .to_owned();
-    bob_answers(
-        &b,
-        &notice,
-        "@alice@laptop I received the delivery, but it contains no task",
-    );
+    bob_answers(&b, &notice, "@alice@laptop the answer is 4");
     let endpoint = Endpoint::parse(REX);
     super::super::capture::capture(&b.0, &endpoint, &mut |_| {}).unwrap();
-    assert!(outbox_texts(&b).is_empty());
+    let kept = || b.rows("relay.sqlite3", "SELECT re, text FROM outbox ORDER BY seq");
+    assert_eq!(kept(), [[json!("m1"), json!("the answer is 4")]]);
     assert!(super::super::expired_replies(&b.0).is_empty());
     std::thread::sleep(std::time::Duration::from_millis(5));
-    bob_answers(&b, &relayed_id(&b, "m1"), "@alice@laptop the real answer");
+    bob_answers(&b, &relayed_id(&b, "m1"), "@alice@laptop or four");
     super::super::capture::capture(&b.0, &endpoint, &mut |_| {}).unwrap();
-    assert_eq!(outbox_texts(&b), [[json!("the real answer")]]);
+    assert_eq!(
+        kept(),
+        [
+            [json!("m1"), json!("the answer is 4")],
+            [json!("m1"), json!("or four")]
+        ]
+    );
+    assert!(super::super::expired_replies(&b.0).is_empty());
+}
+
+/// Activates `session:<space>` on B with an agent of each alias.
+fn space(b: &B, space: &str, aliases: &[&str]) {
+    let attribution = MutationAttribution::new(ActorKind::Human, "test", 7);
+    StateStore::open(&b.0)
+        .unwrap()
+        .transaction(|transaction| {
+            let namespace = StateNamespace::for_space(REX, space);
+            transaction.activate_worktree(&namespace, &attribution)?;
+            for alias in aliases {
+                let id = format!("address-{space}-{alias}");
+                transaction.create_pane_address(
+                    &namespace,
+                    &PaneAddressDraft {
+                        id: PaneAddressId::new(&id),
+                        role_id: PaneRoleId::new(format!("role-{id}")),
+                        role_name: (*alias).to_owned(),
+                        role_description: (*alias).to_owned(),
+                        alias: (*alias).to_owned(),
+                    },
+                    &attribution,
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+}
+
+/// Makes the relay database again, as an upgraded machine makes its first
+/// one in the middle of the main database's history, so its floor is the
+/// main database's last message.
+fn made_again(b: &B) {
+    fs::remove_file(b.0.join("relay.sqlite3")).unwrap();
+    drop(RelayStore::open(&b.0, crate::relay::now_ms()).unwrap());
+    std::thread::sleep(std::time::Duration::from_millis(5));
+}
+
+/// Leaves the relay database as `TO_3` leaves a version 2 one: the cursor
+/// with no message id, a mark of no space at it, and no floor.
+fn as_version_2_left_it(b: &B) {
+    Connection::open(b.0.join("relay.sqlite3"))
+        .unwrap()
+        .execute_batch(
+            "UPDATE capture SET message_id = NULL;
+             DELETE FROM capture_marks;
+             INSERT INTO capture_marks (endpoint, space, rowid, message_id)
+                SELECT endpoint, '', rowid, NULL FROM capture;
+             DELETE FROM capture_start;",
+        )
+        .unwrap();
+}
+
+fn acked(b: &B) {
+    Connection::open(b.0.join("relay.sqlite3"))
+        .unwrap()
+        .execute("DELETE FROM outbox", [])
+        .unwrap();
+}
+
+/// A purge that takes the relay database's floor and every message after
+/// it lets the next replies take rowids below the floor. Capture reads
+/// after the last message made before the floor's, so each is kept.
+#[test]
+fn replies_made_below_a_purged_floor_are_kept() {
+    let b = B::new();
+    space(&b, "session:b4", &["dave"]);
+    b.call(&deliver("d0", "dave", "td0", "an old question"));
+    tries_as(
+        &b,
+        "b4",
+        "dave",
+        &relayed_id(&b, "d0"),
+        "@alice@laptop an old answer",
+    )
+    .unwrap();
+    for n in 1..=4 {
+        b.call(&deliver(&format!("c{n}"), "carol", "tc", "history"));
+    }
+    made_again(&b);
+    let endpoint = Endpoint::parse(REX);
+    let capture = || super::super::capture::capture(&b.0, &endpoint, &mut |_| {}).unwrap();
+    b.call(&deliver("m1", "bob", "tb", "please answer"));
+    bob_answers(&b, &relayed_id(&b, "m1"), "@alice@laptop bob's answer");
+    capture();
+    purge(&b, "b1");
+    purge(&b, "b2");
+    b.call(&deliver("d1", "dave", "td", "please answer"));
+    let to_dave = relayed_id(&b, "d1");
+    for n in 1..=5 {
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        tries_as(
+            &b,
+            "b4",
+            "dave",
+            &to_dave,
+            &format!("@alice@laptop dave {n}"),
+        )
+        .unwrap();
+        capture();
+    }
+    let floor = b.rows("relay.sqlite3", "SELECT rowid FROM capture_start")[0][0]
+        .as_i64()
+        .unwrap();
+    let below: Vec<Vec<Value>> = b.rows(
+        "namedrop.sqlite3",
+        &format!(
+            "SELECT body FROM collaboration_messages WHERE body LIKE 'dave %' AND rowid <= {floor}"
+        ),
+    );
+    assert!(
+        below.len() >= 2,
+        "replies took rowids below the floor: {below:?}"
+    );
+    let texts: Vec<Value> = outbox_texts(&b)
+        .into_iter()
+        .map(|row| row[0].clone())
+        .collect();
+    assert_eq!(
+        texts,
+        [
+            "bob's answer",
+            "dave 1",
+            "dave 2",
+            "dave 3",
+            "dave 4",
+            "dave 5"
+        ]
+        .map(|text| json!(text))
+    );
+    assert!(super::super::expired_replies(&b.0).is_empty());
+}
+
+/// An endpoint whose first capture comes after its floor's message is gone
+/// reads below the floor too.
+#[test]
+fn a_first_capture_after_a_purge_of_the_floor_reads_below_it() {
+    let b = B::new();
+    for n in 1..=4 {
+        b.call(&deliver(&format!("c{n}"), "carol", "tc", "history"));
+    }
+    made_again(&b);
+    purge(&b, "b2");
+    b.call(&deliver("m1", "bob", "tb", "please answer"));
+    let to_bob = relayed_id(&b, "m1");
+    for answer in ["first", "second"] {
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        bob_answers(&b, &to_bob, &format!("@alice@laptop {answer}"));
+    }
+    super::super::capture::capture(&b.0, &Endpoint::parse(REX), &mut |_| {}).unwrap();
+    assert_eq!(outbox_texts(&b), [[json!("first")], [json!("second")]]);
+}
+
+/// A space purged and then used again keeps the mark of its new messages,
+/// which take rowids below its old mark, so a later capture that reads
+/// again starts after them and keeps none of them again.
+#[test]
+fn a_space_used_again_after_a_purge_marks_its_new_messages() {
+    let b = B::new();
+    let endpoint = Endpoint::parse(REX);
+    let capture = || super::super::capture::capture(&b.0, &endpoint, &mut |_| {}).unwrap();
+    b.call(&deliver("m1", "carol", "tc", "please answer"));
+    let to_carol = relayed_id(&b, "m1");
+    tries_as(&b, "b2", "carol", &to_carol, "@alice@laptop carol 1").unwrap();
+    capture();
+    b.call(&deliver("m2", "bob", "tb", "please answer"));
+    bob_answers(&b, &relayed_id(&b, "m2"), "@alice@laptop bob 1");
+    capture();
+    acked(&b);
+    purge(&b, "b1");
+    space(&b, "session:b1", &["bob"]);
+    b.call(&deliver("m3", "bob", "tb3", "please answer"));
+    let to_bob = relayed_id(&b, "m3");
+    std::thread::sleep(std::time::Duration::from_millis(3));
+    bob_answers(&b, &to_bob, "@alice@laptop bob 2");
+    capture();
+    std::thread::sleep(std::time::Duration::from_millis(3));
+    tries_as(&b, "b2", "carol", &to_carol, "@alice@laptop carol 2").unwrap();
+    capture();
+    assert_eq!(outbox_texts(&b), [[json!("bob 2")], [json!("carol 2")]]);
+    acked(&b);
+    purge(&b, "b2");
+    std::thread::sleep(std::time::Duration::from_millis(3));
+    bob_answers(&b, &to_bob, "@alice@laptop bob 3");
+    capture();
+    assert_eq!(outbox_texts(&b), [[json!("bob 3")]]);
+}
+
+/// A version 3 database's floor has no message id: the first capture gives
+/// it the id and creation time of the message at its rowid, so a later
+/// purge of that message lets capture read below it.
+#[test]
+fn a_version_3_floor_takes_its_message_s_id_at_the_first_capture() {
+    let b = B::new();
+    for n in 1..=4 {
+        b.call(&deliver(&format!("c{n}"), "carol", "tc", "history"));
+    }
+    made_again(&b);
+    Connection::open(b.0.join("relay.sqlite3"))
+        .unwrap()
+        .execute_batch("UPDATE capture_start SET message_id = NULL, created_at_ms = NULL")
+        .unwrap();
+    let endpoint = Endpoint::parse(REX);
+    let capture = || super::super::capture::capture(&b.0, &endpoint, &mut |_| {}).unwrap();
+    capture();
+    assert_eq!(
+        b.rows(
+            "relay.sqlite3",
+            "SELECT message_id IS NOT NULL, created_at_ms IS NOT NULL FROM capture_start"
+        ),
+        [[json!(1), json!(1)]]
+    );
+    purge(&b, "b2");
+    b.call(&deliver("m1", "bob", "tb", "please answer"));
+    let to_bob = relayed_id(&b, "m1");
+    for answer in ["first", "second"] {
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        bob_answers(&b, &to_bob, &format!("@alice@laptop {answer}"));
+        capture();
+    }
+    assert_eq!(outbox_texts(&b), [[json!("first")], [json!("second")]]);
+}
+
+/// A capture that reads again stops at the floor while its message is
+/// there: the history before the relay database was made is not read
+/// again, so a reply in it is neither kept nor counted.
+#[test]
+fn a_capture_that_reads_again_stops_at_the_floor() {
+    let b = B::new();
+    b.call(&deliver("m1", "bob", "tb", "please answer"));
+    bob_answers(&b, &relayed_id(&b, "m1"), "@alice@laptop from before");
+    made_again(&b);
+    let endpoint = Endpoint::parse(REX);
+    let capture = || super::super::capture::capture(&b.0, &endpoint, &mut |_| {}).unwrap();
+    b.call(&deliver("m2", "carol", "tc", "please answer"));
+    tries_as(
+        &b,
+        "b2",
+        "carol",
+        &relayed_id(&b, "m2"),
+        "@alice@laptop carol's answer",
+    )
+    .unwrap();
+    capture();
+    assert_eq!(outbox_texts(&b), [[json!("carol's answer")]]);
+    purge(&b, "b2");
+    capture();
+    assert_eq!(outbox_texts(&b), [[json!("carol's answer")]]);
+    assert!(super::super::expired_replies(&b.0).is_empty());
+}
+
+/// A version 2 cursor is the last relay message that build read, a floor
+/// of its endpoint once the first capture gives it its message's id. A
+/// capture that reads again stops at it, so what A took before is not
+/// kept again.
+#[test]
+fn a_capture_that_reads_again_stops_at_a_version_2_cursor() {
+    let b = B::new();
+    let endpoint = Endpoint::parse(REX);
+    let capture = || super::super::capture::capture(&b.0, &endpoint, &mut |_| {}).unwrap();
+    b.call(&deliver("m1", "bob", "tb", "please answer"));
+    b.call(&deliver("m2", "carol", "tc", "please answer"));
+    let to_carol = relayed_id(&b, "m2");
+    tries_as(&b, "b2", "carol", &to_carol, "@alice@laptop carol first").unwrap();
+    capture();
+    acked(&b);
+    as_version_2_left_it(&b);
+    capture();
+    assert_eq!(
+        b.rows(
+            "relay.sqlite3",
+            "SELECT space, message_id IS NOT NULL FROM capture_marks"
+        ),
+        [[json!(""), json!(1)]],
+        "the first capture gives the mark its message's id"
+    );
+    assert_eq!(
+        b.rows(
+            "relay.sqlite3",
+            "SELECT message_id IS NOT NULL FROM capture"
+        ),
+        [[json!(1)]],
+        "and the cursor, which reads after it, the same"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(3));
+    bob_answers(&b, &relayed_id(&b, "m1"), "@alice@laptop bob first");
+    capture();
+    acked(&b);
+    purge(&b, "b1");
+    std::thread::sleep(std::time::Duration::from_millis(3));
+    tries_as(&b, "b2", "carol", &to_carol, "@alice@laptop carol second").unwrap();
+    capture();
+    assert_eq!(outbox_texts(&b), [[json!("carol second")]]);
+}
+
+/// When a purge takes the message of a version 2 cursor too, the replies
+/// that take rowids below it are kept, as below the database's floor.
+#[test]
+fn replies_made_below_a_purged_version_2_cursor_are_kept() {
+    let b = B::new();
+    let endpoint = Endpoint::parse(REX);
+    let capture = || super::super::capture::capture(&b.0, &endpoint, &mut |_| {}).unwrap();
+    b.call(&deliver("m1", "bob", "tb", "please answer"));
+    bob_answers(&b, &relayed_id(&b, "m1"), "@alice@laptop bob before");
+    b.call(&deliver("m2", "carol", "tc", "please answer"));
+    tries_as(
+        &b,
+        "b2",
+        "carol",
+        &relayed_id(&b, "m2"),
+        "@alice@laptop carol first",
+    )
+    .unwrap();
+    capture();
+    acked(&b);
+    as_version_2_left_it(&b);
+    capture();
+    purge(&b, "b2");
+    std::thread::sleep(std::time::Duration::from_millis(3));
+    let to_bob = relayed_id(&b, "m1");
+    for n in 1..=4 {
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        bob_answers(&b, &to_bob, &format!("@alice@laptop bob {n}"));
+        capture();
+    }
+    let texts: Vec<Value> = outbox_texts(&b)
+        .into_iter()
+        .map(|row| row[0].clone())
+        .collect();
+    assert_eq!(
+        texts,
+        ["bob 1", "bob 2", "bob 3", "bob 4"].map(|text| json!(text))
+    );
     assert!(super::super::expired_replies(&b.0).is_empty());
 }

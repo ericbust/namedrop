@@ -128,11 +128,16 @@ fn a_newer_relay_schema_is_refused() {
     let Err(error) = RelayStore::open(&state.0, NOW) else {
         panic!("a newer schema opened");
     };
-    assert!(error.to_string().contains("relay schema 4"), "{error}");
+    assert!(
+        error
+            .to_string()
+            .contains(&format!("relay schema {}", VERSION + 1)),
+        "{error}"
+    );
 }
 
 /// A version 1 database, as the first relay made, opens as this version
-/// with its rows, and takes what versions 2 and 3 add.
+/// with its rows, and takes what versions 2, 3 and 4 add.
 #[test]
 fn a_version_1_relay_database_is_brought_to_this_version_with_its_rows() {
     let state = State::new();
@@ -372,14 +377,21 @@ fn a_version_2_database_is_brought_to_this_version_with_its_rows() {
     assert_eq!(version(&store), VERSION);
     assert_eq!(
         store.capture_anchor("rex:/tmp/a.sock").unwrap(),
-        (42, None),
-        "the cursor stays, with no message to check"
+        Some((42, None)),
+        "the cursor stays, with no message to check until the first capture"
     );
     assert_eq!(
         store.capture_marks("rex:/tmp/a.sock").unwrap(),
-        [(String::new(), 42, None)],
-        "and a capture never reads again before it"
+        [Mark {
+            space: String::new(),
+            place: Place {
+                rowid: 42,
+                ..Place::default()
+            },
+        }],
+        "and it is a floor a capture never reads again before"
     );
+    assert_eq!(store.capture_floor().unwrap(), Place::default());
     assert!(state.set_aside().is_empty());
     assert_eq!(count(&store, "SELECT COUNT(*) FROM peers"), 2);
     let endpoint = "rex:/tmp/a.sock";
@@ -401,6 +413,54 @@ fn a_version_2_database_is_brought_to_this_version_with_its_rows() {
     assert_eq!(peers("held"), "lab");
     assert_eq!(peers("dropped"), "aardvark");
     assert_eq!(store.held(endpoint, false).unwrap()[0].peer, "lab");
+    usable(&store);
+}
+
+/// A version 3 database, as the relay of `63d2a20a` made, is brought to
+/// this version in place with its rows. Its floor and marks have no
+/// message id or creation time yet: the first capture fills them in.
+#[test]
+fn a_version_3_database_is_brought_to_this_version_with_its_rows() {
+    let state = State::new();
+    state.made_by(include_str!("fixtures/v3-63d2a20a.sql"), 3);
+    Connection::open(state.0.join("relay.sqlite3"))
+        .unwrap()
+        .execute_batch(
+            "INSERT INTO capture_start (rowid) VALUES (17);
+             INSERT INTO capture (endpoint, rowid, message_id)
+                VALUES ('rex:/tmp/a.sock', 42, 'm-42');
+             INSERT INTO capture_marks (endpoint, space, rowid, message_id)
+                VALUES ('rex:/tmp/a.sock', 'session:a', 40, 'm-40'),
+                    ('rex:/tmp/a.sock', '', 20, NULL);",
+        )
+        .unwrap();
+    let store = state.open(NOW);
+    assert_eq!(version(&store), VERSION);
+    assert!(state.set_aside().is_empty());
+    assert_eq!(
+        store.capture_floor().unwrap(),
+        Place {
+            rowid: 17,
+            ..Place::default()
+        }
+    );
+    assert_eq!(
+        store.capture_anchor("rex:/tmp/a.sock").unwrap(),
+        Some((42, Some("m-42".to_owned())))
+    );
+    let mark = |space: &str, rowid, message_id: Option<&str>| Mark {
+        space: space.to_owned(),
+        place: Place {
+            rowid,
+            message_id: message_id.map(str::to_owned),
+            created_at_ms: None,
+        },
+    };
+    assert_eq!(
+        store.capture_marks("rex:/tmp/a.sock").unwrap(),
+        [mark("session:a", 40, Some("m-40")), mark("", 20, None)]
+    );
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM peers"), 1);
     usable(&store);
 }
 
