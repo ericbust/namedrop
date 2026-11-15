@@ -217,6 +217,24 @@ impl Cli {
         )
     }
 
+    pub fn rex_action(&self) -> Option<&str> {
+        match &self.command {
+            Command::Rex {
+                command: RexCommand::Action { name },
+            } => Some(name),
+            _ => None,
+        }
+    }
+
+    pub fn rex_ensure_from_server(&self) -> bool {
+        matches!(
+            self.command,
+            Command::Rex {
+                command: RexCommand::Ensure { from_server: true }
+            }
+        )
+    }
+
     /// The `host_id` of `namedrop relay accept`.
     pub fn relay_accept_host_id(&self) -> Option<&str> {
         match &self.command {
@@ -499,6 +517,13 @@ enum RelayCommand {
 enum RexCommand {
     /// Turn one Rex server's events, named by `--endpoint`, into lifecycle work.
     Bridge,
+    /// Run a Namedrop palette action in this process.
+    Action { name: String },
+    /// Start the bridge only when this process was started by its Rex server.
+    Ensure {
+        #[arg(long, required = true)]
+        from_server: bool,
+    },
 }
 
 impl Command {
@@ -549,6 +574,12 @@ impl Command {
             Self::Rex {
                 command: RexCommand::Bridge,
             } => "rex.bridge",
+            Self::Rex {
+                command: RexCommand::Action { .. },
+            } => "rex.action",
+            Self::Rex {
+                command: RexCommand::Ensure { .. },
+            } => "rex.ensure",
             Self::Relay {
                 command: RelayCommand::Accept { .. },
             } => "relay.accept",

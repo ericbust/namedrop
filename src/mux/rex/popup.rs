@@ -343,7 +343,28 @@ mod tests {
 
     #[test]
     fn a_detached_target_is_refused_before_any_request() {
-        for screen in [PopupScreen::Name, PopupScreen::Tour] {
+        for (screen, message) in [
+            (
+                PopupScreen::Name,
+                "This pane is not in a window, so Name this pane cannot open over it. Open Name this pane from a pane in a window.",
+            ),
+            (
+                PopupScreen::Manage,
+                "This pane is not in a window, so Manage Namedrop names and agents cannot open over it. Open Manage Namedrop names and agents from a pane in a window.",
+            ),
+            (
+                PopupScreen::Doctor,
+                "This pane is not in a window, so Namedrop Doctor cannot open over it. Open Namedrop Doctor from a pane in a window.",
+            ),
+            (
+                PopupScreen::Status,
+                "This pane is not in a window, so Agent status cannot open over it. Open Agent status from a pane in a window.",
+            ),
+            (
+                PopupScreen::Tour,
+                "This pane is not in a window, so Namedrop tour cannot open over it. Open Namedrop tour from a pane in a window.",
+            ),
+        ] {
             let state = State::new();
             let launcher = launcher(&state);
             let mut spec = popup(screen, &state);
@@ -354,11 +375,7 @@ mod tests {
                 Local::default(),
             );
             let error = mux.open_popup(&spec, &launcher).unwrap_err().to_string();
-            assert!(
-                error.starts_with("This pane is not in a window, so ")
-                    && error.contains(words(screen).0),
-                "{error}"
-            );
+            assert_eq!(error, message);
             assert!(mux.wire.calls().is_empty(), "{:?}", mux.wire.calls());
         }
     }

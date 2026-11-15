@@ -928,7 +928,7 @@ where
         eprintln!("{refusal}");
     }
     let executable = crate::collaboration_executable().map(PathBuf::from);
-    let outcomes = [AgentRuntime::Codex, AgentRuntime::ClaudeCode].map(|agent_runtime| {
+    let mut outcomes = [AgentRuntime::Codex, AgentRuntime::ClaudeCode].map(|agent_runtime| {
         let outcome = match (runtime.home_directory, &executable, &current) {
             (_, _, Err(refusal)) => Err(refusal.clone()),
             (Some(home_directory), _, Ok(false)) => {
@@ -952,6 +952,15 @@ where
         };
         (agent_runtime, outcome)
     });
+    if matches!(current, Ok(true))
+        && let (Some(home), Ok(executable)) = (runtime.home_directory, &executable)
+        && let Err(error) =
+            crate::rex_ui::refresh(&lease, home, executable, runtime.state_directory)
+    {
+        for (_, outcome) in &mut outcomes {
+            *outcome = Err(error.clone());
+        }
+    }
     drop(lease);
     let namespace = discovered.namespace(runtime.session_socket_id);
     let attribution = MutationAttribution::new(
@@ -1510,7 +1519,7 @@ impl std::fmt::Display for ReplacementError {
 /// Replaces one owned file by staging it and renaming it over the target, and
 /// only when its content differs, so a reader of the package never observes a
 /// half-written file and repeated lifecycle events rewrite nothing.
-fn replace_if_changed(
+pub(crate) fn replace_if_changed(
     lease: &PackageLease,
     target: &Path,
     contents: &str,

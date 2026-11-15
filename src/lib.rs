@@ -40,6 +40,7 @@ pub use relay::{accept as relay_accept, run_worker as relay_worker};
 #[doc(hidden)]
 pub mod reminder;
 pub mod rex_bridge;
+pub mod rex_ui;
 pub use reminder::execute_reminder_operation;
 mod persona;
 mod ports;

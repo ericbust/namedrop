@@ -208,7 +208,7 @@ pub fn install_shortcuts(
 
 pub(crate) fn activate_shortcuts(home: Option<&Path>, mux: &impl MuxAct) -> serde_json::Value {
     if mux.endpoint().kind == MuxKind::Rex {
-        return serde_json::json!({"status": "no_module", "repair": "Run sh scripts/install.sh."});
+        return crate::rex_ui::shortcuts(home, mux.endpoint());
     }
     match install_shortcuts(None, home) {
         Ok(mut report) => {

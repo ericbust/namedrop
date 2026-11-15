@@ -63,32 +63,39 @@ pub(super) fn launch(
     mode: UiMode,
 ) -> Result<serde_json::Value, String> {
     with_runtime_options(options, inherited, |runtime| {
-        let workspace = runtime
-            .workspace_id
-            .ok_or("This popup requires an active Herdr space")?;
-        let pane = runtime
-            .current_pane_id
-            .ok_or("This popup requires an active Herdr pane")?;
-        let origin = target_pane(runtime)?;
-        if mode == UiMode::Tour {
-            return tour::open_popup(runtime, &origin);
-        }
-        // The popup carries the Agent Session it was opened for, so asking for
-        // help later cannot reach a replacement session in the same pane.
-        let screen = match mode {
-            UiMode::Name => PopupScreen::Name,
-            UiMode::Manage => PopupScreen::Manage,
-            UiMode::Doctor => PopupScreen::Doctor,
-            UiMode::Status => PopupScreen::Status,
-            UiMode::Tour => PopupScreen::Tour,
-        };
-        let target = PaneFacts {
-            id: PaneId::new(pane),
-            space: SpaceId::new(workspace),
-            ..origin.facts()
-        };
-        namedrop::open_popup(runtime, screen, target).map_err(|error| error.to_string())
+        launch_in_runtime(runtime, mode)
     })
+}
+
+pub(super) fn launch_in_runtime(
+    runtime: &Runtime<'_>,
+    mode: UiMode,
+) -> Result<serde_json::Value, String> {
+    let workspace = runtime
+        .workspace_id
+        .ok_or("This popup requires an active Herdr space")?;
+    let pane = runtime
+        .current_pane_id
+        .ok_or("This popup requires an active Herdr pane")?;
+    let origin = target_pane(runtime)?;
+    if mode == UiMode::Tour {
+        return tour::open_popup(runtime, &origin);
+    }
+    // The popup carries the Agent Session it was opened for, so asking for
+    // help later cannot reach a replacement session in the same pane.
+    let screen = match mode {
+        UiMode::Name => PopupScreen::Name,
+        UiMode::Manage => PopupScreen::Manage,
+        UiMode::Doctor => PopupScreen::Doctor,
+        UiMode::Status => PopupScreen::Status,
+        UiMode::Tour => PopupScreen::Tour,
+    };
+    let target = PaneFacts {
+        id: PaneId::new(pane),
+        space: SpaceId::new(workspace),
+        ..origin.facts()
+    };
+    namedrop::open_popup(runtime, screen, target).map_err(|error| error.to_string())
 }
 
 fn target_pane(runtime: &Runtime<'_>) -> Result<DiscoveredPane, String> {

@@ -195,11 +195,11 @@ fn only_an_unsupported_rex_popup_releases_the_tour_marker() {
         }
     }
 }
-/// A detached Rex block has no window for the tour's layer. The tour waits,
-/// marker unclaimed, for an agent in a window, and prefers one over the
-/// detached agent an event names.
+/// A detached Rex block has no window for the tour's layer. The tour is not
+/// shown, and its marker stays unclaimed, until an agent is in a window, and
+/// it prefers that agent over the detached one an event names.
 #[test]
-fn a_rex_tour_skips_detached_agents_and_keeps_its_marker() {
+fn a_rex_tour_skips_detached_agents_and_leaves_its_marker_unclaimed() {
     let f = Fixture::new();
     let home = f.0.join("home");
     let ids = Ids(AtomicU64::new(0));
