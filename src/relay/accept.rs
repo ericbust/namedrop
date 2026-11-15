@@ -3,7 +3,7 @@
 
 use super::{
     store::{InboundKey, RelayStore, RemoteThread},
-    wire::{Answer, Item, Op, Outcome, PAGE_LIMIT, Request, Status, TEXT_LIMIT},
+    wire::{Answer, Item, Op, Outcome, PAGE_LIMIT, Request, Status, TEXT_LIMIT, VERSION},
 };
 use crate::{
     ActorKind, DeliveryId, IdGenerator, MessageId, MutationAttribution, StateNamespace, StateStore,
@@ -26,11 +26,13 @@ struct Held {
 }
 
 /// Decides the call `input` holds for the server `host_id` behind
-/// `endpoint`, and calls `wake` for the space of an item it accepts.
+/// `endpoint`, from the machine `caller_host` when the caller's principal
+/// names one, and calls `wake` for the space of an item it accepts.
 pub(crate) fn accept(
     state: &Path,
     endpoint: &Endpoint,
     host_id: &str,
+    caller_host: Option<&str>,
     input: &[u8],
     wake: &mut dyn FnMut(&crate::SpaceId),
 ) -> Answer {
@@ -47,10 +49,12 @@ pub(crate) fn accept(
         outbox: Vec::new(),
         more: false,
         epoch: String::new(),
+        relay: VERSION,
+        lost: Vec::new(),
     };
     let request: Request = match serde_json::from_slice(input) {
         Ok(request) => request,
-        Err(error) => return refused(format!("the request is not a relay request: {error}")),
+        Err(error) => return refused(unparsed(input, &error)),
     };
     if let Err(field) = validate(&request) {
         let mut answer = refused(format!("{field} is not valid"));
@@ -66,7 +70,18 @@ pub(crate) fn accept(
     };
     let result = match (&request.op, &request.item) {
         (Op::Deliver, Some(item)) => {
-            match deliver(state, endpoint, &store, &request, item, now_ms, wake) {
+            match deliver(
+                state,
+                endpoint,
+                &store,
+                &Caller {
+                    request: &request,
+                    host: caller_host,
+                },
+                item,
+                now_ms,
+                wake,
+            ) {
                 Ok(outcome) => Some(outcome),
                 Err(error) => return retry(host_id, Some(item), &error),
             }
@@ -84,14 +99,22 @@ pub(crate) fn accept(
             .outbox_page(&request.from.host_id, acked, after, PAGE_LIMIT)
             .map(|page| (epoch, page))
     });
-    match paged {
-        Ok((epoch, (outbox, more, kept))) => Answer {
+    // A version 1 A reads no losses, so its answer stays as it was.
+    let lost = if request.relay >= 2 {
+        store.lost_for(&request.from.host_id)
+    } else {
+        Ok(Vec::new())
+    };
+    match paged.and_then(|paged| lost.map(|lost| (paged, lost))) {
+        Ok(((epoch, (outbox, more, kept)), lost)) => Answer {
             host_id: host_id.to_owned(),
             can_reply: i64::try_from(kept).is_ok_and(|kept| kept < super::store::OUTBOX_LIMIT),
             result,
             outbox,
             more,
             epoch,
+            relay: VERSION,
+            lost,
         },
         Err(error) => retry(host_id, request.item.as_ref(), &error.to_string()),
     }
@@ -111,6 +134,23 @@ fn retry(host_id: &str, item: Option<&Item>, reason: &str) -> Answer {
         outbox: Vec::new(),
         more: false,
         epoch: String::new(),
+        relay: VERSION,
+        lost: Vec::new(),
+    }
+}
+
+/// Why B refuses a request it cannot read, naming both relay versions when
+/// A's is newer, so A can fall back to what this B reads.
+fn unparsed(input: &[u8], error: &serde_json::Error) -> String {
+    let theirs = serde_json::from_slice::<serde_json::Value>(input)
+        .ok()
+        .and_then(|request| request["relay"].as_u64())
+        .filter(|theirs| *theirs > u64::from(VERSION));
+    match theirs {
+        Some(theirs) => format!(
+            "this Namedrop's relay is version {VERSION}, which cannot read a version {theirs} request: {error}"
+        ),
+        None => format!("the request is not a relay request: {error}"),
     }
 }
 
@@ -154,15 +194,23 @@ fn validate(request: &Request) -> Result<(), &'static str> {
 /// The item's outcome: the stored one for a known key, or a new one stored
 /// with its key. A refusal that depends on B's state is stored too, so a
 /// retry never changes the answer.
+/// A call's request, and the caller's machine as its principal names it.
+struct Caller<'a> {
+    request: &'a Request,
+    host: Option<&'a str>,
+}
+
 fn deliver(
     state: &Path,
     endpoint: &Endpoint,
     store: &RelayStore,
-    request: &Request,
+    caller: &Caller<'_>,
     item: &Item,
     now_ms: i64,
     wake: &mut dyn FnMut(&crate::SpaceId),
 ) -> Result<Outcome, String> {
+    let request = caller.request;
+    let display_host = caller.host.unwrap_or(&request.from.host);
     let key = InboundKey {
         host_id: &request.from.host_id,
         message_id: &item.id,
@@ -199,7 +247,7 @@ fn deliver(
         endpoint: &endpoint.key,
         space: space.as_str(),
         sender: &request.from.name,
-        display_host: &request.from.host,
+        display_host,
     };
     let ids = crate::ProcessIds::default();
     let in_reply_to = item.in_reply_to.as_deref().map(MessageId::new);
@@ -219,7 +267,7 @@ fn deliver(
     let author = RelayAuthor::new(
         RelayOrigin::Host(&request.from.host_id),
         &request.from.name,
-        format!("{}@{}", request.from.name, request.from.host),
+        format!("{}@{display_host}", request.from.name),
     );
     let request_id = format!("relay:{}:{}:{}", request.from.host_id, item.id, item.to);
     let attribution = MutationAttribution::new(
@@ -241,12 +289,23 @@ fn deliver(
                 recipient: &recipient,
                 text: &item.text,
                 notice: false,
+                self_named_host: caller.host.is_none().then_some(display_host),
             },
             &attribution,
         )
     });
     let receipt = match inserted {
         Ok(receipt) => receipt,
+        // The thread takes the item once a person on B resumes it, so the
+        // outcome is not stored and A sends the item again.
+        Err(error) if error.is_reply_limit() => {
+            let status = if request.relay >= 2 {
+                Status::Paused
+            } else {
+                Status::Retry
+            };
+            return Ok(outcome(status, Some(error.to_string())));
+        }
         Err(error) if error.kind() == crate::StoreErrorKind::InvalidInput => {
             let refusal = outcome(Status::Refused, Some(error.to_string()));
             store

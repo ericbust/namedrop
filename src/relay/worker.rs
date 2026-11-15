@@ -4,7 +4,7 @@
 //! slow network call never holds a space's local mail.
 
 use super::{
-    Hosts, RemoteHosts,
+    Hosts,
     rex::{self, Failure},
     store::{Answers, Collected, Held, Queued, RelayStore, Settled},
     wire::{self, Answer, Item, Op, Perform, Reply, Request, Sender, Status},
@@ -162,14 +162,15 @@ fn round(run: &mut Run<'_>, reading: &mut Reading) -> Round {
     if queued.is_empty() && !open {
         return Round::Done;
     }
-    let labels = match Hosts::read() {
-        Ok(hosts)
-            if hosts
-                .listed()
-                .is_some_and(|listed| listed.iter().any(|l| l == run.label)) =>
-        {
-            hosts.same_host(run.label)
+    let (hosts, labels) = match Hosts::read() {
+        Ok(hosts) if hosts.labels.iter().any(|listed| listed == run.label) => {
+            let labels = hosts.same_host(run.label);
+            (hosts, labels)
         }
+        // `rex` warned that the list may lack hosts, as when it could not
+        // read the home or this machine's own server, so the label may
+        // still be listed there.
+        Ok(hosts) if hosts.incomplete() => return Round::Kept,
         Ok(_) => {
             let reason = format!("{} is no longer in your Rex hosts", run.label);
             for item in &queued {
@@ -179,30 +180,53 @@ fn round(run: &mut Run<'_>, reading: &mut Reading) -> Round {
         }
         Err(_) => return Round::Kept,
     };
+    // A's name for the server these labels reach: the first of them.
+    let name = labels.iter().min().map_or(run.label, String::as_str);
     let Some(own) = crate::rex_bridge::known_host_id(run.state, run.endpoint) else {
         return Round::Kept;
     };
-    let peer_id = match status(run.label) {
-        Ok(host_id) => {
-            let _ = store.set_peer(run.label, &host_id, now);
-            host_id
+    let Ok(peer_id) = status(run.label) else {
+        return Round::Kept;
+    };
+    match answered_as_elsewhere(&store, &hosts, &labels, &peer_id, now) {
+        Ok(None) => {
+            let _ = store.set_same_server(endpoint, run.label, None);
+            let _ = store.set_peer(run.label, &peer_id, now);
+        }
+        Ok(Some(other)) => {
+            let _ = store.set_same_server(endpoint, run.label, Some(&other));
+            let reason = format!(
+                "{}'s Rex server answers as the one {other} reaches, which your Rex hosts list \
+                 gives other addresses",
+                run.label
+            );
+            for item in queued.iter().filter(|item| item.host_id.is_none()) {
+                let _ = store.settle(run.label, item, Settled::Failed, Some(&reason), now);
+            }
+            return Round::Kept;
         }
         Err(_) => return Round::Kept,
-    };
+    }
     let mut kept = false;
     let silent = || {
         store
             .cannot_reply(&run.endpoint.key, run.label)
             .is_ok_and(|no| no)
     };
-    // Whether B said in a page this round that it keeps no more replies
-    // for this side. Only that fails an item, and only one never sent,
-    // since B may have accepted one sent before and still answers for it.
+    // Whether B said in its latest page this round that it keeps no more
+    // replies for this side. Only that fails an item, and only one never
+    // sent, since B may have accepted one sent before and still answers
+    // for it.
     let mut full = false;
+    // The threads of the items B has not taken yet, each with the message
+    // that waits. A later message of such a thread waits behind it, so B
+    // takes a thread's messages in order.
+    let mut waiting: Vec<(&str, &str)> = Vec::new();
     if !queued.is_empty() && silent() {
         // B's last page said it keeps no more replies for this side, so a
         // collect first tells whether that still holds.
         let peer = Peer {
+            name,
             host_id: &peer_id,
             labels: &labels,
         };
@@ -211,6 +235,13 @@ fn round(run: &mut Run<'_>, reading: &mut Reading) -> Round {
         full = pages.read && silent();
     }
     for item in &queued {
+        if waiting
+            .iter()
+            .any(|(thread, message)| *thread == item.thread && *message != item.message_id)
+        {
+            kept = true;
+            continue;
+        }
         if full && item.host_id.is_none() {
             let reason = format!(
                 "{} keeps no more replies for this machine until this machine collects them",
@@ -223,6 +254,11 @@ fn round(run: &mut Run<'_>, reading: &mut Reading) -> Round {
         if store.pin(run.label, item, &host_id).is_err() {
             return Round::Kept;
         }
+        let peer = Peer {
+            name,
+            host_id: &host_id,
+            labels: &labels,
+        };
         let request = Request {
             op: Op::Deliver,
             expect_host_id: host_id.clone(),
@@ -238,30 +274,31 @@ fn round(run: &mut Run<'_>, reading: &mut Reading) -> Round {
                 in_reply_to: item.in_reply_to.clone(),
                 text: item.text.clone(),
             }),
-            ..acked(&store, &run.endpoint.key, &host_id, reading)
+            ..acked(&store, &run.endpoint.key, &peer, reading)
         };
         match perform(run.label, &request) {
             Call::Answered(answer) => {
                 let more = answer.more;
-                decide(
+                if decide(
                     run.label,
                     &store,
                     item,
                     answer.result.as_ref(),
                     now,
                     &mut kept,
-                );
-                let peer = Peer {
-                    host_id: &host_id,
-                    labels: &labels,
-                };
+                ) {
+                    waiting.push((item.thread.as_str(), item.message_id.as_str()));
+                }
                 let page = collect_replies(run, &store, &peer, &answer, reading);
+                let pages = (page != Page::Fault && more)
+                    .then(|| collect(run, &store, &own, &peer, reading));
+                // Each page stores whether B has room, so once the collect
+                // that follows has read on, the store says what the latest
+                // page did.
                 if page == Page::Read {
                     full = silent();
                 }
-                if page == Page::Fault
-                    || more && !collect(run, &store, &own, &peer, reading).answered
-                {
+                if page == Page::Fault || pages.is_some_and(|pages| !pages.answered) {
                     kept = true;
                 }
             }
@@ -275,6 +312,7 @@ fn round(run: &mut Run<'_>, reading: &mut Reading) -> Round {
         }
     }
     let peer = Peer {
+        name,
         host_id: &peer_id,
         labels: &labels,
     };
@@ -288,7 +326,32 @@ fn round(run: &mut Run<'_>, reading: &mut Reading) -> Round {
     }
 }
 
-/// Settles `item` by B's outcome for it.
+/// The label outside `labels`, and listed in `hosts`, whose server last
+/// reported `host_id` and still does when asked again, so the server
+/// behind `labels` answers as one this machine reaches by other
+/// addresses. One that now reports another `host_id` is recorded so, and
+/// one that does not answer counts.
+fn answered_as_elsewhere(
+    store: &RelayStore,
+    hosts: &Hosts,
+    labels: &[String],
+    host_id: &str,
+    now: i64,
+) -> Result<Option<String>, crate::StoreError> {
+    for other in store.answering_as(host_id)? {
+        if labels.contains(&other) || !hosts.labels.contains(&other) {
+            continue;
+        }
+        match status(&other) {
+            Ok(theirs) if theirs != host_id => store.set_peer(&other, &theirs, now)?,
+            _ => return Ok(Some(other)),
+        }
+    }
+    Ok(None)
+}
+
+/// Settles `item` by B's outcome for it, and says whether B has not taken
+/// it yet, so it stays queued.
 fn decide(
     label: &str,
     store: &RelayStore,
@@ -296,10 +359,10 @@ fn decide(
     outcome: Option<&super::wire::Outcome>,
     now: i64,
     kept: &mut bool,
-) {
+) -> bool {
     let Some(outcome) = outcome else {
         *kept = true;
-        return;
+        return true;
     };
     let printable: String = outcome
         .reason
@@ -324,9 +387,17 @@ fn decide(
         Status::Refused | Status::Ambiguous => {
             store.settle(label, item, Settled::Failed, Some(reason), now)
         }
+        // An item kept for another reason than B's limit is no longer
+        // paused, so an expiry names what happened last.
         Status::Retry => {
             *kept = true;
-            Ok(())
+            let _ = store.set_paused(label, item, false);
+            return true;
+        }
+        Status::Paused => {
+            *kept = true;
+            let _ = store.set_paused(label, item, true);
+            return true;
         }
     };
     // The item stays queued, and B keeps each reply to it until a later
@@ -334,6 +405,7 @@ fn decide(
     if settled.is_err() {
         *kept = true;
     }
+    false
 }
 
 /// What a collect found.
@@ -395,7 +467,7 @@ fn collect(
                 name: "namedrop".to_owned(),
                 host: super::machine_name(),
             },
-            ..acked(store, &run.endpoint.key, peer.host_id, reading)
+            ..acked(store, &run.endpoint.key, peer, reading)
         };
         let Call::Answered(answer) = perform(run.label, &request) else {
             return Pages {
@@ -403,12 +475,10 @@ fn collect(
                 answered: false,
             };
         };
-        if answer
-            .result
-            .as_ref()
-            .is_some_and(|result| result.status != Status::Retry)
-        {
-            // B refused the call itself, as for another server's host_id.
+        if answer.result.is_some() || !wire::valid_id(&answer.epoch) {
+            // B refused the call itself, as for another server's host_id,
+            // or could not page, as its answer to a fault of its own says,
+            // so the next try backs off.
             return Pages {
                 read,
                 answered: false,
@@ -434,11 +504,13 @@ fn collect(
     }
 }
 
-/// The parts of a request that ack what `endpoint` has taken from
-/// `host_id`, and ask for the replies after those `reading` read.
-fn acked(store: &RelayStore, endpoint: &str, host_id: &str, reading: &Reading) -> Request {
-    let (epoch, ack_through) = store.ack_through(endpoint, host_id).unwrap_or_default();
-    let after = if reading.host_id == host_id && reading.epoch == epoch {
+/// The parts of a request that ack what `endpoint` has taken from `peer`,
+/// and ask for the replies after those `reading` read.
+fn acked(store: &RelayStore, endpoint: &str, peer: &Peer<'_>, reading: &Reading) -> Request {
+    let (epoch, ack_through) = store
+        .ack_through(endpoint, peer.name, peer.host_id)
+        .unwrap_or_default();
+    let after = if reading.host_id == peer.host_id && reading.epoch == epoch {
         reading.after
     } else {
         0
@@ -455,13 +527,15 @@ fn acked(store: &RelayStore, endpoint: &str, host_id: &str, reading: &Reading) -
         ack_through,
         epoch,
         after,
+        relay: wire::VERSION,
     }
 }
 
-/// The server a worker collects from: the `host_id` it reports, and the
-/// labels that reach it by this machine's host list, the worker's own
-/// first.
+/// The server a worker collects from: A's name for it, the first by name
+/// of the labels that reach it by this machine's host list, the `host_id`
+/// it reports, and those labels, the worker's own first.
 struct Peer<'a> {
+    name: &'a str,
     host_id: &'a str,
     labels: &'a [String],
 }
@@ -557,15 +631,30 @@ fn collect_replies(
     if store
         .set_can_reply(endpoint, run.label, answer.can_reply)
         .is_err()
+        || store
+            .note_lost(
+                endpoint,
+                run.label,
+                peer.name,
+                host_id,
+                &answer.epoch,
+                &answer.lost,
+                super::now_ms(),
+            )
+            .is_err()
     {
         return Page::Fault;
     }
-    let Ok((epoch, through)) = store.ack_through(endpoint, host_id) else {
+    let Ok((epoch, through)) = store.ack_through(endpoint, peer.name, host_id) else {
         return Page::Fault;
     };
     // A new epoch starts the cursor at 0, so the next request names the
     // epoch the pass reads, even before A acks a reply of it.
-    if epoch != answer.epoch && store.advance(endpoint, host_id, &answer.epoch, 0).is_err() {
+    if epoch != answer.epoch
+        && store
+            .advance(endpoint, peer.name, host_id, &answer.epoch, 0)
+            .is_err()
+    {
         return Page::Fault;
     }
     let through = if epoch == answer.epoch { through } else { 0 };
@@ -595,7 +684,7 @@ fn collect_replies(
                         .count_other_label(endpoint, run.label, super::now_ms())
                         .is_ok())
                     && store
-                        .advance(endpoint, host_id, &answer.epoch, reply.seq)
+                        .advance(endpoint, peer.name, host_id, &answer.epoch, reply.seq)
                         .is_ok()
         };
         match place(run, store, peer, answer, reply, reading) {
@@ -646,7 +735,9 @@ enum Placed {
 /// endpoint's, left on B when it answers an item A has not settled or
 /// follows a reply of its thread this pass left, found as A placed it
 /// before, held behind its thread's held replies or by the Automatic
-/// Reply Limit, or else taken. An error is a store fault.
+/// Reply Limit, or else taken. It looks and makes under the placement
+/// lock, so another worker of the server finds what this one made. An
+/// error is a store fault.
 fn place(
     run: &mut Run<'_>,
     store: &RelayStore,
@@ -679,6 +770,7 @@ fn place(
     }
     let held = Held {
         endpoint: endpoint.clone(),
+        peer: peer.name.to_owned(),
         host_id: host_id.to_owned(),
         epoch: answer.epoch.clone(),
         label,
@@ -686,6 +778,7 @@ fn place(
         thread: thread.1.clone(),
         reply: reply.clone(),
     };
+    let _placing = super::placing(run.state).map_err(drop)?;
     if store.placed(&held).map_err(drop)? {
         return Ok(Placed::Done);
     }
@@ -796,6 +889,7 @@ fn take(state: &Path, gate: Gate<'_>, held: &Held) -> Result<Taken, String> {
 /// its thread open.
 fn collected(store: &RelayStore, held: &Held, message_id: &str) -> Result<bool, crate::StoreError> {
     store.record_collected(&Collected {
+        peer: &held.peer,
         host_id: &held.host_id,
         epoch: &held.epoch,
         seq: held.reply.seq,
@@ -853,6 +947,7 @@ fn insert_reply(state: &Path, held: &Held) -> Result<Taken, String> {
                 recipient: &sender,
                 text: &wire::cut(&reply.text, wire::TEXT_LIMIT),
                 notice: false,
+                self_named_host: None,
             },
             &attribution,
         )
@@ -907,9 +1002,21 @@ fn perform(label: &str, request: &Request) -> Call {
     match api(label, &["client.perform", "-"], Some(&input)) {
         Ok(performed) => match serde_json::from_value::<Answer>(performed["result"].clone()) {
             Ok(answer) => Call::Answered(bounded(answer)),
-            Err(_) => Call::Failed(format!("{label} runs a Namedrop without this relay")),
+            Err(_) => Call::Failed(unread(label, &performed["result"])),
         },
         Err(failure) => failed(label, &failure),
+    }
+}
+
+/// Why A fails an item whose answer it cannot read: B runs a newer relay
+/// that answered in a shape this one does not know, or none at all.
+fn unread(label: &str, result: &Value) -> String {
+    match result["relay"].as_u64() {
+        Some(theirs) if theirs > u64::from(wire::VERSION) => format!(
+            "{label} runs a newer relay (version {theirs}) than this Namedrop's (version {})",
+            wire::VERSION
+        ),
+        _ => format!("{label} runs a Namedrop without this relay"),
     }
 }
 

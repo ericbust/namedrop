@@ -297,33 +297,33 @@ fn a_missing_pong_ends_the_stream_and_a_pong_keeps_it() {
         let wake = Wake::new().unwrap();
         let (client, server) = serve("host-a", move |server| {
             let (opcode, payload) = server.next_client_frame().unwrap();
+            let pinged = Instant::now();
             assert_eq!(opcode, 0x9, "a ping");
             if answers {
                 server.send_frame(0xA, &payload);
             }
             let after = server.next_client_frame().map(|(opcode, _)| opcode);
             thread::sleep(Duration::from_millis(600));
-            after
+            (pinged, after)
         });
+        let opened = Instant::now();
         let mut stream = events(client, &state, &wake, liveness);
         let started = Instant::now();
         let next = stream.next(Duration::from_millis(500));
-        let took = started.elapsed();
+        let ended = Instant::now();
+        drop(stream);
+        let (pinged, after) = server.join().unwrap();
         if answers {
             assert_eq!(next, Next::Quiet);
+            let took = ended - started;
             assert!(took >= Duration::from_millis(500), "{took:?}");
         } else {
             assert_eq!(
                 next,
                 Next::Ended("the server sent nothing for 0.2 s after a ping".to_owned())
             );
-            assert!(
-                (Duration::from_millis(300)..Duration::from_millis(450)).contains(&took),
-                "{took:?}"
-            );
+            ended_unanswered(opened, pinged, ended, liveness, Duration::from_millis(150));
         }
-        drop(stream);
-        let after = server.join().unwrap();
         if answers {
             assert_eq!(after, Some(0x9), "silent again, so it pings again");
         }
@@ -556,36 +556,57 @@ fn answers() -> Stall {
     flood(|seq| json!({"type": "response", "id": 0, "seq": seq, "payload": {}}))
 }
 
-/// What `next(within)` answers, and how long it took, from a server that
-/// sends what `stall` sends and then stays connected for a second. A stop
-/// is requested 100 ms in when `stops` says so.
-fn wait_through(
-    stall: Stall,
+/// When a stream ended for want of an answer to its ping: no sooner than
+/// the quiet time and the answer time after it was `opened`, and within
+/// `slack` of the answer time after the server read the ping.
+fn ended_unanswered(
+    opened: Instant,
+    pinged: Instant,
+    ended: Instant,
     liveness: Liveness,
-    within: Duration,
-    stops: bool,
-) -> (Next, Duration) {
+    slack: Duration,
+) {
+    let open = ended - opened;
+    assert!(
+        open >= liveness.quiet + liveness.answer,
+        "ended {open:?} after it opened"
+    );
+    let after = ended.saturating_duration_since(pinged);
+    assert!(
+        after < liveness.answer + slack,
+        "ended {after:?} after its ping"
+    );
+}
+
+/// What `next(within)` answers, from a server that sends what `stall`
+/// sends and then stays connected for a second, and how long after its
+/// cause: the call, or the stop requested 100 ms in when `stops` says so.
+fn wait_through(stall: Stall, within: Duration, stops: bool) -> (Next, Duration) {
     let state = State::new();
     let wake = Wake::new().unwrap();
     let (client, server) = serve("host-a", move |server| {
         stall(server);
         thread::sleep(Duration::from_millis(1000));
     });
-    let mut stream = events(client, &state, &wake, liveness);
-    let started = Instant::now();
-    let next = thread::scope(|scope| {
-        if stops {
+    let mut stream = events(client, &state, &wake, Liveness::REX);
+    let (next, cause, ended) = thread::scope(|scope| {
+        let stop = stops.then(|| {
             scope.spawn(|| {
                 thread::sleep(Duration::from_millis(100));
+                let requested = Instant::now();
                 wake.wake();
-            });
-        }
-        stream.next(within)
+                requested
+            })
+        });
+        let called = Instant::now();
+        let next = stream.next(within);
+        let ended = Instant::now();
+        let cause = stop.map_or(called, |stop| stop.join().unwrap());
+        (next, cause, ended)
     });
-    let took = started.elapsed();
     drop(stream);
     server.join().unwrap();
-    (next, took)
+    (next, ended.saturating_duration_since(cause))
 }
 
 /// A server that stays connected but sends no whole frame the bridge
@@ -593,7 +614,8 @@ fn wait_through(
 /// when liveness runs out.
 #[test]
 fn a_server_that_sends_nothing_whole_in_time_still_ends_the_wait_on_time() {
-    let soon = Duration::from_millis(100)..Duration::from_millis(350);
+    let on_time = Duration::from_millis(100)..Duration::from_millis(350);
+    let at_stop = Duration::ZERO..Duration::from_millis(250);
     let stalls = [
         ("half a frame", half_a_frame as fn() -> Stall),
         ("a trickle", trickle),
@@ -602,26 +624,38 @@ fn a_server_that_sends_nothing_whole_in_time_still_ends_the_wait_on_time() {
         ("answers", answers),
     ];
     for (name, stall) in stalls {
-        let (next, took) = wait_through(stall(), Liveness::REX, Duration::from_millis(100), false);
+        let (next, took) = wait_through(stall(), Duration::from_millis(100), false);
         assert_eq!(next, Next::Quiet, "{name}");
-        assert!(soon.contains(&took), "{name}, deadline: {took:?}");
-        let (next, took) = wait_through(stall(), Liveness::REX, Duration::from_secs(10), true);
+        assert!(on_time.contains(&took), "{name}, deadline: {took:?}");
+        let (next, took) = wait_through(stall(), Duration::from_secs(10), true);
         assert_eq!(next, Next::Ended("stopped".to_owned()), "{name}");
-        assert!(soon.contains(&took), "{name}, stop: {took:?}");
+        assert!(at_stop.contains(&took), "{name}, stop: {took:?}");
     }
     let quick = Liveness {
         quiet: Duration::from_millis(100),
         answer: Duration::from_millis(100),
     };
-    let (next, took) = wait_through(half_a_frame(), quick, Duration::from_secs(10), false);
+    let state = State::new();
+    let wake = Wake::new().unwrap();
+    let (client, server) = serve("host-a", |server| {
+        half_a_frame()(server);
+        let (opcode, _) = server.next_client_frame().unwrap();
+        let pinged = Instant::now();
+        assert_eq!(opcode, 0x9, "a ping");
+        thread::sleep(Duration::from_millis(1000));
+        pinged
+    });
+    let opened = Instant::now();
+    let mut stream = events(client, &state, &wake, quick);
+    let next = stream.next(Duration::from_secs(10));
+    let ended = Instant::now();
+    drop(stream);
+    let pinged = server.join().unwrap();
     assert_eq!(
         next,
         Next::Ended("the server sent nothing for 0.1 s after a ping".to_owned())
     );
-    assert!(
-        (Duration::from_millis(200)..Duration::from_millis(450)).contains(&took),
-        "liveness: {took:?}"
-    );
+    ended_unanswered(opened, pinged, ended, quick, Duration::from_millis(250));
 }
 
 /// Messages read in one go come out without waiting for the server to

@@ -470,7 +470,7 @@ fn main() -> ExitCode {
             cli.dashboard_inherit_claim(),
         );
     }
-    if let Some(host_id) = cli.relay_accept_host_id() {
+    if let Some((host_id, caller_host)) = cli.relay_accept_host_id() {
         let endpoint = cli
             .runtime
             .endpoint
@@ -488,7 +488,7 @@ fn main() -> ExitCode {
         }
         println!(
             "{}",
-            namedrop::relay_accept(state, &endpoint, host_id, &input)
+            namedrop::relay_accept(state, &endpoint, host_id, caller_host, &input)
         );
         return ExitCode::SUCCESS;
     }

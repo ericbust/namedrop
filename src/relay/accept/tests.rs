@@ -21,7 +21,7 @@ fn a_deferred_reply_to_a_relayed_message_reads_its_remote_participant() {
     b.call(&deliver("m1", "bob", "t1", "please answer"));
     let relayed = b.rows(
         "namedrop.sqlite3",
-        "SELECT message_id FROM collaboration_messages",
+        "SELECT message_id FROM collaboration_messages WHERE grammar_version <> 'relay-notice/v1'",
     )[0][0]
         .as_str()
         .unwrap()
@@ -61,7 +61,7 @@ fn a_deferred_reply_to_a_relayed_message_reads_its_remote_participant() {
 
 /// B's state: `session:b1` holds `@bob`, `@bob2`, and `@dup`, `session:b2`
 /// holds `@carol` and `@dup`, and `session:b3`, paused, holds `@sleepy`.
-struct B(PathBuf);
+struct B(PathBuf, Option<String>);
 
 impl B {
     fn new() -> Self {
@@ -104,7 +104,7 @@ impl B {
                 )
             })
             .unwrap();
-        Self(path)
+        Self(path, None)
     }
 
     fn call(&self, args: &Value) -> Answer {
@@ -118,6 +118,7 @@ impl B {
             &self.0,
             &Endpoint::parse(REX),
             HOST_B,
+            self.1.as_deref(),
             args.to_string().as_bytes(),
             &mut |space| woken.push(space.as_str().to_owned()),
         );
@@ -159,6 +160,7 @@ impl B {
              FROM collaboration_messages m
              JOIN message_recipients r USING (session_socket_id, worktree_id, message_id)
              JOIN mailbox_deliveries d USING (session_socket_id, worktree_id, message_id, address_id)
+             WHERE m.grammar_version <> 'relay-notice/v1'
              ORDER BY m.created_at_ms, m.rowid",
         )
     }
@@ -208,6 +210,8 @@ fn each_recipient_is_accepted_once_from_the_sender_s_relay_author() {
             outbox: Vec::new(),
             more: false,
             epoch: answer.epoch.clone(),
+            relay: 2,
+            lost: Vec::new(),
         }
     );
     assert!(!answer.epoch.is_empty());
@@ -336,6 +340,200 @@ fn a_name_in_two_spaces_is_ambiguous_an_unknown_one_refused_and_a_repeat_replays
     assert!(b.messages().is_empty());
 }
 
+/// The notice an agent gets before the first message of each thread from
+/// a sender whose principal names no machine, which sent `laptop` as its
+/// host.
+const MARKED: &str =
+    "[Namedrop: laptop is the name the sending machine gave itself, which Rex did not confirm.]";
+
+/// A sender's host is the name it gave itself, so an agent gets a notice
+/// that says so before the first message of each B thread, and each body
+/// stays as sent. A Tailscale caller's device name, which its server fills
+/// in, names the sender instead, with no notice.
+#[test]
+fn a_sender_s_own_host_name_is_marked_once_a_thread_and_a_named_device_replaces_it() {
+    let b = B::new();
+    b.call(&deliver("m1", "bob", "t1", "first"));
+    b.call(&deliver("m2", "bob", "t1", "second"));
+    b.call(&deliver("m3", "bob", "t2", "other thread"));
+    let bodies: Vec<_> = b.messages().into_iter().map(|row| row[6].clone()).collect();
+    assert_eq!(
+        bodies,
+        [json!("first"), json!("second"), json!("other thread")]
+    );
+    assert_eq!(
+        b.rows(
+            "namedrop.sqlite3",
+            "SELECT body FROM collaboration_messages WHERE grammar_version = 'relay-notice/v1'"
+        ),
+        vec![vec![json!(MARKED)]; 2]
+    );
+    let mut named = B::new();
+    named.1 = Some("studio".to_owned());
+    named.call(&deliver("m1", "bob", "t1", "first"));
+    assert!(
+        named
+            .rows(
+                "namedrop.sqlite3",
+                "SELECT body FROM collaboration_messages WHERE grammar_version = 'relay-notice/v1'"
+            )
+            .is_empty()
+    );
+    let message = &named.messages()[0];
+    assert_eq!(
+        (&message[2], &message[6]),
+        (&json!("alice@studio"), &json!("first"))
+    );
+    let thread = named.rows("relay.sqlite3", "SELECT display_host FROM remote_threads");
+    assert_eq!(thread, [[json!("studio")]]);
+}
+
+/// The requests of the first merged relay, `2496500e`, as it sent them,
+/// name no version, so they are version 1. B takes the item, pages its
+/// outbox, and answers with only the fields that build reads and its own
+/// version.
+#[test]
+fn b_takes_the_first_relay_s_requests() {
+    let b = B::new();
+    let deliver: Value =
+        serde_json::from_str(include_str!("../fixtures/2496500e-deliver.json")).unwrap();
+    let answer = b.call(&deliver);
+    assert_eq!(outcome(&answer), (Status::Accepted, None));
+    let store = RelayStore::open(&b.0, crate::relay::now_ms()).unwrap();
+    for seq in 1..=3 {
+        let reply = crate::relay::wire::Reply {
+            seq: 0,
+            re: "MESSAGE".to_owned(),
+            thread: "THREAD".to_owned(),
+            from: "bob".to_owned(),
+            message_id: format!("b-{seq}"),
+            text: format!("reply {seq}"),
+        };
+        assert!(
+            store
+                .keep_reply("host-a", &reply, crate::relay::now_ms())
+                .unwrap()
+        );
+    }
+    let collect = |ack_through: i64| {
+        let mut collect: Value =
+            serde_json::from_str(include_str!("../fixtures/2496500e-collect.json")).unwrap();
+        collect["epoch"] = json!(answer.epoch);
+        collect["ack_through"] = json!(ack_through);
+        b.call(&collect)
+    };
+    let page = collect(0);
+    let texts: Vec<&str> = page
+        .outbox
+        .iter()
+        .map(|reply| reply.text.as_str())
+        .collect();
+    assert_eq!(texts, ["reply 1", "reply 2", "reply 3"]);
+    for (answer, keys) in [
+        (
+            &answer,
+            &[
+                "can_reply",
+                "epoch",
+                "host_id",
+                "more",
+                "outbox",
+                "relay",
+                "result",
+            ][..],
+        ),
+        (
+            &page,
+            &["can_reply", "epoch", "host_id", "more", "outbox", "relay"][..],
+        ),
+    ] {
+        let encoded = serde_json::to_value(answer).unwrap();
+        let named: Vec<&str> = encoded
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(named, keys);
+    }
+    assert!(collect(3).outbox.is_empty());
+    assert_eq!(store.outbox_page("host-a", 0, 0, PAGE_LIMIT).unwrap().2, 0);
+}
+
+/// B names what it let go of for A to a version 2 A, and nothing to a
+/// version 1 A, which would not read it.
+#[test]
+fn b_tells_a_version_2_a_what_it_let_go_of() {
+    let b = B::new();
+    drop(RelayStore::open(&b.0, crate::relay::now_ms()).unwrap());
+    let full = rusqlite::Connection::open(b.0.join("relay.sqlite3")).unwrap();
+    full.execute(
+        "INSERT INTO outbox_lost (host_id, re, sender, since_ms, discarded, expired,
+            updated_at_ms) VALUES ('host-a', 'm1', 'bob', 5, 2, 1, ?1)",
+        [crate::relay::now_ms()],
+    )
+    .unwrap();
+    let mut collect = deliver("m1", "bob", "t1", "x");
+    collect["op"] = json!("collect");
+    collect.as_object_mut().unwrap().remove("item");
+    assert!(b.call(&collect).lost.is_empty(), "version 1");
+    collect["relay"] = json!(2);
+    assert_eq!(
+        b.call(&collect).lost,
+        [crate::relay::wire::Lost {
+            re: "m1".to_owned(),
+            from: "bob".to_owned(),
+            since: 5,
+            discarded: 2,
+            expired: 1,
+        }]
+    );
+}
+
+/// A request from a newer relay is read as this version: B takes the item,
+/// skips what it does not know, and names its own version.
+#[test]
+fn b_answers_a_newer_a_as_its_own_version() {
+    let b = B::new();
+    let mut request = deliver("m1", "bob", "t1", "hello bob");
+    request["relay"] = json!(99);
+    request["future"] = json!({"field": true});
+    request["item"]["future"] = json!(1);
+    let answer = b.call(&request);
+    assert_eq!(outcome(&answer), (Status::Accepted, None));
+    assert_eq!(answer.relay, 2);
+}
+
+/// A request B cannot read, from a newer relay, is refused with both
+/// versions, so A can fall back to one this B reads.
+#[test]
+fn b_refuses_a_newer_request_it_cannot_read_naming_both_versions() {
+    let b = B::new();
+    let mut request = deliver("m1", "bob", "t1", "hello bob");
+    request["op"] = json!("hello");
+    request["relay"] = json!(99);
+    let answer = b.call(&request);
+    let (status, reason) = outcome(&answer);
+    assert_eq!(status, Status::Refused);
+    let reason = reason.unwrap();
+    assert!(
+        reason.starts_with(
+            "this Namedrop's relay is version 2, which cannot read a version 99 request: "
+        ),
+        "{reason}"
+    );
+    assert_eq!(answer.relay, 2);
+    request["relay"] = json!(2);
+    let (_, reason) = outcome(&b.call(&request));
+    assert!(
+        reason
+            .unwrap()
+            .starts_with("the request is not a relay request: "),
+        "a request of this version names no versions"
+    );
+    assert_eq!(b.inbound(), 0);
+}
+
 #[test]
 fn each_bad_field_is_refused_by_name_and_nothing_is_stored() {
     let b = B::new();
@@ -379,7 +577,7 @@ fn a_reply_to_a_message_b_relayed_goes_to_its_thread_and_another_is_refused() {
     b.call(&deliver("m1", "bob", "t1", "first"));
     let relayed = b.rows(
         "namedrop.sqlite3",
-        "SELECT message_id, thread_id FROM collaboration_messages",
+        "SELECT message_id, thread_id FROM collaboration_messages WHERE grammar_version <> 'relay-notice/v1'",
     );
     let (message, thread) = (relayed[0][0].clone(), relayed[0][1].clone());
     let mut reply = deliver("m2", "bob", "t9", "answer");
@@ -505,7 +703,24 @@ fn a_page_starts_after_the_last_reply_a_read_and_b_keeps_what_a_has_not_acked() 
 
 /// B's `@bob` in block `block:b1`, and a runtime for him.
 fn bob_answers(b: &B, in_reply_to: &str, source: &str) -> Value {
-    let namespace = StateNamespace::for_space(REX, "session:b1");
+    bob_tries(b, in_reply_to, source).unwrap()
+}
+
+/// `@bob`'s reply in `session:b1`, or why Namedrop refused it.
+fn bob_tries(b: &B, in_reply_to: &str, source: &str) -> Result<Value, String> {
+    tries_as(b, "b1", "bob", in_reply_to, source)
+}
+
+/// The reply of `alias` in `session:<space>`, from block `block:<space>`.
+fn tries_as(
+    b: &B,
+    space: &str,
+    alias: &str,
+    in_reply_to: &str,
+    source: &str,
+) -> Result<Value, String> {
+    let (block, space) = (format!("block:{space}"), format!("session:{space}"));
+    let namespace = StateNamespace::for_space(REX, &space);
     let attribution = MutationAttribution::new(ActorKind::Human, "test", 3);
     StateStore::open(&b.0)
         .unwrap()
@@ -513,9 +728,9 @@ fn bob_answers(b: &B, in_reply_to: &str, source: &str) -> Value {
             if transaction.active_pane_bindings(&namespace)?.is_empty() {
                 transaction.bind_pane(
                     &namespace,
-                    &crate::PaneBindingId::new("binding-bob"),
-                    &PaneAddressId::new("address-session:b1-bob"),
-                    "block:b1",
+                    &crate::PaneBindingId::new(format!("binding-{alias}")),
+                    &PaneAddressId::new(format!("address-{space}-{alias}")),
+                    &block,
                     &attribution,
                 )?;
             }
@@ -523,11 +738,11 @@ fn bob_answers(b: &B, in_reply_to: &str, source: &str) -> Value {
         })
         .unwrap();
     let mux = crate::mux::fake::FakeMux::world()
-        .space("session:b1")
+        .space(&space)
         .checkout("/repo-b")
-        .pane("block:b1")
+        .pane(&block)
         .tab("window:b1")
-        .session("session-bob")
+        .session(&format!("session-{alias}"))
         .idle()
         .build();
     let ids = crate::ProcessIds::default();
@@ -536,8 +751,8 @@ fn bob_answers(b: &B, in_reply_to: &str, source: &str) -> Value {
         home_directory: None,
         agent_config: Default::default(),
         cwd: Path::new("/repo-b"),
-        workspace_id: Some("session:b1"),
-        current_pane_id: Some("block:b1"),
+        workspace_id: Some(&space),
+        current_pane_id: Some(&block),
         session_socket_id: REX,
         mux: &mux,
         clock: &crate::SystemClock,
@@ -548,7 +763,7 @@ fn bob_answers(b: &B, in_reply_to: &str, source: &str) -> Value {
         json!({"request_id": format!("reply-{}", super::super::now_ms()), "in_reply_to": in_reply_to, "source": source}),
         &runtime,
     )
-    .unwrap()
+    .map_err(|error| error.to_string())
 }
 
 /// On B, an answer to a relayed message becomes one kept reply for A that
@@ -559,7 +774,7 @@ fn an_answer_to_a_relayed_message_is_kept_once_for_the_sender_s_pull() {
     b.call(&deliver("m1", "bob", "t1", "please answer"));
     let relayed = b.rows(
         "namedrop.sqlite3",
-        "SELECT message_id FROM collaboration_messages",
+        "SELECT message_id FROM collaboration_messages WHERE grammar_version <> 'relay-notice/v1'",
     )[0][0]
         .as_str()
         .unwrap()
@@ -633,7 +848,7 @@ fn a_reply_to_a_relayed_message_reaches_its_relay_author_and_settles() {
     b.call(&deliver("m1", "bob", "t1", "please answer"));
     let relayed = b.rows(
         "namedrop.sqlite3",
-        "SELECT message_id, author_address_id FROM collaboration_messages",
+        "SELECT message_id, author_address_id FROM collaboration_messages WHERE grammar_version <> 'relay-notice/v1'",
     );
     let message = relayed[0][0].as_str().unwrap().to_owned();
     let author = PaneAddressId::new(relayed[0][1].as_str().unwrap());
@@ -702,6 +917,27 @@ fn a_reply_to_a_relayed_message_reaches_its_relay_author_and_settles() {
     );
 }
 
+/// A capture reads all it needs of the main database in one transaction,
+/// before its relay writes, so a relay transaction never waits on the main
+/// database.
+#[test]
+fn a_capture_reads_the_main_database_once_before_its_relay_writes() {
+    let b = B::new();
+    b.call(&deliver("m1", "bob", "t1", "first"));
+    let relayed = b.rows(
+        "namedrop.sqlite3",
+        "SELECT message_id FROM collaboration_messages WHERE grammar_version <> 'relay-notice/v1'",
+    );
+    bob_answers(&b, relayed[0][0].as_str().unwrap(), "@alice@laptop answer");
+    let scope = crate::work_counters::Scope::start();
+    super::super::capture::capture(&b.0, &Endpoint::parse(REX), &mut |_| {}).unwrap();
+    assert_eq!(scope.finish().writes, 1);
+    assert_eq!(
+        b.rows("relay.sqlite3", "SELECT re, text FROM outbox"),
+        [[json!("m1"), json!("answer")]]
+    );
+}
+
 /// An answer that names an earlier relayed message answers that one, not
 /// the latest.
 #[test]
@@ -711,7 +947,7 @@ fn an_answer_names_the_relayed_message_its_in_reply_to_names() {
     b.call(&deliver("m2", "bob", "t1", "second"));
     let relayed = b.rows(
         "namedrop.sqlite3",
-        "SELECT message_id FROM collaboration_messages ORDER BY rowid",
+        "SELECT message_id FROM collaboration_messages WHERE grammar_version <> 'relay-notice/v1' ORDER BY rowid",
     );
     bob_answers(
         &b,
@@ -810,7 +1046,7 @@ fn an_answer_goes_back_for_the_relay_author_it_names() {
     assert_eq!(outcome(&b.call(&dan)).0, Status::Accepted);
     let relayed = b.rows(
         "namedrop.sqlite3",
-        "SELECT message_id FROM collaboration_messages ORDER BY rowid",
+        "SELECT message_id FROM collaboration_messages WHERE grammar_version <> 'relay-notice/v1' ORDER BY rowid",
     );
     let first = bob_answers(
         &b,
@@ -832,6 +1068,40 @@ fn an_answer_goes_back_for_the_relay_author_it_names() {
     );
 }
 
+/// B keeps one outbox row per B message for a host, so a B message to two
+/// relay authors of one A host could keep only one. No reply reaches that:
+/// a reply names only the relay author of the message it answers, and one
+/// that names another relay author of the thread is refused.
+#[test]
+fn no_b_reply_reaches_two_relay_authors_of_one_host() {
+    let b = B::new();
+    b.call(&deliver("m1", "bob", "t1", "from alice"));
+    let mut dan = deliver("m2", "bob", "t1", "from dan");
+    dan["from"]["name"] = json!("dan");
+    b.call(&dan);
+    let relayed = b.rows(
+        "namedrop.sqlite3",
+        "SELECT message_id FROM collaboration_messages WHERE grammar_version <> 'relay-notice/v1' ORDER BY rowid",
+    );
+    let to_dan = relayed[1][0].as_str().unwrap();
+    for source in [
+        "@alice@laptop @dan@laptop to both",
+        "@dan@laptop @alice@laptop to both",
+    ] {
+        assert_eq!(
+            bob_tries(&b, to_dan, source).err().as_deref(),
+            Some("unknown Mention: @alice@laptop"),
+            "{source}"
+        );
+    }
+    bob_answers(&b, to_dan, "@dan@laptop to dan");
+    super::super::capture::capture(&b.0, &Endpoint::parse(REX), &mut |_| {}).unwrap();
+    assert_eq!(
+        b.rows("relay.sqlite3", "SELECT re, text FROM outbox ORDER BY seq"),
+        [[json!("m2"), json!("to dan")]]
+    );
+}
+
 /// A reply in a thread whose mapping is gone cannot reach A, so B counts
 /// it with the expired replies Doctor reports.
 #[test]
@@ -840,7 +1110,7 @@ fn a_reply_b_cannot_route_is_counted_for_doctor() {
     b.call(&deliver("m1", "bob", "t1", "please answer"));
     let relayed = b.rows(
         "namedrop.sqlite3",
-        "SELECT message_id FROM collaboration_messages",
+        "SELECT message_id FROM collaboration_messages WHERE grammar_version <> 'relay-notice/v1'",
     )[0][0]
         .as_str()
         .unwrap()
@@ -883,6 +1153,7 @@ fn two_accepts_at_once_for_one_a_thread_share_one_b_thread() {
             &path,
             &Endpoint::parse(REX),
             HOST_B,
+            None,
             deliver("m1", "bob2", "t1", "second").to_string().as_bytes(),
             &mut |_| {},
         );
@@ -935,7 +1206,7 @@ fn an_escaped_reply_is_cut_to_fit_and_never_stalls_the_outbox() {
     b.call(&deliver("m1", "bob", "t1", "reply please"));
     let relayed = b.rows(
         "namedrop.sqlite3",
-        "SELECT message_id FROM collaboration_messages",
+        "SELECT message_id FROM collaboration_messages WHERE grammar_version <> 'relay-notice/v1'",
     )[0][0]
         .as_str()
         .unwrap()
@@ -978,7 +1249,7 @@ fn an_item_or_a_reply_in_a_b_thread_keeps_its_mapping_in_use() {
     age();
     let relayed = b.rows(
         "namedrop.sqlite3",
-        "SELECT message_id FROM collaboration_messages",
+        "SELECT message_id FROM collaboration_messages WHERE grammar_version <> 'relay-notice/v1'",
     )[0][0]
         .as_str()
         .unwrap()
@@ -1011,7 +1282,7 @@ fn another_host_reaches_no_key_thread_or_outbox_of_this_one() {
     b.call(&deliver("m1", "bob", "t1", "from host-a"));
     let relayed = b.rows(
         "namedrop.sqlite3",
-        "SELECT message_id FROM collaboration_messages",
+        "SELECT message_id FROM collaboration_messages WHERE grammar_version <> 'relay-notice/v1'",
     )[0][0]
         .clone();
     let same_key = b.call(&from("host-c", deliver("m1", "bob", "t1", "from host-c")));
@@ -1022,7 +1293,7 @@ fn another_host_reaches_no_key_thread_or_outbox_of_this_one() {
     );
     let threads = b.rows(
         "namedrop.sqlite3",
-        "SELECT thread_id FROM collaboration_messages ORDER BY rowid",
+        "SELECT thread_id FROM collaboration_messages WHERE grammar_version <> 'relay-notice/v1' ORDER BY rowid",
     );
     assert_ne!(threads[0], threads[1], "host-c's t1 is another B thread");
 
@@ -1129,7 +1400,7 @@ fn a_reply_past_10_000_kept_for_a_host_is_counted_not_kept() {
     b.call(&deliver("m1", "bob", "t1", "please answer"));
     let relayed = b.rows(
         "namedrop.sqlite3",
-        "SELECT message_id FROM collaboration_messages",
+        "SELECT message_id FROM collaboration_messages WHERE grammar_version <> 'relay-notice/v1'",
     )[0][0]
         .as_str()
         .unwrap()
@@ -1166,7 +1437,7 @@ fn a_capture_read_again_counts_an_unroutable_reply_once() {
     b.call(&deliver("m1", "bob", "t1", "please answer"));
     let relayed = b.rows(
         "namedrop.sqlite3",
-        "SELECT message_id FROM collaboration_messages",
+        "SELECT message_id FROM collaboration_messages WHERE grammar_version <> 'relay-notice/v1'",
     )[0][0]
         .as_str()
         .unwrap()
@@ -1188,4 +1459,318 @@ fn a_capture_read_again_counts_an_unroutable_reply_once() {
         super::super::expired_replies(&b.0),
         [("alice@laptop".to_owned(), 1)]
     );
+}
+
+/// A terminal gets no host notice, and its command runs as the sender
+/// wrote it.
+#[test]
+fn a_terminal_runs_a_self_named_sender_s_command_as_sent() {
+    let b = B::new();
+    Connection::open(b.0.join("namedrop.sqlite3"))
+        .unwrap()
+        .execute(
+            "UPDATE pane_addresses SET pane_type = 'terminal' WHERE address_id = ?1",
+            ["address-session:b1-bob"],
+        )
+        .unwrap();
+    fs::create_dir_all(b.0.join("relay")).unwrap();
+    fs::write(b.0.join("relay/allow-terminals"), "").unwrap();
+    assert_eq!(
+        outcome(&b.call(&deliver("m1", "bob", "t9", "printf relayed"))),
+        (Status::Accepted, None)
+    );
+    let bodies = b.rows(
+        "namedrop.sqlite3",
+        "SELECT body FROM collaboration_messages",
+    );
+    assert_eq!(bodies, [[json!("printf relayed")]]);
+    let out = std::process::Command::new("/bin/sh")
+        .args(["-c", bodies[0][0].as_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(out.stdout, b"relayed");
+}
+
+/// A retry after B committed the message but not its `inbound` key, or
+/// its thread's mapping either, replays the message and its notice,
+/// with nothing new.
+#[test]
+fn a_retry_after_a_partial_commit_replays_the_message_and_its_notice() {
+    let b = B::new();
+    let item = deliver("m1", "bob", "t1", "hello");
+    assert_eq!(outcome(&b.call(&item)), (Status::Accepted, None));
+    let stored = || {
+        b.rows(
+            "namedrop.sqlite3",
+            "SELECT message_id, body FROM collaboration_messages ORDER BY rowid",
+        )
+    };
+    let before = stored();
+    assert_eq!(before.len(), 2);
+    assert_eq!(before[0][1], json!(MARKED));
+    assert_eq!(before[1][1], json!("hello"));
+    let relay = Connection::open(b.0.join("relay.sqlite3")).unwrap();
+    for lose_thread in [false, true] {
+        relay.execute("DELETE FROM inbound", []).unwrap();
+        if lose_thread {
+            relay.execute("DELETE FROM remote_threads", []).unwrap();
+        }
+        assert_eq!(outcome(&b.call(&item)), (Status::Accepted, None));
+        assert_eq!(stored(), before);
+        assert_eq!(outcome(&b.call(&item)), (Status::Duplicate, None));
+    }
+}
+
+/// A capture whose cursor could not be written counts the reply B could
+/// not keep once, when it is retried, and a capture whose snapshot is
+/// behind the cursor captures nothing again.
+#[test]
+fn a_capture_retried_after_its_cursor_failed_counts_a_discard_once() {
+    let b = B::new();
+    b.call(&deliver("m1", "bob", "t1", "please answer"));
+    let relayed = b.rows(
+        "namedrop.sqlite3",
+        "SELECT message_id FROM collaboration_messages WHERE grammar_version <> 'relay-notice/v1'",
+    )[0][0]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let relay = Connection::open(b.0.join("relay.sqlite3")).unwrap();
+    relay
+        .execute_batch(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<10000)
+         INSERT INTO outbox(host_id,re,thread,sender,message_id,text,created_at_ms)
+         SELECT 'host-a','m1','t1','bob','full-' || i,'x',9999999999999 FROM n;
+         CREATE TRIGGER refuse_capture BEFORE INSERT ON capture
+         BEGIN SELECT RAISE(ABORT,'no cursor'); END;",
+        )
+        .unwrap();
+    bob_answers(&b, &relayed, "@alice@laptop one too many");
+    let endpoint = Endpoint::parse(REX);
+    assert!(super::super::capture::capture(&b.0, &endpoint, &mut |_| {}).is_err());
+    relay.execute_batch("DROP TRIGGER refuse_capture").unwrap();
+    super::super::capture::capture(&b.0, &endpoint, &mut |_| {}).unwrap();
+    let counts = b.rows("relay.sqlite3", "SELECT re,discarded FROM outbox_lost");
+    assert_eq!(counts, [[json!("m1"), json!(1)]]);
+    let store = RelayStore::open(&b.0, crate::relay::now_ms()).unwrap();
+    let cursor = store.capture_cursor(&endpoint.key).unwrap();
+    store
+        .captured(&endpoint.key, cursor, ("message", "session:b1"), || {
+            panic!("a stale capture snapshot must not replay a committed message")
+        })
+        .unwrap();
+}
+
+/// An answer into a B thread that B's Automatic Reply Limit paused is not
+/// refused for good: B stores nothing and says the thread is paused, or
+/// `retry` to a version 1 A, which cannot read that, and takes the answer
+/// once a person on B resumes the thread.
+#[test]
+fn an_answer_into_a_thread_b_s_limit_paused_is_taken_once_the_thread_resumes() {
+    let b = B::new();
+    b.call(&deliver("m1", "bob", "t1", "first"));
+    let relayed = b.rows(
+        "namedrop.sqlite3",
+        "SELECT message_id, thread_id FROM collaboration_messages",
+    );
+    let (message, thread) = (relayed[0][0].clone(), relayed[0][1].clone());
+    let main = Connection::open(b.0.join("namedrop.sqlite3")).unwrap();
+    main.execute(
+        "INSERT INTO thread_controls (session_socket_id, worktree_id, thread_id, paused, stopped,
+            reply_allowance) VALUES (?1, 'session:b1', ?2, 0, 0, 0)
+         ON CONFLICT DO UPDATE SET reply_allowance = 0",
+        params![REX, thread.as_str().unwrap()],
+    )
+    .unwrap();
+    let mut answer = deliver("m2", "bob", "t1", "answer");
+    answer["item"]["in_reply_to"] = message;
+    let limit = Some("the Automatic Reply Limit requires human continuation".to_owned());
+    assert_eq!(outcome(&b.call(&answer)), (Status::Retry, limit.clone()));
+    answer["relay"] = json!(2);
+    assert_eq!(outcome(&b.call(&answer)), (Status::Paused, limit));
+    assert_eq!(b.inbound(), 1, "nothing is stored for the paused answer");
+    assert_eq!(b.messages().len(), 1);
+    main.execute("UPDATE thread_controls SET reply_allowance = 10", [])
+        .unwrap();
+    assert_eq!(outcome(&b.call(&answer)), (Status::Accepted, None));
+    assert_eq!(b.messages().len(), 2);
+}
+
+/// The id of the message of `deliver`'s item that B stored, past the host
+/// notice before it.
+fn relayed_id(b: &B, item: &str) -> String {
+    b.rows(
+        "namedrop.sqlite3",
+        &format!(
+            "SELECT message_id FROM collaboration_messages
+             WHERE grammar_version <> 'relay-notice/v1' AND request_id LIKE '%{item}%'"
+        ),
+    )[0][0]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// Purges `session:<space>`, as a person does with a space they closed.
+fn purge(b: &B, space: &str) {
+    let space = format!("session:{space}");
+    let namespace = StateNamespace::for_space(REX, &space);
+    let attribution = MutationAttribution::new(ActorKind::Human, "test", 5);
+    let mut main = StateStore::open(&b.0).unwrap();
+    main.transaction(|transaction| transaction.deactivate_worktree(&namespace, &attribution))
+        .unwrap();
+    Connection::open(b.0.join("namedrop.sqlite3"))
+        .unwrap()
+        .execute(
+            "UPDATE mailbox_deliveries SET state = 'settled' WHERE worktree_id = ?1",
+            [&space],
+        )
+        .unwrap();
+    main.purge_worktree(&namespace, &space, &attribution)
+        .unwrap();
+}
+
+fn outbox_texts(b: &B) -> Vec<Vec<Value>> {
+    b.rows("relay.sqlite3", "SELECT text FROM outbox ORDER BY seq")
+}
+
+/// A purge of the newest messages lets SQLite give their rowids to the next
+/// ones, at or below the capture cursor, and even the cursor's own. Replies
+/// made after it are still kept for A.
+#[test]
+fn a_reply_made_after_a_purge_of_the_newest_messages_is_kept() {
+    let b = B::new();
+    b.call(&deliver("m1", "bob", "t1", "please answer"));
+    let real = relayed_id(&b, "m1");
+    bob_answers(&b, &real, "@alice@laptop first answer");
+    b.call(&deliver("m2", "carol", "t2", "to the other space"));
+    let endpoint = Endpoint::parse(REX);
+    super::super::capture::capture(&b.0, &endpoint, &mut |_| {}).unwrap();
+    let max = || {
+        b.rows(
+            "namedrop.sqlite3",
+            "SELECT MAX(rowid) FROM collaboration_messages",
+        )[0][0]
+            .as_i64()
+            .unwrap()
+    };
+    let cursor = max();
+    purge(&b, "b2");
+    assert!(max() < cursor - 1, "the purge took the newest rowids");
+    for answer in ["second", "third"] {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        bob_answers(&b, &real, &format!("@alice@laptop {answer} answer"));
+    }
+    assert_eq!(max(), cursor, "the last reply took the cursor's own rowid");
+    super::super::capture::capture(&b.0, &endpoint, &mut |_| {}).unwrap();
+    assert_eq!(
+        outbox_texts(&b),
+        [
+            [json!("first answer")],
+            [json!("second answer")],
+            [json!("third answer")]
+        ]
+    );
+}
+
+/// Captures take turns: one waits while another holds the capture lock,
+/// since a capture may move the cursor back under it.
+#[test]
+fn a_capture_waits_for_another_to_finish() {
+    let b = B::new();
+    b.call(&deliver("m1", "bob", "t1", "please answer"));
+    let lock = super::super::capturing(&b.0).unwrap();
+    let (state, (done, finished)) = (b.0.clone(), std::sync::mpsc::channel());
+    let capture = std::thread::spawn(move || {
+        let captured = super::super::capture::capture(&state, &Endpoint::parse(REX), &mut |_| {});
+        let _ = done.send(());
+        captured
+    });
+    assert!(
+        finished
+            .recv_timeout(std::time::Duration::from_millis(300))
+            .is_err(),
+        "it waits for the lock"
+    );
+    drop(lock);
+    assert!(
+        finished
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .is_ok()
+    );
+    capture.join().unwrap().unwrap();
+}
+
+/// When the purged space held the last relay message capture read, capture
+/// reads again from the last one of a space that is still there, so what
+/// A already took is not kept again.
+#[test]
+fn after_a_purge_capture_reads_again_from_the_last_relay_message_still_there() {
+    let b = B::new();
+    b.call(&deliver("m1", "bob", "t1", "please answer"));
+    let to_bob = relayed_id(&b, "m1");
+    bob_answers(&b, &to_bob, "@alice@laptop first answer");
+    let endpoint = Endpoint::parse(REX);
+    let capture = || super::super::capture::capture(&b.0, &endpoint, &mut |_| {}).unwrap();
+    let acked = || {
+        Connection::open(b.0.join("relay.sqlite3"))
+            .unwrap()
+            .execute("DELETE FROM outbox", [])
+            .unwrap();
+    };
+    capture();
+    acked();
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    bob_answers(&b, &to_bob, "@alice@laptop second answer");
+    capture();
+    acked();
+    b.call(&deliver("m2", "carol", "t2", "to the other space"));
+    let to_carol = relayed_id(&b, "m2");
+    tries_as(&b, "b2", "carol", &to_carol, "@alice@laptop carol's answer").unwrap();
+    capture();
+    assert_eq!(outbox_texts(&b), [[json!("carol's answer")]]);
+    acked();
+    purge(&b, "b2");
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    bob_answers(&b, &to_bob, "@alice@laptop third answer");
+    capture();
+    assert_eq!(
+        outbox_texts(&b),
+        [[json!("third answer")]],
+        "the answers A took are not kept again"
+    );
+    capture();
+    assert_eq!(outbox_texts(&b), [[json!("third answer")]]);
+}
+
+/// B's agent that answers the notice of a sender's self-named host, which
+/// asks nothing, makes no reply for A, and none that Doctor counts as
+/// expired. Its answer to the message itself is kept.
+#[test]
+fn an_answer_to_the_relay_s_own_notice_is_neither_kept_nor_counted() {
+    let b = B::new();
+    b.call(&deliver("m1", "bob", "t1", "please answer"));
+    let notice = b.rows(
+        "namedrop.sqlite3",
+        "SELECT message_id FROM collaboration_messages
+         WHERE grammar_version = 'relay-notice/v1'",
+    )[0][0]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    bob_answers(
+        &b,
+        &notice,
+        "@alice@laptop I received the delivery, but it contains no task",
+    );
+    let endpoint = Endpoint::parse(REX);
+    super::super::capture::capture(&b.0, &endpoint, &mut |_| {}).unwrap();
+    assert!(outbox_texts(&b).is_empty());
+    assert!(super::super::expired_replies(&b.0).is_empty());
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    bob_answers(&b, &relayed_id(&b, "m1"), "@alice@laptop the real answer");
+    super::super::capture::capture(&b.0, &endpoint, &mut |_| {}).unwrap();
+    assert_eq!(outbox_texts(&b), [[json!("the real answer")]]);
+    assert!(super::super::expired_replies(&b.0).is_empty());
 }

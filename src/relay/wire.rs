@@ -17,6 +17,16 @@ pub(crate) const PAGE_LIMIT: usize = 256 * 1024;
 /// which the sender's notice quotes.
 pub(crate) const REASON_LIMIT: usize = 1024;
 
+/// This build's relay version, which each request and answer names. A
+/// request or answer that names none is version 1, as every build through
+/// `329c278b` made. A side answers a newer peer as this version, and a
+/// newer version keeps every field an older one reads.
+pub(crate) const VERSION: u32 = 2;
+
+fn version_1() -> u32 {
+    1
+}
+
 /// The line a cut message ends with.
 pub(crate) const CUT_NOTICE: &str = "\n\n[Namedrop cut this message to relay it.]";
 
@@ -87,6 +97,9 @@ pub(crate) struct Request {
     /// B keeps what A has not acked.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub after: i64,
+    /// A's relay version.
+    #[serde(default = "version_1")]
+    pub relay: u32,
 }
 
 fn is_zero(value: &i64) -> bool {
@@ -124,6 +137,11 @@ pub(crate) enum Status {
     Refused,
     Ambiguous,
     Retry,
+    /// B's Automatic Reply Limit paused the B thread the item goes to, so
+    /// B takes no message in it until a person on B resumes it. A keeps the
+    /// item and sends it again. B says so only to a version 2 A, and a
+    /// version 1 A, which cannot read it, gets `Retry`.
+    Paused,
 }
 
 /// What B decided for one item.
@@ -151,6 +169,18 @@ pub(crate) struct Reply {
     pub text: String,
 }
 
+/// The replies of `from` to the A message `re` that B let go of: those it
+/// discarded because it kept `OUTBOX_LIMIT` replies for A, and those that
+/// expired before A acknowledged them, counted since `since`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct Lost {
+    pub re: String,
+    pub from: String,
+    pub since: i64,
+    pub discarded: i64,
+    pub expired: i64,
+}
+
 /// The action's result.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub(crate) struct Answer {
@@ -166,6 +196,12 @@ pub(crate) struct Answer {
     /// created, so A knows when B's `seq` started again.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub epoch: String,
+    /// B's relay version.
+    #[serde(default = "version_1")]
+    pub relay: u32,
+    /// What B let go of for A, for a version 2 A.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lost: Vec<Lost>,
 }
 
 /// The encoded size of the `deliver` request for one item, with every id
@@ -192,6 +228,7 @@ pub(crate) fn deliver_size(sender: &str, to: &str, text: &str) -> usize {
             ack_through: i64::MAX,
             epoch: LONGEST_ID.to_owned(),
             after: i64::MAX,
+            relay: u32::MAX,
         },
     })
     .map_or(usize::MAX, |encoded| encoded.len())

@@ -118,7 +118,7 @@ pub(crate) fn parse_mentions_in(
             break;
         };
         if !crate::relay::valid_label(&name.label) || !listed.contains(&name.label) {
-            return Err(crate::relay::unlisted(&name.label, listed));
+            return Err(hosts.unlisted(&name.label));
         }
         if !remote.contains(&name) {
             remote.push(name);

@@ -456,9 +456,19 @@ where
                 runtime.state_directory,
                 runtime.session_socket_id,
             )));
-            issues.extend(relay_conditions_issue(&crate::relay::conditions(
+            match crate::relay::conditions(runtime.state_directory, runtime.session_socket_id) {
+                Ok(conditions) => issues.extend(relay_conditions_issue(&conditions)),
+                Err(error) => issues.push(issue(
+                    "ND-RELAY-005",
+                    HealthSeverity::Notice,
+                    "Relay conditions could not be read.",
+                    &error.to_string(),
+                    HealthRepairKind::HumanDecision,
+                    "Check the relay database and filesystem permissions, then run Doctor again.",
+                )),
+            }
+            issues.extend(relay_set_aside_issue(&crate::relay::store::set_aside_in(
                 runtime.state_directory,
-                runtime.session_socket_id,
             )));
         }
     }
@@ -1394,7 +1404,7 @@ fn status_queue_issues(queue: &std::path::Path, now_ms: u64) -> Vec<HealthIssue>
 }
 
 /// One notice for the replies the relay kept for other machines that
-/// expired before those machines collected them.
+/// expired before those machines acknowledged them.
 fn expired_replies_issue(expired: &[(String, i64)]) -> Option<HealthIssue> {
     if expired.is_empty() {
         return None;
@@ -1407,9 +1417,9 @@ fn expired_replies_issue(expired: &[(String, i64)]) -> Option<HealthIssue> {
     Some(issue(
         "ND-RELAY-001",
         HealthSeverity::Info,
-        "Replies for another machine expired before its Namedrop collected them.",
+        "Replies for another machine expired before its Namedrop acknowledged them.",
         &format!(
-            "This machine keeps each reply for a remote sender for 7 days, until that sender's Namedrop collects it. These expired: {senders}."
+            "This machine keeps each reply for a remote sender for 7 days, until that sender's Namedrop acknowledges it. These expired: {senders}."
         ),
         HealthRepairKind::HumanDecision,
         "Nothing needs doing. A remote sender collects replies while it has a thread open with this machine.",
@@ -1461,11 +1471,27 @@ fn relay_conditions_issue(conditions: &[crate::relay::store::Conditions]) -> Opt
                         .to_owned(),
                 );
             }
+            match condition.lost {
+                0 => {}
+                1 => found.push(
+                    "it let go of 1 reply for this machine before this machine acknowledged it"
+                        .to_owned(),
+                ),
+                count => found.push(format!(
+                    "it let go of {count} replies for this machine before this machine acknowledged them"
+                )),
+            }
             if condition.cannot_reply {
                 found.push(
                     "it keeps no more replies for this machine, so Namedrop sends it nothing new until this machine collects them"
                         .to_owned(),
                 );
+            }
+            if let Some(other) = &condition.same_server_as {
+                found.push(format!(
+                    "its server answers as the one {other} reaches, which rex hosts list gives other addresses, so Namedrop relays nothing by {} until the two list the same addresses or one is removed",
+                    condition.label
+                ));
             }
             format!("{}: {}", condition.label, found.join(", and "))
         })
@@ -1480,6 +1506,25 @@ fn relay_conditions_issue(conditions: &[crate::relay::store::Conditions]) -> Opt
         ),
         HealthRepairKind::HumanDecision,
         "Resume each paused thread with a message or Continue, and check that each label in rex hosts list reaches the machine you expect.",
+    ))
+}
+
+/// One notice for the relay databases from unreleased builds that were
+/// set aside.
+fn relay_set_aside_issue(names: &[String]) -> Option<HealthIssue> {
+    if names.is_empty() {
+        return None;
+    }
+    Some(issue(
+        "ND-RELAY-004",
+        HealthSeverity::Info,
+        "Namedrop set aside a relay database from an unreleased build.",
+        &format!(
+            "relay.sqlite3 had tables that no release of Namedrop makes, so Namedrop moved it aside and started a new one. Messages to or from another machine that were in flight then stayed in it. Set aside in the state directory: {}.",
+            names.join(", ")
+        ),
+        HealthRepairKind::HumanDecision,
+        "Nothing needs doing. Delete the file once you no longer need it.",
     ))
 }
 
@@ -1804,6 +1849,24 @@ mod tests {
     }
 
     #[test]
+    fn relay_databases_set_aside_are_one_notice_that_names_each() {
+        assert!(relay_set_aside_issue(&[]).is_none());
+        let notice = relay_set_aside_issue(&[
+            "relay.sqlite3.unreleased-1".to_owned(),
+            "relay.sqlite3.unreleased-2".to_owned(),
+        ])
+        .unwrap();
+        assert_eq!(notice.code, "ND-RELAY-004");
+        assert!(
+            notice
+                .explanation
+                .ends_with("relay.sqlite3.unreleased-1, relay.sqlite3.unreleased-2."),
+            "{}",
+            notice.explanation
+        );
+    }
+
+    #[test]
     fn relay_conditions_are_one_notice_that_names_each_host() {
         use crate::relay::store::Conditions;
         assert!(relay_conditions_issue(&[]).is_none());
@@ -1813,6 +1876,8 @@ mod tests {
                 other_label: 3,
                 held_full: true,
                 cannot_reply: false,
+                same_server_as: None,
+                lost: 0,
             },
             Conditions {
                 label: "studio".to_owned(),
@@ -1829,6 +1894,22 @@ mod tests {
                 other_label: 1,
                 ..Conditions::default()
             },
+            Conditions {
+                label: "mini".to_owned(),
+                lost: 4,
+                ..Conditions::default()
+            },
+            Conditions {
+                label: "nano".to_owned(),
+                lost: 1,
+                cannot_reply: true,
+                ..Conditions::default()
+            },
+            Conditions {
+                label: "twin".to_owned(),
+                same_server_as: Some("studio".to_owned()),
+                ..Conditions::default()
+            },
         ])
         .unwrap();
         assert_eq!(notice.code, "ND-RELAY-003");
@@ -1836,7 +1917,7 @@ mod tests {
         let paused = "Namedrop holds as many of its replies as it can for threads the Automatic Reply Limit paused, so it keeps the rest until a person's message or Continue resumes them";
         assert!(
             notice.explanation.ends_with(&format!(
-                "By host: devbox: 3 replies answered a message sent to another host, and were dropped, and {paused}; studio: {paused}; lab: it keeps no more replies for this machine, so Namedrop sends it nothing new until this machine collects them; pi: 1 reply answered a message sent to another host, and was dropped."
+                "By host: devbox: 3 replies answered a message sent to another host, and were dropped, and {paused}; studio: {paused}; lab: it keeps no more replies for this machine, so Namedrop sends it nothing new until this machine collects them; pi: 1 reply answered a message sent to another host, and was dropped; mini: it let go of 4 replies for this machine before this machine acknowledged them; nano: it let go of 1 reply for this machine before this machine acknowledged it, and it keeps no more replies for this machine, so Namedrop sends it nothing new until this machine collects them; twin: its server answers as the one studio reaches, which rex hosts list gives other addresses, so Namedrop relays nothing by twin until the two list the same addresses or one is removed."
             )),
             "{}",
             notice.explanation

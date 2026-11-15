@@ -53,18 +53,21 @@ pub(crate) fn machine_name() -> String {
 }
 
 /// `namedrop relay accept`: one `namedrop.relay` call B's bridge admitted
-/// for the server `host_id` behind `endpoint`, read from `input`. Its
-/// answer is the call's result.
+/// for the server `host_id` behind `endpoint`, read from `input`, from the
+/// machine `caller_host` when the caller's principal names one. Its answer
+/// is the call's result.
 pub fn accept(
     state: &Path,
     endpoint: &crate::mux::Endpoint,
     host_id: &str,
+    caller_host: Option<&str>,
     input: &[u8],
 ) -> String {
     serde_json::to_string(&accept::accept(
         state,
         endpoint,
         host_id,
+        caller_host,
         input,
         &mut |space| {
             wake(state, endpoint, space);
@@ -222,6 +225,56 @@ fn worker_lock(
         .open(directory.join(format!("{scope}.lock")))
 }
 
+/// `<state>/relay/open.lock`, which the opens that make, migrate, or set
+/// aside `relay.sqlite3` take in turn.
+fn open_lock(state: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let directory = state.join("relay");
+    create_relay_dir(&directory)?;
+    std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(directory.join("open.lock"))
+}
+
+/// Takes `<state>/relay/place.lock`, which a worker holds while it looks
+/// for what it made of a reply and makes it, so two workers of one server
+/// never both take a reply they each found new.
+fn placing(state: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let directory = state.join("relay");
+    create_relay_dir(&directory)?;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(directory.join("place.lock"))?;
+    lock.lock()?;
+    Ok(lock)
+}
+
+/// Takes `<state>/relay/capture.lock`, which a capture holds from reading
+/// its cursor until it has moved it, since one may move it back.
+fn capturing(state: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let directory = state.join("relay");
+    create_relay_dir(&directory)?;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(directory.join("capture.lock"))?;
+    lock.lock()?;
+    Ok(lock)
+}
+
 /// Creates `<state>/relay`, but never the state directory itself, so a
 /// relay process whose state directory was deleted makes none again.
 fn create_relay_dir(directory: &Path) -> std::io::Result<()> {
@@ -320,24 +373,51 @@ fn worker_command(
     command
 }
 
-/// Starts the worker of each label of `endpoint` with an item queued or a
-/// thread open, as the bridge does when it connects, so a conversation goes
-/// on collecting after a restart. `reap` reaps each one.
+/// Starts the worker of each label of `endpoint`, of those `rex hosts
+/// list` still lists, with an item queued or a thread open whose worker
+/// does not run, as the bridge does when it
+/// connects and every so often after, so a conversation goes on collecting
+/// after a restart or a killed worker. `reap` reaps each one. It reads the
+/// host list only for a label whose worker does not run.
 pub(crate) fn start_workers(
     state: &Path,
     endpoint: &crate::mux::Endpoint,
     reap: &dyn Fn(std::process::Child),
 ) {
-    let now = now_ms();
-    if let Ok(store) = RelayStore::open(state, now)
-        && let Ok(labels) = store.active_labels(&endpoint.key, now)
-    {
-        for label in labels {
-            if let Some(worker) = spawn_worker(state, endpoint, &label) {
-                reap(worker);
-            }
+    if !state.join("relay.sqlite3").is_file() {
+        return;
+    }
+    let Ok(labels) =
+        RelayStore::read(state).and_then(|store| store.active_labels(&endpoint.key, now_ms()))
+    else {
+        return;
+    };
+    let stopped: Vec<String> = labels
+        .into_iter()
+        .filter(|label| !worker_runs(state, endpoint, label))
+        .collect();
+    if stopped.is_empty() {
+        return;
+    }
+    let Ok(hosts) = Hosts::read() else {
+        return;
+    };
+    for label in stopped {
+        if hosts.labels.contains(&label)
+            && let Some(worker) = spawn_worker(state, endpoint, &label)
+        {
+            reap(worker);
         }
     }
+}
+
+/// Whether a worker for `label` holds its lock. The lock alone keeps a
+/// second worker from working, so this only spares a start that would exit
+/// at once. A worker that starts during the look exits at once, and the
+/// look then finds none, so its caller starts one.
+fn worker_runs(state: &Path, endpoint: &crate::mux::Endpoint, label: &str) -> bool {
+    worker_lock(state, endpoint, label)
+        .is_ok_and(|lock| matches!(lock.try_lock(), Err(std::fs::TryLockError::WouldBlock)))
 }
 
 /// Runs the relay's capture after a drain in a Rex home: each new message
@@ -384,13 +464,14 @@ pub(crate) fn unsent_by_label(state: &Path, session_socket_id: &str) -> Vec<(Str
 
 /// What Doctor reports for each label of the Rex endpoint
 /// `session_socket_id` that needs a look. Nothing when the relay never ran.
-pub(crate) fn conditions(state: &Path, session_socket_id: &str) -> Vec<store::Conditions> {
+pub(crate) fn conditions(
+    state: &Path,
+    session_socket_id: &str,
+) -> Result<Vec<store::Conditions>, crate::StoreError> {
     if !state.join("relay.sqlite3").is_file() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    RelayStore::read(state)
-        .and_then(|store| store.conditions(session_socket_id, now_ms()))
-        .unwrap_or_default()
+    RelayStore::read(state).and_then(|store| store.conditions(session_socket_id, now_ms()))
 }
 
 /// Each remote sender whose replies expired here before it collected
@@ -414,6 +495,11 @@ pub(crate) trait RemoteHosts {
     /// thread a reply answers, which the reply addresses as a participant.
     fn participant(&self, _alias: &str, _host: &str) -> bool {
         false
+    }
+
+    /// The refusal for `label`, which is not exactly a listed, valid one.
+    fn unlisted(&self, label: &str) -> String {
+        unlisted(label, self.listed().unwrap_or_default())
     }
 }
 
@@ -444,28 +530,56 @@ impl RemoteHosts for NoRemoteHosts {
 }
 
 /// The labels `rex hosts list --json` prints, byte for byte, and the
-/// addresses each one dials, sorted.
+/// addresses each one dials, each in the one spelling of `address_spelling`,
+/// sorted, with what `rex` warned about the list, as when it could not
+/// reach the home that keeps them.
 #[derive(Debug, Default)]
 pub(crate) struct Hosts {
     labels: Vec<String>,
     addresses: Vec<Vec<String>>,
+    warnings: Vec<String>,
 }
 
 impl RemoteHosts for Hosts {
     fn listed(&self) -> Option<&[String]> {
         Some(&self.labels)
     }
+
+    fn unlisted(&self, label: &str) -> String {
+        let refusal = unlisted(label, &self.labels);
+        if self.warnings.is_empty() {
+            refusal
+        } else {
+            format!("{refusal}. {}", self.warnings.join(" "))
+        }
+    }
 }
 
 impl Hosts {
     /// The host list of this machine's `rex`, as the relay's later calls
-    /// read it.
+    /// read it: the hosts of the home `REX_HOME` or `rex home` names, and
+    /// of this machine's own server. `-S` and `REX_SERVER` change neither,
+    /// as Rex says, so the relay passes no server.
     pub(crate) fn read() -> Result<Self, String> {
         let output = rex::run(&["hosts", "list", "--json"], None, rex::CALL)
             .map_err(|failure| format!("could not read your Rex hosts: {failure}"))?;
         let listed: serde_json::Value = serde_json::from_slice(&output)
             .map_err(|error| format!("could not read your Rex hosts: {error}"))?;
         let mut hosts = Self::default();
+        let home = &listed["home"];
+        if home["reached"] == false {
+            hosts.warnings.push(format!(
+                "rex hosts list could not reach your Rex home {}, so its hosts may be missing.",
+                home["label"].as_str().unwrap_or("")
+            ));
+        }
+        for warning in listed["warnings"].as_array().into_iter().flatten() {
+            hosts.warnings.push(format!(
+                "rex hosts list warned about {}: {}.",
+                warning["server"].as_str().unwrap_or("a server"),
+                warning["message"].as_str().unwrap_or("")
+            ));
+        }
         for host in listed["hosts"].as_array().into_iter().flatten() {
             let Some(label) = host["host"]["label"].as_str() else {
                 continue;
@@ -474,9 +588,10 @@ impl Hosts {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .filter_map(|address| address.as_str().map(str::to_owned))
+                .filter_map(|address| address.as_str().map(address_spelling))
                 .collect();
             addresses.sort();
+            addresses.dedup();
             hosts.labels.push(label.to_owned());
             hosts.addresses.push(addresses);
         }
@@ -503,13 +618,73 @@ impl Hosts {
         same
     }
 
+    /// Whether the list may lack a host it would list: `rex` warned about
+    /// it, as when it could not read the home that keeps the hosts, or this
+    /// machine's own server, whose hosts it then leaves out, or showed a
+    /// server's hosts from an old copy.
+    pub(crate) fn incomplete(&self) -> bool {
+        !self.warnings.is_empty()
+    }
+
     #[cfg(test)]
     pub(crate) fn labelled(labels: &[&str]) -> Self {
         Self {
             labels: labels.iter().map(|label| (*label).to_owned()).collect(),
             addresses: vec![Vec::new(); labels.len()],
+            ..Self::default()
         }
     }
+}
+
+/// One spelling for each address of a `rex hosts` endpoint that Rex dials
+/// the same way, because Rex keeps the spelling the person typed and
+/// normalizes it only when it dials. The scheme's case, a host name's
+/// case, a trailing `/`, a bare absolute path for `unix://`, a doubled `/`
+/// in a socket path, and, for a socket that exists, its path through
+/// symbolic links. A port stays as written: Rex dials `https://h` at 443
+/// and then 7297, `https://h:443` only at 443, and a bare `h:p` over https
+/// and then http, so each can reach another server.
+pub(crate) fn address_spelling(endpoint: &str) -> String {
+    let (scheme, rest) = match endpoint.split_once("://") {
+        Some((scheme, rest)) => (Some(scheme.to_ascii_lowercase()), rest),
+        None => (None, endpoint),
+    };
+    match scheme.as_deref() {
+        Some("unix") => socket_spelling(rest),
+        None if rest.starts_with('/') => socket_spelling(rest),
+        Some(scheme) => format!("{scheme}://{}", authority_spelling(rest)),
+        None => authority_spelling(rest),
+    }
+}
+
+fn socket_spelling(path: &str) -> String {
+    let mut collapsed = String::with_capacity(path.len());
+    for c in path.chars() {
+        if !(c == '/' && collapsed.ends_with('/')) {
+            collapsed.push(c);
+        }
+    }
+    let trimmed = match collapsed.strip_suffix('/') {
+        Some(trimmed) if !trimmed.is_empty() => trimmed.to_owned(),
+        _ => collapsed,
+    };
+    let path = std::fs::canonicalize(&trimmed)
+        .ok()
+        .and_then(|path| path.into_os_string().into_string().ok())
+        .unwrap_or(trimmed);
+    format!("unix://{path}")
+}
+
+/// `[user@]host[:port][/path]` with the host's case dropped and a bare
+/// trailing `/` gone.
+fn authority_spelling(rest: &str) -> String {
+    let rest = rest.strip_suffix('/').unwrap_or(rest);
+    let (authority, path) = rest.find('/').map_or((rest, ""), |at| rest.split_at(at));
+    let (user, host) = authority
+        .rsplit_once('@')
+        .map_or(("", authority), |(user, host)| (user, host));
+    let at = if user.is_empty() { "" } else { "@" };
+    format!("{user}{at}{}{path}", host.to_ascii_lowercase())
 }
 
 /// Whether `label` can name a host in a mention: 1 to 64 ASCII letters,

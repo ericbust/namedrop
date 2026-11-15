@@ -23,7 +23,7 @@ use std::{
     time::Duration,
 };
 
-const DATABASE_FILE_NAME: &str = "namedrop.sqlite3";
+pub(crate) const DATABASE_FILE_NAME: &str = "namedrop.sqlite3";
 /// Dispositions Namedrop records itself when a turn ends: the terminal relay's
 /// and the final-reply claim's no-reply. An explicit reply after either one
 /// still reaches the thread.
@@ -113,7 +113,11 @@ mod relay_author;
 pub(crate) use coordination::WakeReadiness;
 pub(crate) use coordination_bridge::TrackedMessage;
 pub(crate) use coordination_ownership::CoordinationRole;
-pub(crate) use relay_author::{RelayAuthor, RelayOrigin, RelayRecipient, Relayed, ToRelayAuthor};
+#[cfg(test)]
+pub(crate) use relay_author::TO_RELAY_AUTHORS;
+pub(crate) use relay_author::{
+    Answered, RelayAuthor, RelayOrigin, RelayRecipient, Relayed, ToRelayAuthor,
+};
 mod groups;
 mod handoff;
 mod terminal;
