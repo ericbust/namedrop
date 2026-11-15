@@ -62,7 +62,14 @@ pub(crate) fn handoff(
     {
         candidates.push(old);
     }
-    if let Some(record) = registration(home)? {
+    // An unreadable rex.json stops only a handoff that must write its entry.
+    // Otherwise the package refresh reports it, and activation goes on.
+    let record = match registration(home) {
+        Ok(record) => record,
+        Err(_) if candidates.is_empty() => None,
+        Err(error) => return Err(error),
+    };
+    if let Some(record) = record {
         for entry in predecessors(&record) {
             if !entry.sealed
                 && installed_runtime::retirement(&entry.state)?
@@ -138,9 +145,14 @@ pub(crate) fn handoff(
         let lease = installed_runtime::package_guard(Some(home), state, Writer::Activation)?;
         let launcher = crate::runtime_executable()?;
         install_packages(&lease, home, state, &launcher, config)?;
-        super::refresh(&lease, home, &launcher, state)?;
+        // A module that cannot be rewritten still names the old launcher, so
+        // the entry stays unsealed and the next activation tries again.
+        let rewritten = super::refresh(&lease, home, &launcher, state);
         drop(lease);
-        let confirmation = confirm(home, state, &old);
+        let confirmation = match rewritten {
+            Ok(()) => confirm(home, state, &old),
+            Err(error) => json!({"status":"not_confirmed","error":error,"sealed":false}),
+        };
         reports.push(json!({"state":old,"notice":format!("The names made on Rex stay in {} and were not carried over. In each Rex session, run Activate Namedrop again and name the panes again, then restart the agents there so they load the new hooks.",old.display()),"invalid_bindings":invalid,"module":confirmation}));
     }
     Ok(reports)

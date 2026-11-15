@@ -838,9 +838,16 @@ fn installed_instructions(
 /// event. A runtime whose package failed must not be challenged.
 pub(crate) struct IntegrationPackageInstallation {
     outcomes: Vec<(AgentRuntime, Result<PathBuf, String>)>,
+    /// Why the registered Rex module could not be rewritten. The module is no
+    /// agent package, so its failure leaves both outcomes as they are.
+    module: Option<String>,
 }
 
 impl IntegrationPackageInstallation {
+    pub(crate) fn module_error(&self) -> Option<&str> {
+        self.module.as_deref()
+    }
+
     pub(crate) fn failed(&self, runtime: AgentRuntime) -> bool {
         self.outcomes
             .iter()
@@ -928,7 +935,7 @@ where
         eprintln!("{refusal}");
     }
     let executable = crate::collaboration_executable().map(PathBuf::from);
-    let mut outcomes = [AgentRuntime::Codex, AgentRuntime::ClaudeCode].map(|agent_runtime| {
+    let outcomes = [AgentRuntime::Codex, AgentRuntime::ClaudeCode].map(|agent_runtime| {
         let outcome = match (runtime.home_directory, &executable, &current) {
             (_, _, Err(refusal)) => Err(refusal.clone()),
             (Some(home_directory), _, Ok(false)) => {
@@ -952,15 +959,12 @@ where
         };
         (agent_runtime, outcome)
     });
-    if matches!(current, Ok(true))
-        && let (Some(home), Ok(executable)) = (runtime.home_directory, &executable)
-        && let Err(error) =
-            crate::rex_ui::refresh(&lease, home, executable, runtime.state_directory)
-    {
-        for (_, outcome) in &mut outcomes {
-            *outcome = Err(error.clone());
+    let module = match (&current, runtime.home_directory, &executable) {
+        (Ok(true), Some(home), Ok(executable)) => {
+            crate::rex_ui::refresh(&lease, home, executable, runtime.state_directory).err()
         }
-    }
+        _ => None,
+    };
     drop(lease);
     let namespace = discovered.namespace(runtime.session_socket_id);
     let attribution = MutationAttribution::new(
@@ -1004,6 +1008,7 @@ where
         .map_err(|error| error.to_string())?;
     Ok(IntegrationPackageInstallation {
         outcomes: outcomes.into_iter().collect(),
+        module,
     })
 }
 

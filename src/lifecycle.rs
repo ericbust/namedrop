@@ -593,6 +593,9 @@ where
             if !handoff.is_empty() {
                 report["handoff"] = json!(handoff);
             }
+            if let Some(error) = reconciliation.installation.module_error() {
+                report["rex_module"] = json!({"written": false, "error": error, "repair": "Fix what the error names, then run Activate Namedrop again."});
+            }
             Ok(report)
         }
         "deactivate" => {

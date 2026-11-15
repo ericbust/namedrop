@@ -305,6 +305,185 @@ fn takeover_resumes_predecessors_and_doctor_reads_liveness_without_the_old_store
     );
 }
 
+/// The U6 review's F2: the Rex module is no agent package, so a module the
+/// owner's refresh cannot write is reported on its own, on Herdr and on Rex,
+/// and leaves both packages installed and activation successful.
+#[cfg(feature = "test-support")]
+#[test]
+fn a_module_the_refresh_cannot_write_is_reported_alone_and_leaves_both_packages() {
+    use namedrop::{
+        AgentConfigDirectories, LifecycleRuntime, ProcessIds, SystemClock,
+        execute_lifecycle_operation, mux::fake::FakeMux,
+    };
+    for endpoint in ["/tmp/u7-f2-herdr.sock", "rex:/tmp/u7-f2-never.sock"] {
+        for shape in [
+            "symlink",
+            "unparsable",
+            "unreadable",
+            "missing-folder",
+            "relative",
+        ] {
+            let f = Fixture::new();
+            let home = f.0.join("home");
+            let state = f.0.join("state");
+            let config = f.0.join("cfg/init.lua");
+            fs::create_dir_all(config.parent().unwrap()).unwrap();
+            fs::write(&config, "-- person's config\n").unwrap();
+            fs::create_dir_all(home.join(".config/namedrop")).unwrap();
+            let registration = home.join(".config/namedrop/rex.json");
+            let record = |module: &str| {
+                fs::write(
+                    &registration,
+                    json!({"module":module,"config":config,"line":"inserted"}).to_string(),
+                )
+                .unwrap()
+            };
+            let linked = f.0.join("cfg/namedrop.lua");
+            match shape {
+                "symlink" => {
+                    let target = f.0.join("dotfiles-namedrop.lua");
+                    fs::write(&target, format!("{}\n", namedrop::rex_ui::MANAGED_LINE)).unwrap();
+                    std::os::unix::fs::symlink(&target, &linked).unwrap();
+                    record(linked.to_str().unwrap());
+                }
+                "unparsable" => fs::write(&registration, "{not json").unwrap(),
+                "unreadable" => {
+                    record(linked.to_str().unwrap());
+                    fs::set_permissions(&registration, fs::Permissions::from_mode(0o000)).unwrap();
+                }
+                "missing-folder" => record(f.0.join("gone/namedrop.lua").to_str().unwrap()),
+                _ => record("namedrop.lua"),
+            }
+            let mux = FakeMux::world()
+                .endpoint(endpoint)
+                .space("s1")
+                .pane("p1")
+                .build();
+            let ids = ProcessIds::default();
+            let runtime = LifecycleRuntime {
+                state_directory: &state,
+                home_directory: Some(&home),
+                agent_config: AgentConfigDirectories::default(),
+                cwd: &f.0,
+                workspace_id: Some("s1"),
+                current_pane_id: Some("p1"),
+                session_socket_id: endpoint,
+                mux: &mux,
+                clock: &SystemClock,
+                ids: &ids,
+            };
+            let report =
+                execute_lifecycle_operation("activate", json!({"confirmed":true}), &runtime)
+                    .unwrap_or_else(|error| panic!("{endpoint} {shape}: {error}"));
+            for agent in ["codex", "claude-code"] {
+                let package = &report["integration_packages"][agent];
+                assert_eq!(
+                    package["installed"], true,
+                    "{endpoint} {shape} {agent}: {report}"
+                );
+                assert_eq!(package["error"], Value::Null, "{endpoint} {shape} {agent}");
+                assert_ne!(package["configuration"], "installation_failed");
+                assert_ne!(
+                    report["agent_integration_hook_activation"][agent]["status"],
+                    "installation_failed",
+                    "{endpoint} {shape} {agent}"
+                );
+            }
+            assert_eq!(report["rex_module"]["written"], false, "{endpoint} {shape}");
+            assert!(
+                report["rex_module"]["error"]
+                    .as_str()
+                    .is_some_and(|error| !error.is_empty()),
+                "{endpoint} {shape}: {report}"
+            );
+            assert_eq!(fs::read_to_string(&config).unwrap(), "-- person's config\n");
+            if shape == "unreadable" {
+                fs::set_permissions(&registration, fs::Permissions::from_mode(0o600)).unwrap();
+            }
+        }
+    }
+}
+
+/// A handoff whose step 5 cannot rewrite the module leaves it naming the old
+/// launcher, so step 6 never seals the entry, even where it would seal with
+/// no Rex call, and the next activation tries again.
+#[cfg(feature = "test-support")]
+#[test]
+fn a_handoff_that_cannot_rewrite_the_module_stays_unsealed_and_succeeds() {
+    use namedrop::{
+        AgentConfigDirectories, LifecycleRuntime, ProcessIds, SystemClock,
+        execute_lifecycle_operation, mux::fake::FakeMux,
+    };
+    let f = Fixture::new();
+    let home = f.0.join("home");
+    let old = f.0.join("old");
+    let successor = f.0.join("successor");
+    fs::create_dir_all(old.join("runtime")).unwrap();
+    fs::write(old.join("runtime/owner"), "standalone\n").unwrap();
+    fs::write(old.join("runtime/namedrop"), "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(
+        old.join("runtime/namedrop"),
+        fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    fs::create_dir_all(home.join(".config/namedrop")).unwrap();
+    fs::write(
+        home.join(".config/namedrop/state-directory"),
+        format!("{}\n", old.display()),
+    )
+    .unwrap();
+    let target = f.0.join("dotfiles-namedrop.lua");
+    fs::write(&target, format!("{}\n", namedrop::rex_ui::MANAGED_LINE)).unwrap();
+    let module = f.0.join("cfg/namedrop.lua");
+    fs::create_dir_all(module.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&target, &module).unwrap();
+    let registration = home.join(".config/namedrop/rex.json");
+    // No server: a step 6 that ran would seal at once without a Rex call.
+    fs::write(
+        &registration,
+        json!({"module":module,"config":f.0.join("cfg/init.lua"),"line":"inserted"}).to_string(),
+    )
+    .unwrap();
+    let mux = FakeMux::world()
+        .endpoint("/tmp/u7-step5-herdr.sock")
+        .space("s1")
+        .pane("p1")
+        .build();
+    let ids = ProcessIds::default();
+    let runtime = LifecycleRuntime {
+        state_directory: &successor,
+        home_directory: Some(&home),
+        agent_config: AgentConfigDirectories::default(),
+        cwd: &f.0,
+        workspace_id: Some("s1"),
+        current_pane_id: Some("p1"),
+        session_socket_id: "/tmp/u7-step5-herdr.sock",
+        mux: &mux,
+        clock: &SystemClock,
+        ids: &ids,
+    };
+    for _ in 0..2 {
+        let report =
+            execute_lifecycle_operation("activate", json!({"confirmed":true}), &runtime).unwrap();
+        let module_report = &report["handoff"][0]["module"];
+        assert_eq!(module_report["status"], "not_confirmed", "{report}");
+        assert_eq!(module_report["sealed"], false);
+        assert!(
+            module_report["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("symbolic link")),
+            "{module_report}"
+        );
+        let saved: Value = serde_json::from_slice(&fs::read(&registration).unwrap()).unwrap();
+        assert_eq!(saved["predecessors"][0]["sealed"], false, "{saved}");
+        assert_eq!(report["integration_packages"]["codex"]["installed"], true);
+    }
+    assert_eq!(
+        fs::read_to_string(&target).unwrap(),
+        format!("{}\n", namedrop::rex_ui::MANAGED_LINE)
+    );
+}
+
 #[test]
 fn installer_round_trips_guarded_config_and_rolls_back_rpc_errors() {
     let output = binary::command("python3")
