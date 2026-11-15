@@ -23,7 +23,7 @@ use std::{
     time::Duration,
 };
 
-const DATABASE_FILE_NAME: &str = "namedrop.sqlite3";
+pub(crate) const DATABASE_FILE_NAME: &str = "namedrop.sqlite3";
 /// Dispositions Namedrop records itself when a turn ends: the terminal relay's
 /// and the final-reply claim's no-reply. An explicit reply after either one
 /// still reaches the thread.

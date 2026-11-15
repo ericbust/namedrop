@@ -3,7 +3,7 @@
 
 use super::wire::{Lost, Outcome, Reply};
 use crate::StoreError;
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::{fs, os::unix::fs::PermissionsExt, path::Path, time::Duration};
 
 const FILE: &str = "relay.sqlite3";
@@ -104,6 +104,9 @@ INSERT INTO dropped_3 SELECT endpoint, host_id, remote_message_id, label, space,
     FROM dropped d ORDER BY rowid;
 DROP TABLE dropped;
 ALTER TABLE dropped_3 RENAME TO dropped;
+CREATE TABLE capture_start (
+    rowid INTEGER NOT NULL
+);
 CREATE INDEX outbox_by_seq ON outbox (host_id, seq);
 CREATE TABLE outbox_lost (
     host_id TEXT NOT NULL,
@@ -177,7 +180,8 @@ pub(crate) const OTHER_LABEL_LIFETIME_MS: i64 = OUTBOX_LIFETIME_MS;
 /// `inbound`, `outbox`, its `outbox_epoch`, `remote_threads`, and the tally
 /// of the replies that expired, which Doctor reports after the items
 /// themselves are gone. Both hold `capture`, the last main-database message
-/// each endpoint's capture read.
+/// each endpoint's capture read, and `capture_start`, the last one when
+/// this database was made, where an endpoint's capture starts.
 const SCHEMA: &str = "
 CREATE TABLE peers (
     label TEXT PRIMARY KEY,
@@ -286,6 +290,9 @@ CREATE TABLE outbox_expired (
 );
 CREATE TABLE capture (
     endpoint TEXT PRIMARY KEY,
+    rowid INTEGER NOT NULL
+);
+CREATE TABLE capture_start (
     rowid INTEGER NOT NULL
 );
 CREATE TABLE outbox_epoch (
@@ -397,7 +404,7 @@ fn current_layout() -> &'static Layout {
 const COLUMNS_NEW_IN_2: [(&str, &str); 2] =
     [("conditions", "other_label_at_ms"), ("dropped", "told")];
 /// The tables and indexes `TO_3` makes, and the columns it adds.
-const NEW_IN_3: [&str; 3] = ["outbox_lost", "lost", "outbox_by_seq"];
+const NEW_IN_3: [&str; 4] = ["outbox_lost", "lost", "outbox_by_seq", "capture_start"];
 const COLUMNS_NEW_IN_3: [(&str, &str); 7] = [
     ("outbound", "paused"),
     ("outbound", "paused_told"),
@@ -412,6 +419,13 @@ const COLUMNS_NEW_IN_3: [(&str, &str); 7] = [
 /// the write lock, and says whether it then has this schema's layout. One
 /// that does not is left as it was.
 fn upgrade(connection: &mut Connection, path: &Path) -> Result<bool, StoreError> {
+    // The main database is read before the write lock is taken here, so a
+    // relay write never waits on the main database.
+    let start = if layout(connection)?.is_empty() {
+        main_end(path)?
+    } else {
+        0
+    };
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let version: u32 = transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if matches!(version, 1 | 2) {
@@ -439,6 +453,10 @@ fn upgrade(connection: &mut Connection, path: &Path) -> Result<bool, StoreError>
                     "outbox"
                 )],
             )?;
+            transaction.execute(
+                "INSERT INTO capture_start (rowid) VALUES (?1)",
+                params![start],
+            )?;
         }
         1 => transaction.execute_batch(&format!("{TO_2}{TO_3}"))?,
         2 => transaction.execute_batch(TO_3)?,
@@ -457,6 +475,32 @@ fn upgrade(connection: &mut Connection, path: &Path) -> Result<bool, StoreError>
     transaction.pragma_update(None, "user_version", VERSION)?;
     transaction.commit()?;
     Ok(true)
+}
+
+/// The rowid of the last message in the main database beside the relay's
+/// at `path`, or 0 when it has none. A new relay database captures only
+/// the messages after it, so one made again, or after one was set aside,
+/// never queues or keeps the history before it a second time.
+fn main_end(path: &Path) -> Result<i64, StoreError> {
+    let main = path.with_file_name(crate::store::DATABASE_FILE_NAME);
+    if !main.is_file() {
+        return Ok(0);
+    }
+    let connection = Connection::open_with_flags(&main, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    connection.busy_timeout(Duration::from_secs(2))?;
+    let made: bool = connection.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE name = 'collaboration_messages')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !made {
+        return Ok(0);
+    }
+    Ok(connection.query_row(
+        "SELECT COALESCE(MAX(rowid), 0) FROM collaboration_messages",
+        [],
+        |row| row.get(0),
+    )?)
 }
 
 /// Moves the database at `path` to `relay.sqlite3.unreleased-<now_ms>`, so
@@ -748,17 +792,15 @@ impl RelayStore {
     }
 
     /// The rowid of the last main-database message capture read for
-    /// `endpoint`.
+    /// `endpoint`, or before any, the last one when this database was
+    /// made.
     pub(crate) fn capture_cursor(&self, endpoint: &str) -> Result<i64, StoreError> {
-        Ok(self
-            .connection
-            .query_row(
-                "SELECT rowid FROM capture WHERE endpoint = ?1",
-                params![endpoint],
-                |row| row.get(0),
-            )
-            .optional()?
-            .unwrap_or(0))
+        Ok(self.connection.query_row(
+            "SELECT COALESCE((SELECT rowid FROM capture WHERE endpoint = ?1),
+                (SELECT MAX(rowid) FROM capture_start), 0)",
+            params![endpoint],
+            |row| row.get(0),
+        )?)
     }
 
     /// Commits a message's relay writes, loss counts, and capture cursor together.

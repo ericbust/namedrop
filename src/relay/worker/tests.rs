@@ -1035,6 +1035,43 @@ fn a_follow_up_before_any_reply_is_collected_still_reaches_the_remote_agent() {
     assert_eq!(cursor.to_string(), last);
 }
 
+/// A relay database made anew, after one was deleted or set aside, starts
+/// its capture at the main database's end: it queues no message from
+/// before it again, and still captures each later one.
+#[test]
+fn a_new_relay_database_captures_no_message_from_before_it() {
+    for remade in ["deleted", "set aside"] {
+        let space = Space::new(REX);
+        let rex = rex(&["devbox"]);
+        let message = sent(&space, &rex);
+        rex.answer_with(answer("accepted", None, json!([])));
+        work_for(&space, &rex, 1);
+        let relay = space.state.join("relay.sqlite3");
+        if remade == "deleted" {
+            fs::remove_file(&relay).unwrap();
+        } else {
+            Connection::open(&relay)
+                .unwrap()
+                .execute_batch("DROP INDEX outbox_by_seq")
+                .unwrap();
+        }
+        capture(&space);
+        assert!(outbound(&space).is_empty(), "{remade}");
+        assert_eq!(
+            crate::relay::store::set_aside_in(&space.state).len(),
+            usize::from(remade == "set aside")
+        );
+        rex.run(|| space.reply("reply-1", &message, "@bob@devbox after"))
+            .unwrap();
+        capture(&space);
+        assert_eq!(
+            queued_for(&space, "after"),
+            [["devbox", "bob", "alice", "-"].map(str::to_owned)],
+            "{remade}"
+        );
+    }
+}
+
 /// A message capture fails to queue stops the cursor before it, so it and
 /// every later message are captured once capture can queue it.
 #[test]
@@ -1042,6 +1079,9 @@ fn capture_stops_before_a_message_it_could_not_queue() {
     let space = Space::new(REX);
     let rex = rex(&["devbox"]);
     crate::rex_bridge::remember_host_id(&space.state, &Endpoint::parse(REX), "host-a");
+    // The relay database is made before both messages, so capture reads
+    // both.
+    drop(crate::relay::tests_support::store(&space.state));
     rex.run(|| space.send("request-1", "@bob@devbox first"))
         .unwrap();
     rex.run(|| space.send("request-2", "@bob@devbox second"))
