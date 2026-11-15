@@ -1358,9 +1358,15 @@ Evidence for the mixed-build round:
 
 The Rex adapter advertises revision 14 with minimum 12. The welcome selects the connection's revision; `server.status` reports the server's maximum. The raw WebSocket live test deliberately offers 13 and checks the negotiated revision against the lower of 13 and that maximum.
 
-The bridge resyncs a newly created session from `payload.session.session_id`, including when no startup process event arrives. Existing terminal status and closure decoders stay in place. The filtered lifecycle replay keeps creation and closure events from the captured revision 12 fixture and omits process events. It does not claim to be a captured revision 14 stream.
+The bridge resyncs a newly created session from `payload.session.session_id`, because Rex can drop every startup event of a new session's first block from `session.attach_all`. That is a Rex race on all three builds, and it shows most on preview.19 at revision 13 (measured). It failed the old live assertion of a startup `AgentStatusChanged` on preview.19. Existing terminal status and closure decoders stay in place. `startup-gap.jsonl` is a captured preview.19 transcript of a full miss, followed by a root status set, a terminal reset, and the kill. Its test requires `Resync`, two `AgentStatusChanged`, `PaneClosed`, and `SpaceClosed` in order.
 
-Revision 14's tunnel blocks remain outside the terminal-only survey. The embedded block event schemas match preview.18. Live qualification on preview.14, preview.18, and preview.19 is pending, including ongoing root status delivery on preview.19. See [Control API revisions](ADAPTER.md#control-api-revisions).
+Revision 14's tunnel blocks remain outside the terminal-only survey. The embedded block event schemas match preview.18. Raw frames show ongoing root status sets and removals reaching the bridge's connection and the delivery tap the same way on preview.14, preview.18, and preview.19. See [Control API revisions](ADAPTER.md#control-api-revisions).
+
+Evidence for the revision 14 round:
+
+- **Commits.** `a47046b1` adds the regressions, `9f073023` negotiates 14 and resyncs new sessions, `321728f9` pins the startup gap and restores live status coverage, and this record follows.
+- **Live matrix** at `321728f9`, on one scratch server per build (preview.14 at 12, preview.18 at 13, preview.19 at 14). The four live tests, doctor, activate, `term1` naming, and the address list pass, and no Herdr config is written. The first preview.14 run failed `activate` once with a package-directory ownership conflict in a fresh `HOME`, and the rerun passed. That code path does not read Rex's revision.
+- **Mutations.** On a preview.19 scratch server, removing the root set, the root removal, or the `session_created` resync from the decoder fails both `a_session_whose_startup_events_never_came_resyncs_and_follows_its_status` and the live bridge test. The restored decoder passes both.
 
 ## Next implementation step
 

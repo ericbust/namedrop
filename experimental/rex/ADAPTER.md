@@ -16,9 +16,13 @@ The adapter advertises revisions 12 through 14. Rex preview.14 reports revision 
 
 Revision 14 adds the `com.superlogical.tunnel` block creator. The adapter surveys only `com.superlogical.terminal` blocks. Unknown block events remain ignored. The embedded schemas in preview.18 and preview.19 keep the same nested `session_event`, `block_event`, and terminal status fields.
 
-The bridge maps `session_created` to `Resync` using `payload.session.session_id`. Session lifecycle coverage no longer requires an incidental startup `process_changed`. Root program status changes, process changes, and child exits retain their existing decode rules. A creation resync does not activate a session.
+The bridge maps `session_created` to `Resync` using `payload.session.session_id`, because Rex does not always send a `session.attach_all` connection the first events of a new session's first block (measured, below). Root program status changes, process changes, and child exits retain their existing decode rules. A creation resync does not activate a session.
 
-Scripted tests cover negotiation and the captured lifecycle with startup process events omitted. These are not a raw preview.19 stream capture. Live checks on all three builds, including deliberate root status changes on preview.19, remain required before runtime compatibility is qualified.
+**The startup gap is a Rex race (measured 2026-11-14).** Raw frames of one `attach_all` (`event_scope: all`) connection per fresh scratch server show that the first block of a new session announces itself only through `session_created`, with no `block_created`, and that Rex may drop the block's first `process_changed` events. The connection's `seq` stays contiguous, so Rex never queued them. Generation 1 (`foreground: null`) was missed on every build: 3 of 12 sessions on preview.14, 4 of 12 on preview.18, and 22 of 44 and 29 of 44 on preview.19 at revisions 13 and 14. All startup events of a fresh server's first session were missed only on preview.19 at revision 13: 3 of 21 servers, against 0 of 77 at revision 14 and 0 of 13 on each older build. Rex's own docs say that `event_scope: all` carries every event from every session, including `block_event`. That failure, not a revision 14 change, broke the old live assertion of a startup `AgentStatusChanged`. `src/mux/rex/fixtures/events/startup-gap.jsonl` is a captured preview.19 transcript of a full miss.
+
+**Ongoing delivery is unchanged (measured).** After attachment, on preview.14 at 12, preview.18 at 13, and preview.19 at 13 and 14, both the bridge's `attach_all` connection and a delivery tap's `session.attach` connection got the root `program_status_changed` of a shell builtin `printf` OSC 7501, and the root `program_status_removed` with reason `reset` of `printf '\ec'`, with no `process_changed` between them. A program that reports and exits gives reason `foreground`. A block split into an existing session sends `block_created`, then every `process_changed` from generation 1, its status, `child_exited`, and `block_closed`.
+
+**Live matrix (measured at `321728f9`).** On scratch servers of preview.14, preview.18, and preview.19, the four live tests pass: the welcome, the server status and typed error, the local proof, and the bridge stream. The bridge test now sets and resets the root status after attachment. Doctor, activate, naming a terminal `term1` from a real `ui run name` layer, and the address list also pass, and no Herdr config is written. Preview.19 negotiates 14 and reports 14.
 
 ## The patch review and how it was answered
 
@@ -882,7 +886,7 @@ run(state, endpoint):
 | `session_destroyed` (top level) | `SpaceClosed`. `rex kill` sends `block_closed` for each block about 6 ms before it (review 1's measure) |
 | `block_event program_status_changed`, root record | `AgentStatusChanged` |
 | `block_event program_status_removed`, root record | `AgentStatusChanged` |
-| `block_event process_changed` | `AgentStatusChanged`. The first block of a new session sends this and no `block_created` (measured) |
+| `block_event process_changed` | `AgentStatusChanged`. The first block of a new session sends no `block_created`, and Rex may drop its first `process_changed` events, so `session_created` resyncs (measured) |
 | `block_event child_exited` | `AgentStatusChanged`. `block_closed` follows when the program's exit closes the block (measured) |
 | `session_created` (top level) | `Resync(space)`, using `payload.session.session_id` |
 | `title_changed`, `pwd_changed`, `bell`, `size_changed`, `client_*`, `session_view_changed`, anything unknown | Nothing |
@@ -1325,7 +1329,7 @@ The Rex conformance suite (revision 1's commit 8), backward `blob_read` windowin
 - An agent can report `done` while a dialog Namedrop does not recognize holds the screen, and a screen that reads `Unseen` then delivers. Review 4 saw Claude Code report `done` with a modal dialog showing whose Enter confirms its option 1. Herdr has the same rule, so this is not a regression. Only a Rex screen fault holds the mail.
 - On B, the pointer names a relayed sender `@bob@laptop`, with `laptop` taken from A's self-reported `from.host`. B's agent may copy that into a `send`. It parses as a remote recipient only when B lists a host labelled `laptop`, and that label may name another machine, which would then receive the mention. It stays open for Part 2.
 - A Linux B is unmeasured live. The stand-in is macOS to macOS.
-- Rex is a preview. The adapter accepts negotiated revisions 12 through 14 and refuses others. Runtime qualification of preview.19 remains pending as described in [Control API revisions](#control-api-revisions).
+- Rex is a preview. The adapter accepts negotiated revisions 12 through 14 and refuses others. Preview.14, preview.18, and preview.19 pass the live checks in [Control API revisions](#control-api-revisions). Rex can drop a new session's first block events from `session.attach_all`. That is not reported to Rex yet.
 - A crashed agent leaves its terminal modes behind, so a terminal line or key sent to such a block may not act as it would in a clean shell. Herdr panes have the same exposure (inferred).
 - Does Doctor's issue 003 find a daemon-mode Codex in a Rex block through the port? It reads the panes the survey reports (inferred), and commit 17's live check confirms it.
 
