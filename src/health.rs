@@ -91,43 +91,11 @@ where
         && let Some(inspected) =
             crate::rex_ui::inspect(runtime.home_directory, runtime.mux.endpoint())
     {
-        let (confirmed, explanation, diagnostic) = match inspected {
-            Ok(diagnostic) => (
-                diagnostic["confirmed"] == true,
-                rex_module_explanation(&diagnostic),
-                diagnostic,
-            ),
-            Err(error) => (
-                false,
-                error.clone(),
-                serde_json::json!({"confirmed":false,"error":error}),
-            ),
-        };
-        let mut check = issue(
-            "ND-REX-001",
-            if confirmed {
-                HealthSeverity::Info
-            } else {
-                HealthSeverity::Notice
-            },
-            if confirmed {
-                "The Rex module is confirmed."
-            } else {
-                "The Rex module is not confirmed."
-            },
-            &explanation,
-            HealthRepairKind::ProductAction,
-            if confirmed {
-                "Keys bound later in init.lua override the Namedrop keys."
-            } else {
-                "Run sh scripts/install.sh, then check Namedrop Doctor again."
-            },
-        );
-        check.diagnostic = diagnostic;
-        report.issues.push(check);
-        if !confirmed && report.status == HealthStatus::Healthy {
+        let check = rex_module_issue(inspected);
+        if check.severity != HealthSeverity::Info && report.status == HealthStatus::Healthy {
             report.status = HealthStatus::NeedsAttention;
         }
+        report.issues.push(check);
     }
     if let Some(diagnostic) = crate::dashboard::tailscale::diagnose(runtime.state_directory) {
         let explanation = match (&diagnostic.url, &diagnostic.problem) {
@@ -456,9 +424,19 @@ where
                 runtime.state_directory,
                 runtime.session_socket_id,
             )));
-            issues.extend(relay_conditions_issue(&crate::relay::conditions(
+            match crate::relay::conditions(runtime.state_directory, runtime.session_socket_id) {
+                Ok(conditions) => issues.extend(relay_conditions_issue(&conditions)),
+                Err(error) => issues.push(issue(
+                    "ND-RELAY-005",
+                    HealthSeverity::Notice,
+                    "Relay conditions could not be read.",
+                    &error.to_string(),
+                    HealthRepairKind::HumanDecision,
+                    "Check the relay database and filesystem permissions, then run Doctor again.",
+                )),
+            }
+            issues.extend(relay_set_aside_issue(&crate::relay::store::set_aside_in(
                 runtime.state_directory,
-                runtime.session_socket_id,
             )));
         }
     }
@@ -1394,7 +1372,7 @@ fn status_queue_issues(queue: &std::path::Path, now_ms: u64) -> Vec<HealthIssue>
 }
 
 /// One notice for the replies the relay kept for other machines that
-/// expired before those machines collected them.
+/// expired before those machines acknowledged them.
 fn expired_replies_issue(expired: &[(String, i64)]) -> Option<HealthIssue> {
     if expired.is_empty() {
         return None;
@@ -1407,9 +1385,9 @@ fn expired_replies_issue(expired: &[(String, i64)]) -> Option<HealthIssue> {
     Some(issue(
         "ND-RELAY-001",
         HealthSeverity::Info,
-        "Replies for another machine expired before its Namedrop collected them.",
+        "Replies for another machine expired before its Namedrop acknowledged them.",
         &format!(
-            "This machine keeps each reply for a remote sender for 7 days, until that sender's Namedrop collects it. These expired: {senders}."
+            "This machine keeps each reply for a remote sender for 7 days, until that sender's Namedrop acknowledges it. These expired: {senders}."
         ),
         HealthRepairKind::HumanDecision,
         "Nothing needs doing. A remote sender collects replies while it has a thread open with this machine.",
@@ -1461,11 +1439,27 @@ fn relay_conditions_issue(conditions: &[crate::relay::store::Conditions]) -> Opt
                         .to_owned(),
                 );
             }
+            match condition.lost {
+                0 => {}
+                1 => found.push(
+                    "it let go of 1 reply for this machine before this machine acknowledged it"
+                        .to_owned(),
+                ),
+                count => found.push(format!(
+                    "it let go of {count} replies for this machine before this machine acknowledged them"
+                )),
+            }
             if condition.cannot_reply {
                 found.push(
                     "it keeps no more replies for this machine, so Namedrop sends it nothing new until this machine collects them"
                         .to_owned(),
                 );
+            }
+            if let Some(other) = &condition.same_server_as {
+                found.push(format!(
+                    "its server answers as the one {other} reaches, which rex hosts list gives other addresses, so Namedrop relays nothing by {} until the two list the same addresses or one is removed",
+                    condition.label
+                ));
             }
             format!("{}: {}", condition.label, found.join(", and "))
         })
@@ -1480,6 +1474,25 @@ fn relay_conditions_issue(conditions: &[crate::relay::store::Conditions]) -> Opt
         ),
         HealthRepairKind::HumanDecision,
         "Resume each paused thread with a message or Continue, and check that each label in rex hosts list reaches the machine you expect.",
+    ))
+}
+
+/// One notice for the relay databases from unreleased builds that were
+/// set aside.
+fn relay_set_aside_issue(names: &[String]) -> Option<HealthIssue> {
+    if names.is_empty() {
+        return None;
+    }
+    Some(issue(
+        "ND-RELAY-004",
+        HealthSeverity::Info,
+        "Namedrop set aside a relay database from an unreleased build.",
+        &format!(
+            "relay.sqlite3 had tables that no release of Namedrop makes, so Namedrop moved it aside and started a new one. Messages to or from another machine that were in flight then stayed in it. Set aside in the state directory: {}.",
+            names.join(", ")
+        ),
+        HealthRepairKind::HumanDecision,
+        "Nothing needs doing. Delete the file once you no longer need it.",
     ))
 }
 
@@ -1608,6 +1621,59 @@ fn add_operation<M, C, I>(
         issue.repair.command = Some(command);
     }
 }
+/// `ND-REX-001`: the module the server loaded, as `rex_ui::inspect` read
+/// it. Only a confirmed module is information; any other is a notice, with a
+/// reload for a module the server loaded before a refresh rewrote it, and a
+/// reinstall otherwise.
+fn rex_module_issue(inspected: Result<serde_json::Value, String>) -> HealthIssue {
+    let (confirmed, mut explanation, diagnostic) = match inspected {
+        Ok(diagnostic) => (
+            diagnostic["confirmed"] == true,
+            rex_module_explanation(&diagnostic),
+            diagnostic,
+        ),
+        Err(error) => (
+            false,
+            error.clone(),
+            serde_json::json!({"confirmed":false,"error":error}),
+        ),
+    };
+    let stale = !confirmed && diagnostic["stale"] == true;
+    if stale {
+        explanation.push_str(
+            " Rex still runs an older namedrop.lua, which it loaded before Namedrop rewrote the file. A reload loads the current one.",
+        );
+    }
+    let repair = if confirmed {
+        "Keys bound later in init.lua override the Namedrop keys.".to_owned()
+    } else if stale {
+        format!(
+            "{} Then check Namedrop Doctor again.",
+            crate::rex_ui::RELOAD_REPAIR
+        )
+    } else {
+        "Run sh scripts/install.sh, then check Namedrop Doctor again.".to_owned()
+    };
+    let mut check = issue(
+        "ND-REX-001",
+        if confirmed {
+            HealthSeverity::Info
+        } else {
+            HealthSeverity::Notice
+        },
+        if confirmed {
+            "The Rex module is confirmed."
+        } else {
+            "The Rex module is not confirmed."
+        },
+        &explanation,
+        HealthRepairKind::ProductAction,
+        &repair,
+    );
+    check.diagnostic = diagnostic;
+    check
+}
+
 /// Doctor's account of the Rex module. An issue's text renders as one line,
 /// because the report escapes control characters, newlines included.
 fn rex_module_explanation(diagnostic: &serde_json::Value) -> String {
@@ -1620,7 +1686,7 @@ fn rex_module_explanation(diagnostic: &serde_json::Value) -> String {
             let status = match k["status"].as_str() {
                 Some("in_effect") => "in effect",
                 Some("shadowed") => "shadowed",
-                Some("skipped") => "skipped at load",
+                Some("not_bound") => "not bound to Namedrop",
                 _ => "unknown",
             };
             match k["source"].as_str() {
@@ -1629,14 +1695,32 @@ fn rex_module_explanation(diagnostic: &serde_json::Value) -> String {
             }
         })
         .collect::<Vec<_>>();
+    let about = &diagnostic["about"];
+    let loaded = match about["module"].as_str() {
+        Some(module) => format!(
+            "Loaded module: {}, launcher {}, state {}.",
+            module.strip_prefix('@').unwrap_or(module),
+            text(&about["launcher"]),
+            text(&about["state"])
+        ),
+        None => "No module answered namedrop_about.".to_owned(),
+    };
+    // Only the variables the server sets, so no JSON reaches the sentence.
+    let environment = diagnostic["env"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(name, value)| value.as_str().map(|value| format!("{name}={value}")))
+        .collect::<Vec<_>>();
     let mut explanation = format!(
-        "Registered module: {}. Loaded module: {}, launcher {}, state {}. Server config: {}. Server environment: {}. Keys: {}.",
+        "Registered module: {}. {loaded} Server config: {}. Server environment: {}. Keys: {}.",
         text(&diagnostic["module"]),
-        text(&diagnostic["about"]["module"]),
-        text(&diagnostic["about"]["launcher"]),
-        text(&diagnostic["about"]["state"]),
         text(&diagnostic["config"]["path"]),
-        diagnostic["env"],
+        if environment.is_empty() {
+            "none".to_owned()
+        } else {
+            environment.join(", ")
+        },
         if keys.is_empty() {
             "none".to_owned()
         } else {
@@ -1746,11 +1830,11 @@ mod tests {
             "module": "/cfg/namedrop.lua",
             "about": {"module": "/cfg/namedrop.lua", "launcher": "/s/runtime/namedrop", "state": "/s"},
             "config": {"path": "/cfg/init.lua"},
-            "env": {"HOME": "/home"},
+            "env": {"HOME": "/home", "XDG_CONFIG_HOME": null, "REX_SERVER": "unix:///tmp/r.sock"},
             "keys": [
                 {"key": "alt+shift+cmd+i", "status": "in_effect", "source": "namedrop.lua:39"},
                 {"key": "alt+shift+cmd+m", "status": "shadowed", "source": "init.lua:4"},
-                {"key": "alt+shift+cmd+h", "status": "skipped"}
+                {"key": "alt+shift+cmd+h", "status": "not_bound"}
             ],
             "error": "no about"
         });
@@ -1766,8 +1850,46 @@ mod tests {
         assert_eq!(terminal_safe_text(&explanation), explanation);
         assert_eq!(
             explanation,
-            "Registered module: /cfg/namedrop.lua. Loaded module: /cfg/namedrop.lua, launcher /s/runtime/namedrop, state /s. Server config: /cfg/init.lua. Server environment: {\"HOME\":\"/home\"}. Keys: alt+shift+cmd+i in effect (namedrop.lua:39), alt+shift+cmd+m shadowed (init.lua:4), alt+shift+cmd+h skipped at load. Readback error: no about"
+            "Registered module: /cfg/namedrop.lua. Loaded module: /cfg/namedrop.lua, launcher /s/runtime/namedrop, state /s. Server config: /cfg/init.lua. Server environment: HOME=/home, REX_SERVER=unix:///tmp/r.sock. Keys: alt+shift+cmd+i in effect (namedrop.lua:39), alt+shift+cmd+m shadowed (init.lua:4), alt+shift+cmd+h not bound to Namedrop. Readback error: no about"
         );
+    }
+
+    /// The U6 review's F7: a module the server loaded before a refresh
+    /// rewrote it needs a reload, and only an unconfirmed module whose file
+    /// is current asks for the reinstall.
+    #[test]
+    fn an_unconfirmed_rex_module_names_a_reload_when_stale_and_a_reinstall_otherwise() {
+        let confirmed = rex_module_issue(Ok(serde_json::json!({"confirmed": true, "stale": true})));
+        assert_eq!(confirmed.severity, HealthSeverity::Info);
+        assert_eq!(confirmed.summary, "The Rex module is confirmed.");
+        let stale = rex_module_issue(Ok(serde_json::json!({"confirmed": false, "stale": true})));
+        assert_eq!(stale.severity, HealthSeverity::Notice);
+        assert!(
+            stale
+                .explanation
+                .contains("Rex still runs an older namedrop.lua"),
+            "{}",
+            stale.explanation
+        );
+        assert_eq!(
+            stale.repair.prompt,
+            "Reload Rex's configuration with rex config reload. Then check Namedrop Doctor again."
+        );
+        let unconfirmed = rex_module_issue(Ok(serde_json::json!({"confirmed": false})));
+        assert_eq!(unconfirmed.severity, HealthSeverity::Notice);
+        assert!(
+            unconfirmed
+                .explanation
+                .contains("No module answered namedrop_about.")
+        );
+        assert!(!unconfirmed.explanation.contains("older namedrop.lua"));
+        assert_eq!(
+            unconfirmed.repair.prompt,
+            "Run sh scripts/install.sh, then check Namedrop Doctor again."
+        );
+        let unreachable = rex_module_issue(Err("Rex is not running".into()));
+        assert_eq!(unreachable.severity, HealthSeverity::Notice);
+        assert_eq!(unreachable.explanation, "Rex is not running");
     }
 
     #[test]
@@ -1804,6 +1926,24 @@ mod tests {
     }
 
     #[test]
+    fn relay_databases_set_aside_are_one_notice_that_names_each() {
+        assert!(relay_set_aside_issue(&[]).is_none());
+        let notice = relay_set_aside_issue(&[
+            "relay.sqlite3.unreleased-1".to_owned(),
+            "relay.sqlite3.unreleased-2".to_owned(),
+        ])
+        .unwrap();
+        assert_eq!(notice.code, "ND-RELAY-004");
+        assert!(
+            notice
+                .explanation
+                .ends_with("relay.sqlite3.unreleased-1, relay.sqlite3.unreleased-2."),
+            "{}",
+            notice.explanation
+        );
+    }
+
+    #[test]
     fn relay_conditions_are_one_notice_that_names_each_host() {
         use crate::relay::store::Conditions;
         assert!(relay_conditions_issue(&[]).is_none());
@@ -1813,6 +1953,8 @@ mod tests {
                 other_label: 3,
                 held_full: true,
                 cannot_reply: false,
+                same_server_as: None,
+                lost: 0,
             },
             Conditions {
                 label: "studio".to_owned(),
@@ -1829,6 +1971,22 @@ mod tests {
                 other_label: 1,
                 ..Conditions::default()
             },
+            Conditions {
+                label: "mini".to_owned(),
+                lost: 4,
+                ..Conditions::default()
+            },
+            Conditions {
+                label: "nano".to_owned(),
+                lost: 1,
+                cannot_reply: true,
+                ..Conditions::default()
+            },
+            Conditions {
+                label: "twin".to_owned(),
+                same_server_as: Some("studio".to_owned()),
+                ..Conditions::default()
+            },
         ])
         .unwrap();
         assert_eq!(notice.code, "ND-RELAY-003");
@@ -1836,7 +1994,7 @@ mod tests {
         let paused = "Namedrop holds as many of its replies as it can for threads the Automatic Reply Limit paused, so it keeps the rest until a person's message or Continue resumes them";
         assert!(
             notice.explanation.ends_with(&format!(
-                "By host: devbox: 3 replies answered a message sent to another host, and were dropped, and {paused}; studio: {paused}; lab: it keeps no more replies for this machine, so Namedrop sends it nothing new until this machine collects them; pi: 1 reply answered a message sent to another host, and was dropped."
+                "By host: devbox: 3 replies answered a message sent to another host, and were dropped, and {paused}; studio: {paused}; lab: it keeps no more replies for this machine, so Namedrop sends it nothing new until this machine collects them; pi: 1 reply answered a message sent to another host, and was dropped; mini: it let go of 4 replies for this machine before this machine acknowledged them; nano: it let go of 1 reply for this machine before this machine acknowledged it, and it keeps no more replies for this machine, so Namedrop sends it nothing new until this machine collects them; twin: its server answers as the one studio reaches, which rex hosts list gives other addresses, so Namedrop relays nothing by twin until the two list the same addresses or one is removed."
             )),
             "{}",
             notice.explanation

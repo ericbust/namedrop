@@ -2,6 +2,8 @@
 
 Use rex_install_live.py for the actual Lua parser and scratch Rex builds.
 """
+import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -9,12 +11,11 @@ import subprocess
 import sys
 import tempfile
 
+spec=importlib.util.spec_from_file_location('scripted_rex',Path(__file__).resolve().parent/'support/scripted_rex.py')
+scripted_rex=importlib.util.module_from_spec(spec);spec.loader.exec_module(scripted_rex)
 BINARY=Path(sys.argv[1]).resolve()
 LINE='pcall(require, "namedrop");'
 MANAGED='-- Managed by Namedrop. `namedrop install` rewrites this file, so edits here are lost.'
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from support.rex_control import Server
 
 with tempfile.TemporaryDirectory(prefix='nd-u7-protocol-',dir='/tmp') as folder:
     root=Path(folder)
@@ -22,7 +23,7 @@ with tempfile.TemporaryDirectory(prefix='nd-u7-protocol-',dir='/tmp') as folder:
         place=root/name;place.mkdir();(place/'home').mkdir();(place/'state/runtime').mkdir(parents=True);(place/'state/runtime/owner').write_text('standalone\n')
         config=place/('custom/init.lua' if custom else 'home/.config/rex/init.lua');config.parent.mkdir(parents=True,exist_ok=True)
         if contents is not None:config.write_bytes(contents)
-        return place,config,Server(place,config)
+        return place,config,scripted_rex.InstallServer(place,config)
     def run(place,server,*args,ok=True):
         env={'HOME':str(place/'home'),'PATH':'/usr/bin:/bin','NAMEDROP_STATE_DIR':str(place/'state'),'REX_SERVER':'unix://'+str(server.socket),'SHELL':'/bin/none'}
         p=subprocess.run([str(BINARY),'--json','install',*args,'--input-json','{"confirmed":true}'],env=env,input=b'',capture_output=True,timeout=30)
@@ -49,6 +50,14 @@ with tempfile.TemporaryDirectory(prefix='nd-u7-protocol-',dir='/tmp') as folder:
         config.write_text(LINE+'\n'+original.decode());run(place,server);assert json.loads(path.read_text())['line']=='present'
         run(place,server,'--remove');assert config.read_text().startswith(LINE),'personal line was removed'
     finally:server.close()
+    # The person's own line, deleted later, is inserted by the next install,
+    # because the person asked to install; only an inserted line stays out.
+    place,config,server=case('present-deleted',(LINE+'\n-- personal config\n').encode())
+    try:
+        path=place/'home/.config/namedrop/rex.json';run(place,server);assert json.loads(path.read_text())['line']=='present'
+        config.write_text('-- personal config\n');run(place,server)
+        assert config.read_text()==LINE+'\n-- personal config\n' and json.loads(path.read_text())['line']=='inserted'
+    finally:server.close()
     place,config,server=case('removed-line')
     try:
         run(place,server);config.write_text('-- person removed it\n');run(place,server);assert config.read_text()=='-- person removed it\n';assert json.loads((place/'home/.config/namedrop/rex.json').read_text())['line']=='removed'
@@ -71,5 +80,63 @@ with tempfile.TemporaryDirectory(prefix='nd-u7-protocol-',dir='/tmp') as folder:
         place,config,server=case('wrong-'+field)
         try:
             server.wrong=field;p=run(place,server,ok=False);assert b'not confirmed' in p.stdout and b'/another/install' in p.stdout;assert config.read_text().startswith(LINE)
+        finally:server.close()
+    def backups(config):return sorted(config.parent.glob(config.name+'.namedrop-*.bak'))
+    # The lease refuses before the baseline: a standalone runtime under a
+    # Herdr install record reports ND-INSTALL-002 and reloads nothing.
+    place,config,server=case('refused')
+    try:
+        release=place/'state/runtime/releases'/hashlib.sha256(BINARY.read_bytes()).hexdigest();release.mkdir(parents=True)
+        (release/'namedrop').write_bytes(BINARY.read_bytes());(release/'namedrop').chmod(0o700)
+        (release/'runtime.json').write_bytes((Path(__file__).resolve().parents[1]/'runtime.json').read_bytes())
+        (place/'state/runtime/current').symlink_to('releases/'+release.name)
+        launcher=place/'state/runtime/namedrop';launcher.write_text('#!/bin/sh\nexec "$(dirname "$0")/current/namedrop" "$@"\n');launcher.chmod(0o700)
+        herdr=place/'herdr/runtime';(herdr/'current').mkdir(parents=True);(herdr/'owner').write_text('herdr\n')
+        (herdr/'namedrop').write_text('#!/bin/sh\nexit 0\n');(herdr/'namedrop').chmod(0o700)
+        (place/'home/.config/namedrop').mkdir(parents=True);(place/'home/.config/namedrop/state-directory').write_text(str(herdr.parent)+'\n')
+        env={'HOME':str(place/'home'),'PATH':'/usr/bin:/bin','NAMEDROP_STATE_DIR':str(place/'state'),'REX_SERVER':'unix://'+str(server.socket),'SHELL':'/bin/none'}
+        p=subprocess.run([str(launcher),'--json','install','--input-json','{"confirmed":true}'],env=env,input=b'',capture_output=True,timeout=30)
+        assert p.returncode!=0 and b'ND-INSTALL-002' in p.stdout,(p.returncode,p.stdout,p.stderr)
+        assert server.reloads==0,'a refused install reloaded the config'
+        assert config.read_bytes()==b'-- personal config\n' and not (config.parent/'namedrop.lua').exists()
+    finally:server.close()
+    # Bytes that are not UTF-8 are edited as bytes, and removal returns them.
+    # Only the newest backup is kept once each edit stands.
+    place,config,server=case('latin1',b'-- caf\xe9 config\nlocal x = 1\n')
+    try:
+        before=config.read_bytes();run(place,server);assert config.read_bytes()==LINE.encode()+b'\n'+before
+        assert [b.read_bytes() for b in backups(config)]==[before];inserted=config.read_bytes()
+        assert json.loads((place/'home/.config/namedrop/rex.json').read_text())['line']=='inserted'
+        run(place,server,'--remove');assert config.read_bytes()==before
+        assert [b.read_bytes() for b in backups(config)]==[inserted],'older backups were kept'
+    finally:server.close()
+    # An edit that fails changes nothing and installs as --print-config does,
+    # with the line, the reason, and where it goes.
+    if os.geteuid()!=0:
+        place,config,server=case('unwritable')
+        try:
+            before=config.read_bytes();run(place,server,'--print-config');config.parent.chmod(0o555)
+            try:p=run(place,server)
+            finally:config.parent.chmod(0o755)
+            data=json.loads(p.stdout)['data'];assert config.read_bytes()==before and not backups(config),data
+            assert data['line']=='printed' and data['manual_config'] and 'could not edit' in data['reason'] and str(config) in data['instruction'] and data['config_line']==LINE,data
+            assert json.loads((place/'home/.config/namedrop/rex.json').read_text())['line']=='printed'
+            run(place,server);assert config.read_bytes()==LINE.encode()+b'\n'+before
+        finally:server.close()
+    # Removal finishes over a file that was already broken, and over a reload
+    # that fails with no edit; an error its own edit makes still restores.
+    for name in ['remove-broken','remove-unedited','remove-rollback']:
+        place,config,server=case(name)
+        try:
+            run(place,server,*(['--print-config'] if name=='remove-unedited' else []));edited=config.read_bytes()
+            if name=='remove-rollback':server.fail_at=server.reloads+2
+            else:server.fail_before=True
+            p=run(place,server,'--remove',ok=name!='remove-rollback')
+            if name=='remove-rollback':
+                assert config.read_bytes()==edited and b'Restored' in p.stdout and (place/'home/.config/namedrop/rex.json').exists(),p
+                continue
+            data=json.loads(p.stdout)['data'];assert data['removed'] is True,data
+            assert ('config_error' in data)==(name=='remove-broken'),data
+            assert config.read_bytes()==b'-- personal config\n' and not (config.parent/'namedrop.lua').exists() and not (place/'home/.config/namedrop/rex.json').exists()
         finally:server.close()
 print('protocol installer guards, rollback, identity, idempotence and removal passed')

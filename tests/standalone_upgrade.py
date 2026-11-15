@@ -12,7 +12,7 @@ import tarfile
 import tempfile
 
 from runtime_activation import environment, rex_agent
-from support.rex_control import Server
+from support.scripted_rex import InstallServer
 
 
 def unpack(archive, destination):
@@ -42,7 +42,7 @@ def upgrade_from(baseline):
         config = base / 'home/.config/rex/init.lua'
         config.parent.mkdir(parents=True)
         config.write_text('-- upgrade fixture\n')
-        server = Server(base, config)
+        server = InstallServer(base, config)
         try:
             endpoint = 'rex:' + str(server.socket)
             env['REX_SERVER'] = 'unix://' + str(server.socket)

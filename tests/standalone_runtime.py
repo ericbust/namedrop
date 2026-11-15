@@ -26,7 +26,7 @@ import runtime
 import update
 import runtime_install
 from runtime_install import Install
-from support.rex_control import Server
+from support.scripted_rex import InstallServer
 
 
 def fixture(root, number=1, state_schema=8, failure=False, live=True):
@@ -188,7 +188,7 @@ class StandaloneChecks(unittest.TestCase):
         config = self.base / 'home/.config/rex/init.lua'
         config.parent.mkdir(parents=True)
         config.write_text('-- personal config\n')
-        server = Server(self.base, config)
+        server = InstallServer(self.base, config)
         self.addCleanup(server.close)
         self.env['REX_SERVER'] = 'unix://' + str(server.socket)
         self.env['SURVEY_ENDPOINT'] = 'rex:' + str(server.socket)
@@ -354,7 +354,7 @@ class StandaloneChecks(unittest.TestCase):
                 self.assertEqual(source, dict(version='1.7.5', kind='checkout', origin=public))
 
     def test_stale_registration_skips_its_missing_server_and_surveys_the_target(self):
-        server = Server(self.base, self.base / 'home/init.lua')
+        server = InstallServer(self.base, self.base / 'home/init.lua')
         self.addCleanup(server.close)
         self.env['REX_SERVER'] = 'unix://' + str(server.socket)
         path = self.base / 'home/.config/namedrop/rex.json'
@@ -458,7 +458,7 @@ class StandaloneChecks(unittest.TestCase):
         (selected / 'namedrop').write_text('#!/bin/sh\nexit 77\n')
         (selected / 'namedrop').chmod(0o700)
         config = self.base / 'home/init.lua'
-        server = Server(self.base, config)
+        server = InstallServer(self.base, config)
         self.addCleanup(server.close)
         endpoint = 'rex:' + str(server.socket)
         before = snapshot(self.base / 'state')
@@ -481,7 +481,7 @@ class StandaloneChecks(unittest.TestCase):
         config = self.base / 'home/.config/rex/init.lua'
         config.parent.mkdir(parents=True)
         config.write_text('-- personal config\n')
-        server = Server(self.base, config)
+        server = InstallServer(self.base, config)
         self.addCleanup(server.close)
         self.env['REX_SERVER'] = 'unix://' + str(server.socket)
         self.env['SURVEY_ENDPOINT'] = 'rex:' + str(server.socket)
@@ -514,7 +514,7 @@ class StandaloneChecks(unittest.TestCase):
         config = self.base / 'home/.config/rex/init.lua'
         config.parent.mkdir(parents=True)
         config.write_text('-- personal config\n')
-        server = Server(self.base, config)
+        server = InstallServer(self.base, config)
         self.addCleanup(server.close)
         self.env['REX_SERVER'] = 'unix://' + str(server.socket)
         self.env['SURVEY_ENDPOINT'] = 'rex:' + str(server.socket)

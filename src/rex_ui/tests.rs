@@ -1,6 +1,9 @@
 use super::*;
 use crate::cli::UiMode;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::{
+    os::unix::fs::PermissionsExt,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 struct Fixture(std::path::PathBuf);
 impl Fixture {
@@ -192,27 +195,41 @@ fn load_start_guard_accepts_only_the_server_parent() {
         peer: Some(123),
         calls: RefCell::default(),
     };
+    // The server names itself by its listener, which the bridge is keyed by.
+    let proved = RefCell::new(Vec::new());
+    let prove = |socket: &Path| {
+        proved.borrow_mut().push(socket.to_owned());
+        Some(Endpoint::parse("rex:/private/tmp/rex guard.sock"))
+    };
     assert_eq!(
-        server_start_endpoint(&start, 123).unwrap().key,
-        "rex:/tmp/rex guard.sock"
+        server_start_endpoint(&start, 123, prove).unwrap().key,
+        "rex:/private/tmp/rex guard.sock"
     );
-    assert!(server_start_endpoint(&start, 456).is_none());
+    assert_eq!(
+        proved.borrow().as_slice(),
+        [Path::new("/tmp/rex guard.sock")]
+    );
+    assert!(server_start_endpoint(&start, 123, |_| None).is_none());
+    assert!(server_start_endpoint(&start, 456, prove).is_none());
     assert_eq!(
         start.calls.borrow().as_slice(),
         [
+            Path::new("/tmp/rex guard.sock"),
             Path::new("/tmp/rex guard.sock"),
             Path::new("/tmp/rex guard.sock")
         ]
     );
     start.peer = None;
-    assert!(server_start_endpoint(&start, 123).is_none());
+    assert!(server_start_endpoint(&start, 123, prove).is_none());
     start.server = Some("tcp://remote:7000".into());
     start.calls.borrow_mut().clear();
-    assert!(server_start_endpoint(&start, 123).is_none());
+    assert!(server_start_endpoint(&start, 123, prove).is_none());
     assert!(start.calls.borrow().is_empty());
     start.server = None;
-    assert!(server_start_endpoint(&start, 123).is_none());
+    assert!(server_start_endpoint(&start, 123, prove).is_none());
     assert!(start.calls.borrow().is_empty());
+    // A refused start makes no protocol request.
+    assert_eq!(proved.borrow().len(), 1);
 }
 
 #[test]
@@ -236,8 +253,120 @@ fn refresh_remembers_a_removed_managed_line_without_restoring_it() {
         fs::read_to_string(&config).unwrap(),
         "-- the person removed the line\n"
     );
-    let mut restored = saved;
+}
+
+/// The U7 review's F1: only a read that finds the file without the line, or
+/// finds no file, counts as removed, and a line the person adds back, as
+/// Doctor says, clears `removed`.
+#[test]
+fn the_line_state_is_read_from_init_lua_each_time_and_a_failed_read_changes_nothing() {
+    let f = Fixture::new();
+    let config = f.0.join("init.lua");
+    let module = f.0.join("namedrop.lua");
+    let path = crate::locator::rex_registration(&f.0);
+    let state = f.0.join("state");
+    let refresh_with = |line: &str| {
+        fs::write(
+            &path,
+            json!({"config":config,"module":module,"line":line}).to_string(),
+        )
+        .unwrap();
+        refresh(&f.lease(), &f.0, Path::new("/runtime/namedrop"), &state).unwrap();
+        registration(&f.0).unwrap().unwrap()["line"].clone()
+    };
+    let confirmed =
+        |record: &Value| Ok::<_, String>(json!({"confirmed":true,"line":record["line"]}));
+    // A file the refresh cannot read keeps the state, whatever it holds.
+    fs::create_dir(&config).unwrap();
+    assert_eq!(refresh_with("inserted"), "inserted");
+    assert_eq!(
+        inspect_with(Some(&f.0), confirmed).unwrap().unwrap()["confirmed"],
+        true
+    );
+    assert_eq!(refresh_with("removed"), "removed");
+    fs::remove_dir(&config).unwrap();
+    fs::write(&config, format!("{CONFIG_LINE}\n-- mine\n")).unwrap();
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read(&config).is_err() {
+        assert_eq!(refresh_with("inserted"), "inserted");
+    }
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+    // The person adds the removed line back: refresh and Doctor read it.
+    assert_eq!(refresh_with("removed"), "inserted");
+    fs::write(
+        &path,
+        json!({"config":config,"module":module,"line":"removed"}).to_string(),
+    )
+    .unwrap();
+    let report = inspect_with(Some(&f.0), confirmed).unwrap().unwrap();
+    assert_eq!(report["confirmed"], true, "{report}");
+    assert_eq!(report["line"], "inserted");
+    // A read that finds the line gone, or the file gone, is a removal.
+    fs::write(&config, "-- mine\n").unwrap();
+    assert_eq!(
+        inspect_with(Some(&f.0), confirmed).unwrap().unwrap()["confirmed"],
+        false
+    );
+    assert_eq!(refresh_with("inserted"), "removed");
+    fs::remove_file(&config).unwrap();
+    assert_eq!(refresh_with("inserted"), "removed");
+    // A line the person owns, or one printed, is never re-read.
+    for line in ["present", "printed"] {
+        assert_eq!(refresh_with(line), line);
+    }
+    assert!(!config.exists());
+}
+
+/// The U6 review's F3 and F7: activation names the keys only for a confirmed
+/// module, and a module the server loaded before a refresh rewrote it gets
+/// a reload, not a reinstall.
+#[test]
+fn shortcuts_name_keys_only_for_a_confirmed_module_and_a_reload_for_a_stale_one() {
+    let f = Fixture::new();
+    let module = f.0.join("namedrop.lua");
+    let config = f.0.join("init.lua");
+    let (launcher, state) = (Path::new("/new/runtime/namedrop"), Path::new("/new"));
     fs::write(&config, format!("{CONFIG_LINE}\n")).unwrap();
-    mark_removed_line(&mut restored);
-    assert_eq!(restored["line"], "removed");
+    fs::write(&module, module_text(launcher, state).unwrap()).unwrap();
+    fs::write(
+        crate::locator::rex_registration(&f.0),
+        json!({"module":module,"config":config,"line":"inserted","launcher":launcher,"state":state})
+            .to_string(),
+    )
+    .unwrap();
+    // The server's report: About names `loaded` as the module that answered,
+    // baked to the old launcher.
+    let report = |confirmed: bool, loaded: &Path| {
+        let about = json!({"module":format!("@{}", loaded.display()),"launcher":"/old/runtime/namedrop","state":"/old"});
+        move |record: &Value| {
+            Ok::<_, String>(
+                json!({"confirmed":confirmed,"module":record["module"],"keys":["k"],"actions_complete":true,"about":about}),
+            )
+        }
+    };
+    let shortcuts = |confirmed, loaded: &Path| {
+        shortcut_report(inspect_with(Some(&f.0), report(confirmed, loaded)))
+    };
+    assert_eq!(
+        shortcuts(true, &module),
+        json!({"status":"rex_module","path":module,"keys":["k"]})
+    );
+    let reload = json!({"status":"stale_module","path":module,"repair":RELOAD_REPAIR});
+    assert_eq!(shortcuts(false, &module), reload);
+    let reinstall = json!({"status":"no_module", "repair":"Run sh scripts/install.sh."});
+    // Another module answered, so a reload would not help.
+    assert_eq!(shortcuts(false, &f.0.join("other/namedrop.lua")), reinstall);
+    // The file is not the text a reload would load.
+    fs::write(
+        &module,
+        module_text(Path::new("/elsewhere"), state).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(shortcuts(false, &module), reinstall);
+    fs::write(&module, module_text(launcher, state).unwrap()).unwrap();
+    assert_eq!(shortcuts(false, &module), reload);
+    // With the line gone, a reload loads no module at all.
+    fs::write(&config, "-- mine\n").unwrap();
+    assert_eq!(shortcuts(true, &module), reinstall);
+    assert_eq!(shortcuts(false, &module), reinstall);
 }

@@ -1,0 +1,32 @@
+{
+ "can_reply": true,
+ "epoch": "EPOCH",
+ "host_id": "host-b",
+ "more": false,
+ "outbox": [
+  {
+   "from": "bob",
+   "message_id": "b-1",
+   "re": "MESSAGE",
+   "seq": 1,
+   "text": "reply 1",
+   "thread": "t1"
+  },
+  {
+   "from": "bob",
+   "message_id": "b-2",
+   "re": "MESSAGE",
+   "seq": 2,
+   "text": "reply 2",
+   "thread": "t1"
+  },
+  {
+   "from": "bob",
+   "message_id": "b-3",
+   "re": "MESSAGE",
+   "seq": 3,
+   "text": "reply 3",
+   "thread": "t1"
+  }
+ ]
+}

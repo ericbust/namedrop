@@ -3,9 +3,10 @@ and the palette's error lines.
 
 Usage: python3 -I tests/rex_install_live.py BINARY REX_BINARY OUT [SECTION...]
 
-Sections, all by default: shapes handoff drain palette helpers tour doctor
-step6 races fallback. The optional runtime section needs NAMEDROP_TEST_STANDALONE_BASELINE
-and NAMEDROP_TEST_ARCHIVE from build_standalone_upgrade.py. Each fixture has its own HOME, its
+Sections, all by default: shapes lines handoff drain palette helpers tour
+doctor step6 races fallback. The optional runtime section needs
+NAMEDROP_TEST_STANDALONE_BASELINE and NAMEDROP_TEST_ARCHIVE from
+build_standalone_upgrade.py. Each fixture is a folder of OUT with its own HOME, its
 own Rex server on a socket under /tmp, and `--autostart=false -S unix://...`
 on every Rex call. Herdr is the Herdr differential's script `herdr`. Agents
 are Python stand-ins whose real SessionStart hook binds them in Rex blocks.
@@ -33,7 +34,7 @@ import threading
 import time
 
 binary, rex, out = (Path(p).resolve() for p in sys.argv[1:4])
-SECTIONS = ['shapes', 'handoff', 'drain', 'palette', 'helpers', 'tour', 'doctor', 'step6', 'races', 'fallback', 'runtime']
+SECTIONS = ['shapes', 'lines', 'handoff', 'drain', 'palette', 'helpers', 'tour', 'doctor', 'step6', 'races', 'fallback', 'runtime']
 chosen = sys.argv[4:] or [section for section in SECTIONS if section != 'runtime']
 assert set(chosen) <= set(SECTIONS), chosen
 repo = Path(__file__).resolve().parents[1]
@@ -457,6 +458,85 @@ def section_shapes():
     say('U7 real Rex install/config/readback/remove/cached-hook checks passed')
 
 
+def rex_module(f, session, block):
+    report = json.loads(f.in_block(session, block, 'doctor', ok=None).stdout)['data']
+    return next(i for i in report['issues'] if i['code'] == 'ND-REX-001')
+
+
+def section_lines():
+    """The U7 review's F1, F2, F5 and F6, and the backups, on a real server."""
+    # F1: an unreadable moment is no removal, and the line put back clears it.
+    f = Fixture('lines-read', b'-- mine\n')
+    try:
+        f.install()
+        session, block = f.session('lines')
+        f.config.chmod(0)
+        try:
+            f.in_block(session, block, 'activate', '--input-json', CONFIRMED)
+        finally:
+            f.config.chmod(0o600)
+        assert registration(f)['line'] == 'inserted', registration(f)
+        assert rex_module(f, session, block)['diagnostic']['confirmed'] is True
+        edited = f.config.read_bytes()
+        f.config.write_bytes(b'-- mine\n')
+        f.api('server.config_reload', {})
+        f.in_block(session, block, 'activate', '--input-json', CONFIRMED)
+        assert registration(f)['line'] == 'removed', registration(f)
+        issue = rex_module(f, session, block)
+        assert issue['diagnostic']['confirmed'] is False and 'was removed' in issue['explanation'], issue
+        f.config.write_bytes(edited)
+        f.api('server.config_reload', {})
+        # Doctor reads the file itself, with no refresh in between.
+        issue = rex_module(f, session, block)
+        assert issue['diagnostic']['confirmed'] is True, issue
+        f.in_block(session, block, 'activate', '--input-json', CONFIRMED)
+        assert registration(f)['line'] == 'inserted', registration(f)
+        f.install('--remove')
+        assert f.config.read_bytes() == b'-- mine\n', f.config.read_bytes()
+        say('lines: an unreadable init.lua is no removal; the line put back is confirmed, and --remove deletes it')
+    finally:
+        f.config.chmod(0o600)
+        f.close()
+    # F2: a file Rex reads that is not UTF-8 is edited, and comes back byte
+    # for byte, with only the newest backup kept.
+    body = b'-- caf\xe9 config\nlocal x = 1\n'
+    f = Fixture('lines-latin1', body)
+    try:
+        f.install()
+        assert f.config.read_bytes() == LINE.encode() + b'\n' + body, f.config.read_bytes()
+        assert about(f)['launcher'] == str(f.launcher)
+        f.install('--remove')
+        assert f.config.read_bytes() == body, f.config.read_bytes()
+        backups = sorted(f.config.parent.glob('init.lua.namedrop-*.bak'))
+        assert [b.read_bytes() for b in backups] == [LINE.encode() + b'\n' + body], backups
+        say('lines: a Latin-1 init.lua is installed, confirmed and removed byte for byte, with one backup left')
+    finally:
+        f.close()
+    # F5: removal finishes over an error the person made after the install.
+    f = Fixture('lines-broken', b'-- mine\n')
+    try:
+        f.install()
+        f.config.write_bytes(f.config.read_bytes() + b'local = 1\n')
+        data = json.loads(f.install('--remove').stdout)['data']
+        assert data['removed'] is True and 'config_error' in data, data
+        assert f.config.read_bytes() == b'-- mine\nlocal = 1\n', f.config.read_bytes()
+        assert not (f.config.parent / 'namedrop.lua').exists() and not (f.home / '.config/namedrop/rex.json').exists()
+        say('lines: --remove finished over an init.lua the person broke, and named the error')
+    finally:
+        f.close()
+    # F6: the person's own line, deleted later, is inserted by the next install.
+    f = Fixture('lines-present', (LINE + '\n-- mine\n').encode())
+    try:
+        f.install()
+        assert registration(f)['line'] == 'present'
+        f.config.write_bytes(b'-- mine\n')
+        f.install()
+        assert f.config.read_bytes() == (LINE + '\n-- mine\n').encode() and registration(f)['line'] == 'inserted'
+        say('lines: a present line the person deleted is inserted by the next install')
+    finally:
+        f.close()
+
+
 def section_handoff():
     for scenario in ['takeover', 'stopped-before-marker', 'stopped-after-marker', 'writer-after-marker',
                      'partial-package-write', 'rex-half-removed', 'server-stopped', 'line-printed', 'line-removed']:
@@ -495,6 +575,9 @@ def section_handoff():
             if scenario in {'line-printed', 'line-removed'}:
                 record['line'] = scenario.removeprefix('line-')
                 (f.home / '.config/namedrop/rex.json').write_text(json.dumps(record))
+            if scenario == 'line-removed':
+                # The line state is read from init.lua, so the person removes it.
+                f.config.write_bytes(f.config.read_bytes().split(b'\n', 1)[1])
             report = json.loads(h.activate().stdout)['data']
             assert report['handoff'] and 'were not carried over' in report['handoff'][0]['notice'], report.get('handoff')
             assert (f.state / 'runtime/retired.json').exists()

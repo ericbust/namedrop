@@ -1,11 +1,12 @@
 //! The notices a sender on A gets in its thread from a remote agent's relay
-//! author: that an item for that agent failed or expired, that the
-//! Automatic Reply Limit holds that agent's replies, or that A refused one
-//! or let held ones expire.
+//! author: that an item for that agent failed or expired, that B's
+//! Automatic Reply Limit paused the thread it goes to, that A's holds that
+//! agent's replies, that A refused one or let held ones expire, or that B
+//! let go of replies before A acknowledged them.
 
 use super::{
     RemoteName,
-    store::{Dropped, Held, RelayStore, Why},
+    store::{Dropped, Held, LostReplies, Paused, RelayStore, Why},
 };
 use crate::{
     ActorKind, DeliveryId, IdGenerator, MessageId, MutationAttribution, SpaceId, StateNamespace,
@@ -24,10 +25,11 @@ struct Notice<'a> {
     text: String,
 }
 
-/// Tells the sender of each item of `endpoint` that failed or expired,
-/// of each thread whose replies are held, of each reply A refused, and of
-/// each thread whose held replies expired, once, and calls `wake` for
-/// each space it told. A fault leaves the rest for the next call.
+/// Tells the sender of each item of `endpoint` that failed or expired, or
+/// that B's Automatic Reply Limit paused, of each thread whose replies are
+/// held, of each reply A refused, and of each thread whose held replies
+/// expired, once, and calls `wake` for each space it told. A fault leaves
+/// the rest for the next call.
 pub(crate) fn tell(
     state: &Path,
     endpoint: &Endpoint,
@@ -38,10 +40,12 @@ pub(crate) fn tell(
     let Ok(store) = RelayStore::open(state, now) else {
         return;
     };
-    let (Ok(unsent), Ok(held), Ok(dropped)) = (
+    let (Ok(unsent), Ok(paused), Ok(held), Ok(dropped), Ok(lost)) = (
         store.unsent(&endpoint.key),
+        store.paused_untold(&endpoint.key),
         store.held(&endpoint.key, true),
         store.dropped(&endpoint.key),
+        store.lost_untold(&endpoint.key),
     ) else {
         return;
     };
@@ -69,6 +73,12 @@ pub(crate) fn tell(
             return;
         }
     }
+    for paused in &paused {
+        let told = notice(state, gate, &endpoint.key, &paused_notice(paused));
+        if !settle(told, &paused.space, wake, || store.told_paused(paused)) {
+            return;
+        }
+    }
     for held in &held {
         let told = notice(state, gate, &endpoint.key, &held_notice(held));
         if !settle(told, &held.space, wake, || store.told_held(held)) {
@@ -82,6 +92,59 @@ pub(crate) fn tell(
         }) {
             return;
         }
+    }
+    // A server's losses are told at most `LOST_NOTICES_PER_HOUR` an hour.
+    // One past that waits for a later call, and Doctor counts it now.
+    for lost in &lost {
+        match store.lost_allowance(&endpoint.key, &lost.peer, now) {
+            Ok(allowance) if allowance > 0 => {}
+            Ok(_) => continue,
+            Err(_) => return,
+        }
+        let told = notice(state, gate, &endpoint.key, &lost_notice(lost));
+        if !settle(told, &lost.space, wake, || {
+            store.told_lost(&endpoint.key, lost, now)
+        }) {
+            return;
+        }
+    }
+}
+
+/// The notice that B let go of replies to a message before A acknowledged
+/// them. A may have collected one that expired and not yet acknowledged it.
+/// It comes from the relay author of the message's recipient, which the
+/// message made, so what B says it lost makes no relay author.
+fn lost_notice(lost: &LostReplies) -> Notice<'_> {
+    let replies = |count: i64| {
+        if count == 1 {
+            "1 reply".to_owned()
+        } else {
+            format!("{count} replies")
+        }
+    };
+    let (recipient, label) = (&lost.recipient, &lost.label);
+    let from = if lost.remote_alias == *recipient {
+        String::new()
+    } else {
+        format!(" from {}", lost.remote_alias)
+    };
+    const FULL: &str = "because it already kept 10,000 replies for this machine";
+    const WAITED: &str = "that stayed in its outbox for 7 days without acknowledgement";
+    let why = match (lost.discarded, lost.expired) {
+        (discarded, 0) => format!("{}{from} to this message {FULL}", replies(discarded)),
+        (0, expired) => format!("{}{from} to this message {WAITED}", replies(expired)),
+        (discarded, expired) => format!(
+            "{}{from} to this message: {discarded} {FULL}, and {expired} {WAITED}",
+            replies(discarded.saturating_add(expired))
+        ),
+    };
+    Notice {
+        space: &lost.space,
+        label,
+        alias: recipient,
+        message: &lost.re,
+        request_id: format!("relay-lost:{label}:{}:{}", lost.re, lost.remote_alias),
+        text: format!("The machine of @{recipient}@{label} let go of {why}."),
     }
 }
 
@@ -112,6 +175,24 @@ fn dropped_notice(dropped: &Dropped) -> Notice<'_> {
                 }
             ),
         },
+    }
+}
+
+/// The notice that B's Automatic Reply Limit paused the thread `paused`
+/// goes to on B, so A keeps it until a person there resumes the thread.
+fn paused_notice(paused: &Paused) -> Notice<'_> {
+    let (alias, label) = (&paused.recipient, &paused.label);
+    Notice {
+        space: &paused.space,
+        label,
+        alias,
+        message: &paused.message_id,
+        request_id: format!("relay-paused:{label}:{}:{alias}", paused.message_id),
+        text: format!(
+            "The Automatic Reply Limit paused this thread on {label}, so {label} takes no more \
+             messages in it for now. Namedrop keeps this message for @{alias}@{label} and sends \
+             it once a person on {label} resumes the thread there with a message or Continue."
+        ),
     }
 }
 
@@ -194,6 +275,7 @@ fn notice(
                 recipient: &sender,
                 text: &notice.text,
                 notice: true,
+                self_named_host: None,
             },
             &attribution,
         )
@@ -203,5 +285,29 @@ fn notice(
         Ok(_) => Ok(true),
         Err(error) if error.kind() == crate::StoreErrorKind::InvalidInput => Ok(false),
         Err(error) => Err(error.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lost_notice_saturates_legacy_counts() {
+        let lost = LostReplies {
+            re: "message".into(),
+            remote_alias: "bob".into(),
+            discarded: i64::MAX,
+            expired: i64::MAX,
+            label: "devbox".into(),
+            space: "space".into(),
+            recipient: "bob".into(),
+            peer: "devbox".into(),
+        };
+        assert!(
+            lost_notice(&lost)
+                .text
+                .contains(&format!("{} replies", i64::MAX))
+        );
     }
 }
