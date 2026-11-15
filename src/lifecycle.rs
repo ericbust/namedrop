@@ -199,6 +199,45 @@ where
     C: Clock,
     I: IdGenerator,
 {
+    execute_with_tour(operation, input, runtime, ActivationTour::Automatic)
+}
+
+/// The naming layer is already open, so its confirmed activation opens no tour.
+pub fn activate_from_naming_screen<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
+) -> Result<Value, String>
+where
+    M: crate::mux::Mux,
+    C: Clock,
+    I: IdGenerator,
+{
+    if runtime.mux.endpoint().kind != crate::mux::MuxKind::Rex {
+        return Err("Activation from the naming screen requires Rex".into());
+    }
+    execute_with_tour(
+        "activate",
+        json!({"confirmed": true}),
+        runtime,
+        ActivationTour::NamingScreen,
+    )
+}
+
+enum ActivationTour {
+    Automatic,
+    NamingScreen,
+}
+
+fn execute_with_tour<M, C, I>(
+    operation: &str,
+    input: Value,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
+    activation_tour: ActivationTour,
+) -> Result<Value, String>
+where
+    M: crate::mux::Mux,
+    C: Clock,
+    I: IdGenerator,
+{
     let discovered = match runtime.workspace_id {
         Some(workspace_id) => discover_reminder_workspace(
             runtime.state_directory,
@@ -519,7 +558,12 @@ where
                 crate::shortcuts::activate_shortcuts(runtime.home_directory, runtime.mux);
             // After the shortcuts, so the tour's reopen shortcut already works
             // when the popup mentions it. It reports instead of failing.
-            let tour = crate::tour::show_for_first_agent(runtime, &discovered, None);
+            let tour = match activation_tour {
+                ActivationTour::Automatic => {
+                    crate::tour::show_for_first_agent(runtime, &discovered, None)
+                }
+                ActivationTour::NamingScreen => json!({"shown": false, "reason": "naming_screen"}),
+            };
             Ok(json!({
                 "space_id": discovered.workspace_id,
                 "worktree_id": discovered.worktree_attached.then_some(discovered.worktree_id),

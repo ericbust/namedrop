@@ -110,9 +110,10 @@ pub use integration::{
 };
 pub(crate) use integration::{collaboration_executable, tool_environment};
 pub use lifecycle::{
-    DiscoveredPane, DiscoveredWorktree, EventError, LifecycleRuntime, discover_worktree,
-    discover_worktree_for_workspace, execute_lifecycle_operation, handle_mux_event,
-    locate_agent_session_pane, open_popup, pane_workspace, reconcile_discovered_panes,
+    DiscoveredPane, DiscoveredWorktree, EventError, LifecycleRuntime, activate_from_naming_screen,
+    discover_worktree, discover_worktree_for_workspace, execute_lifecycle_operation,
+    handle_mux_event, locate_agent_session_pane, open_popup, pane_workspace,
+    reconcile_discovered_panes,
 };
 pub use message::{
     BodyMention, OperatorSendError, OperatorSendErrorKind, ParsedMessage, RecipientOutlook,

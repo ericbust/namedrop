@@ -122,7 +122,12 @@ pub(super) fn run(options: &RuntimeOptions, inherited: &dyn Inherited, mode: UiM
         Err(error) => {
             // Keep actionable errors visible instead of closing the popup immediately.
             eprintln!("\nNamedrop: {}", error.escape_debug());
-            if io::stdin().is_terminal() {
+            if super::popup_input::is_rex(options, inherited) {
+                // Rex retains quick nonzero exits, even after the error was acknowledged.
+                if super::popup_input::wait_for_key().is_ok() {
+                    return ExitCode::SUCCESS;
+                }
+            } else if io::stdin().is_terminal() {
                 let _ = prompt_line("Enter or Esc closes: ");
             }
             ExitCode::from(65)
@@ -281,6 +286,35 @@ fn doctor_prompt(runtime: &Runtime<'_>, terminal: &str, session: &str) -> Result
 /// Names the invoking pane and returns the confirmation it printed, or
 /// `None` when the person cancelled.
 fn name_prompt(runtime: &Runtime<'_>, terminal: &str) -> Result<Option<String>, String> {
+    if runtime.mux.endpoint().kind == namedrop::mux::MuxKind::Rex {
+        let workspace = runtime
+            .workspace_id
+            .ok_or("This popup is missing its invoking space")?;
+        let active = match namedrop::StateStore::open_read_only(runtime.state_directory)
+            .map_err(|e| e.to_string())?
+        {
+            Some(mut store) => store
+                .transaction(|tx| {
+                    tx.worktree_state(&namedrop::StateNamespace::for_space(
+                        runtime.session_socket_id,
+                        workspace,
+                    ))
+                })
+                .map_err(|e| e.to_string())?
+                .is_some_and(|state| state.activated && !state.deactivated),
+            None => false,
+        };
+        if !active {
+            say(
+                Tone::Warn,
+                "Namedrop is not active in this session. Press Enter to activate it, or Esc to cancel.",
+            );
+            if menu_key()? != MenuKey::Enter {
+                return Ok(None);
+            }
+            namedrop::activate_from_naming_screen(runtime)?;
+        }
+    }
     let default = namedrop::default_pane_type(runtime)?;
     say(Tone::Strong, "Name this pane\n");
     say(
