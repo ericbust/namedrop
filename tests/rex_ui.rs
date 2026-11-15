@@ -1,4 +1,7 @@
-use std::{fs, os::unix::fs::PermissionsExt, process::Command};
+#[path = "support/binary.rs"]
+mod binary;
+
+use std::{fs, os::unix::fs::PermissionsExt};
 
 #[test]
 fn refused_config_start_and_unknown_action_write_nothing_and_call_no_host() {
@@ -17,7 +20,7 @@ fn refused_config_start_and_unknown_action_write_nothing_and_call_no_host() {
         vec!["rex", "action", "future"],
         vec!["rex", "action", "name"],
     ] {
-        let out = Command::new(env!("CARGO_BIN_EXE_namedrop"))
+        let out = binary::namedrop()
             .env_clear()
             .env("HOME", root.join("home"))
             .env("PATH", "/usr/bin:/bin")
