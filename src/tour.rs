@@ -247,27 +247,27 @@ pub fn all() -> Result<Vec<Presentation>, String> {
 pub fn all_for(kind: crate::mux::MuxKind) -> Result<Vec<Presentation>, String> {
     let mut presentations = all()?;
     if kind == crate::mux::MuxKind::Rex {
+        let palette = |name: &str| {
+            let title = crate::rex_ui::ACTIONS
+                .iter()
+                .find(|action| action.name == name)
+                .expect("the tour names a palette action")
+                .title;
+            format!("Run {title} from Rex's palette")
+        };
+        let keys = [
+            ("Press Prefix, then Shift-S", palette("status")),
+            ("Press Prefix, then Shift-H", palette("doctor")),
+            ("Press Prefix, then Shift-M", palette("manage")),
+            ("Press Prefix, then Shift-O", palette("tour")),
+        ];
         for presentation in &mut presentations {
             for page in &mut presentation.pages {
                 for line in &mut page.body {
-                    *line = line
-                        .replace("this Herdr workspace", "this Rex session")
-                        .replace(
-                            "Press Prefix, then Shift-S",
-                            "Run Agent status from Rex's palette",
-                        )
-                        .replace(
-                            "Press Prefix, then Shift-H",
-                            "Run Namedrop Doctor from Rex's palette",
-                        )
-                        .replace(
-                            "Press Prefix, then Shift-M",
-                            "Run Manage names from Rex's palette",
-                        )
-                        .replace(
-                            "Press Prefix, then Shift-O",
-                            "Run Namedrop tour from Rex's palette",
-                        );
+                    *line = line.replace("this Herdr workspace", "this Rex session");
+                    for (herdr, rex) in &keys {
+                        *line = line.replace(herdr, rex);
+                    }
                 }
             }
         }

@@ -73,7 +73,10 @@ fn shipped_presentations_parse_and_fit_the_popup() {
     let current = tour::current().unwrap();
     assert_eq!(current.id, tour::CURRENT_ID);
 
-    for presentation in &presentations {
+    // A Rex home's tour names palette actions instead of Herdr keys, so its
+    // pages must fit the same screen.
+    let rex = tour::all_for(namedrop::mux::MuxKind::Rex).unwrap();
+    for presentation in presentations.iter().chain(&rex) {
         assert!(!presentation.title.is_empty());
         assert!(!presentation.pages.is_empty());
         for page in &presentation.pages {
