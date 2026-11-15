@@ -426,8 +426,13 @@ brings its profiles down at the end unless `--keep`. `down` stops every
 ```sh
 ./testbed rex up --link /path/to/namedrop --profile rex-step6 --fresh --yes
 python3 -I rex-step6-live.py --profile rex-step6 --out /tmp/step6
+sleep 10
 ./testbed rex down --profile rex-step6
 ```
+
+The driver waits for each reply to be acknowledged, not settled. The `sleep`
+lets the last delivery settle before `down` stops the lane, which otherwise
+leaves it `cancelled` in the store.
 
 [rex-step6-live.py](rex-step6-live.py) runs UI.md's U14 on a lane that
 `rex up --fresh` just installed, before anything names a block. It checks that

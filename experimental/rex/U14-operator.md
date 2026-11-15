@@ -35,7 +35,15 @@ Write each result in the [evidence table](#evidence) as you go. Copy text exactl
 ## 2. Open the Rex app (disposable account)
 
 1. Log in to the disposable account.
-2. Confirm that it has no Rex config. `ls ~/.config/rex` must fail with "No such file or directory". If it lists anything, or prints nothing and succeeds, stop: this account is not clean. A second run in the same account needs the cleanup in [step 5.4](#5-clean-up) first.
+2. Confirm that it has no Rex config. `ls ~/.config/rex` must fail with "No such file or directory". If it lists anything, or prints nothing and succeeds, stop: this account is not clean.
+
+   For a second run in this same account, clear the first run's files here, with the Rex app quit. The command checks the account name first, so it does nothing in any other account. Replace `DISPOSABLE` with this account's short name, which `id -un` prints:
+
+   ```sh
+   [ "$(id -un)" = "DISPOSABLE" ] && rm -rf ~/.local/state/namedrop ~/.config/rex ~/nd-u14
+   ```
+
+   Then delete the `# Namedrop CLI` block (its `case` through `esac`) from each startup file the first run's install listed under `PATH lines:`, with a text editor. Run step 2.2's `ls` again.
 3. Open the Rex app from `/Applications`. Wait until a terminal pane shows a shell prompt. The app has now started the account's default Rex server.
 4. In that pane, run `command -v rex` and `rex version`. Write both in the table.
 
@@ -81,13 +89,7 @@ Each step names a palette action by its title. Open the app's command palette wi
 1. Close Doctor and every other Namedrop screen that is open in Rex, with Esc. `install --remove` waits 60 s for an open Namedrop screen and then fails with `Namedrop on Rex is busy`.
 2. In a Rex pane of the disposable account, run `~/.local/bin/namedrop install --remove --input-json '{"confirmed":true}'`. Write its last line in the table.
 3. Quit the Rex app, and log out of the disposable account.
-4. Removal leaves these files in the disposable account: the state directory `~/.local/state/namedrop`, the `init.lua` backup `~/.config/rex/init.lua.namedrop-*` and `init.lua` itself, the `# Namedrop CLI` lines that the install added to `~/.zshrc` (or to `~/.bashrc` and `~/.profile` under bash), and `~/nd-u14`. Deleting the account removes them. For a second run in the same account, remove them first, in a shell of that account with the Rex app quit:
-
-   ```sh
-   rm -rf ~/.local/state/namedrop ~/.config/rex ~/nd-u14
-   ```
-
-   Then delete the `# Namedrop CLI` block (its `case` through `esac`) from each startup file with a text editor.
+4. Removal leaves these files in the disposable account: the state directory `~/.local/state/namedrop`, the `init.lua` backup `~/.config/rex/init.lua.namedrop-*` and `init.lua` itself, the `# Namedrop CLI` lines in the startup files that install.sh listed under `PATH lines:`, and `~/nd-u14`. Deleting the account removes them. A second run in the same account clears them in [step 2.2](#2-open-the-rex-app-disposable-account). Run nothing for them here: you are no longer in the disposable account.
 5. In your usual account, run `rm -rf /Users/Shared/nd-u14`. Delete the disposable account when you no longer need it.
 
 ## Evidence
