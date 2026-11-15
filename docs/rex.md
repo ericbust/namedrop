@@ -91,7 +91,7 @@ In this section, A is your machine and B is the machine whose agent you mention.
 	Run this command: namedrop send --json --input-json '{"author_kind":"agent_session","request_id":"pong-1","source":"@codex@devbox Reply with exactly the word pong."}'
 	```
 
-	The command's `relayed` field is a list with one entry for each remote recipient. Its `statement`, `relayed[0].statement` here, says `@codex@devbox: queued for the Namedrop on devbox, which delivers it there.`
+	The command's `relayed` field is a list with one entry for each remote recipient. With `--json` the list sits under `data`, so the path is `data.relayed[0].statement`. Its `statement` says `@codex@devbox: queued for the Namedrop on devbox, which delivers it there.`
 
 5. Wait for the reply. A collects B's replies every 30 seconds while a thread with B is open, which is for 24 hours after the last message that B accepted or the last reply that A collected. The reply arrives in Claude Code from `@codex@devbox`, in the thread of your message.
 
