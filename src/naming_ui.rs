@@ -1651,7 +1651,7 @@ mod rex_name_prompt_tests {
                     .transaction(|tx| tx.worktree_state(&StateNamespace::for_space(ENDPOINT, "s1")))
                     .unwrap()
             })
-            .is_some_and(|state| state.activated)
+            .is_some_and(|state| state.activated && !state.deactivated)
     }
 
     /// The child's half: one `name_prompt` on the piped stdin, then what it
@@ -1676,8 +1676,21 @@ mod rex_name_prompt_tests {
             clock: &SystemClock,
             ids: &ids,
         };
-        if case == "active" {
+        if matches!(case.as_str(), "active" | "deactivated" | "marked") {
             namedrop::activate_from_naming_screen(&runtime).unwrap();
+        }
+        if case == "deactivated" {
+            namedrop::execute_lifecycle_operation("deactivate", json!({}), &runtime).unwrap();
+            assert!(!activated(&state));
+        }
+        if case == "marked" {
+            // `deactivate` also clears `activated`, so only a row written by
+            // hand shows that the deactivated mark alone refuses.
+            rusqlite::Connection::open(state.join("namedrop.sqlite3"))
+                .unwrap()
+                .execute("UPDATE worktrees SET deactivated = 1", [])
+                .unwrap();
+            assert!(!activated(&state));
         }
         if case == "incomplete" {
             // Codex's package cannot be written under a file.
@@ -1784,13 +1797,37 @@ mod rex_name_prompt_tests {
     }
 
     #[test]
+    fn a_deactivated_rex_session_offers_activation_again() {
+        for case in ["deactivated", "marked"] {
+            let (shown, report) = run(case, b"\nu5-term\nt\n");
+            let offer = shown.find(OFFER).expect(&shown);
+            assert!(
+                offer < shown.find("Name this pane").expect(&shown),
+                "{case}: {shown}"
+            );
+            assert_eq!(
+                report["result"]["Ok"], "Named @u5-term as terminal.",
+                "{case}: {report}"
+            );
+            assert_eq!(report["activated"], true, "{case}");
+        }
+    }
+
+    #[test]
     fn an_incomplete_activation_shows_its_report_and_naming_continues() {
         let (shown, report) = run("incomplete", b"\nu5-term\nt\n");
         let attention = shown
             .find("Namedrop is active, but part of its setup needs attention:")
             .expect(&shown);
+        let repair = shown
+            .find("Namedrop Doctor lists the repair.")
+            .expect(&shown);
+        // Claude Code's package installed, so only Codex's is listed.
+        let listed: Vec<&str> = shown[attention..repair].lines().skip(1).collect();
         assert!(
-            shown[attention..].contains("\ncodex: ") && shown.contains("is not a directory"),
+            listed.len() == 1
+                && listed[0].starts_with("codex: ")
+                && listed[0].ends_with("is not a directory"),
             "{shown}"
         );
         assert!(
