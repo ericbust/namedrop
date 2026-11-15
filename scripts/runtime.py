@@ -862,7 +862,12 @@ def signals_as_exits():
     so the marker goes back."""
     def stop(number, _frame):
         raise SystemExit(128 + number)
-    previous = {number: signal.signal(number, stop) for number in (signal.SIGTERM, signal.SIGHUP)}
+    # A signal the caller ignores, as `nohup` ignores SIGHUP, stays ignored.
+    previous = {
+        number: signal.signal(number, stop)
+        for number in (signal.SIGTERM, signal.SIGHUP)
+        if signal.getsignal(number) != signal.SIG_IGN
+    }
     try:
         yield
     finally:
