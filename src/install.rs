@@ -633,10 +633,18 @@ pub(crate) fn install_record_mismatch(
 ) -> Option<(PathBuf, PathBuf)> {
     let record = config.install_record(home);
     let recorded = crate::locator::read_install_record(&record)?;
-    let baked = format!(
-        "--state-directory {}",
-        shell_single_quote(recorded.to_str()?)
-    );
+    packages_bake_another_state(home, &recorded).then_some((record, recorded))
+}
+
+/// Whether an installed SessionStart wrapper bakes another state directory
+/// than `state`.
+pub(crate) fn packages_bake_another_state(home: &Path, state: &Path) -> bool {
+    let Some(baked) = state
+        .to_str()
+        .map(|state| format!("--state-directory {}", shell_single_quote(state)))
+    else {
+        return false;
+    };
     [AgentRuntime::Codex, AgentRuntime::ClaudeCode]
         .into_iter()
         .filter_map(|runtime| {
@@ -644,7 +652,6 @@ pub(crate) fn install_record_mismatch(
                 .ok()
         })
         .any(|wrapper| !wrapper.contains(&baked))
-        .then_some((record, recorded))
 }
 
 /// Each installed SessionStart or UserPromptSubmit wrapper that sets no
