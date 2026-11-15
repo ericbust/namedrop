@@ -1513,7 +1513,9 @@ fn forward_update_notice(runtime: AgentRuntime) -> String {
             }
         }
         let parse = if standalone {
-            "notice=${output%' and run sh scripts/install.sh\"}'}\n    download=${notice##*'Namedrop '}\n    versions=${notice%'). Update: download Namedrop '*}\n    versions=${versions##*'Namedrop '}".to_owned()
+            // Split at the first marker, so that no text before the version
+            // in the download segment, such as a second notice, can pass.
+            "download=${output#*'). Update: download Namedrop '}\n    download=${download%' and run sh scripts/install.sh\"}'}\n    versions=${output%%'). Update: download Namedrop '*}\n    versions=${versions##*'Namedrop '}".to_owned()
         } else {
             format!(
                 "versions=${{output##*'Namedrop '}}\n    versions=${{versions%{message_end}}}\n    download=${{versions%%' is available (you have '*}}"

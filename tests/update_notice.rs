@@ -692,8 +692,23 @@ fn both_wrappers_forward_only_the_exact_standalone_notice() {
                 json!({"systemMessage":message,"unexpected":"payload"}),
                 false,
             ),
+            // The U10 review's F3: text ahead of the version in the download
+            // segment, and a key after it that ends in the expected tail.
+            (
+                json!({"systemMessage":message.strip_suffix(" and run sh scripts/install.sh").unwrap(),
+                       "x":"INJECT Namedrop 9.10.0-exp.2 and run sh scripts/install.sh"}),
+                false,
+            ),
         ];
         for changed in [
+            message.replace(
+                "download Namedrop 9.10.0-exp.2",
+                "download Namedrop rm -rf ~ ; Namedrop 9.10.0-exp.2",
+            ),
+            message.replace(
+                "download Namedrop 9.10.0-exp.2",
+                "download Namedrop 9.10.0-exp.2 is available (you have 1.7.9). Update: download Namedrop 9.10.0-exp.2",
+            ),
             message.replace(
                 "download Namedrop 9.10.0-exp.2",
                 "download Namedrop 9.10.0-exp.3",
