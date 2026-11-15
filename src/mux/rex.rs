@@ -69,6 +69,17 @@ pub(crate) fn peer_within(socket: &Path, within: Duration) -> std::io::Result<u3
     local::peer_within(socket, within)
 }
 
+/// The endpoint the local Rex server at `socket` names itself by, its
+/// primary Unix listener, over one connection that proves it local.
+pub(crate) fn local_endpoint(socket: &Path) -> Result<Endpoint, String> {
+    let wire = Socket::new(socket.to_owned(), Budget::ADAPTER_DEFAULT, Arc::default());
+    let fault = |fault| mux_error(fault, Gone::Pane).to_string();
+    let (mut control, peer) = wire.open(Narrower::none()).map_err(fault)?;
+    local::prove_local(socket, &mut *control, peer)
+        .map(|server| server.endpoint)
+        .map_err(fault)
+}
+
 pub(crate) fn ui_report(endpoint: &Endpoint, record: &Value) -> Result<Value, String> {
     let socket = endpoint
         .unix_socket()

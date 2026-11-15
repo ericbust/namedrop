@@ -129,6 +129,12 @@ pub fn render_command_result_to_text_within(
                     text(&shortcuts["repair"])
                 ));
             }
+            if shortcuts["status"] == "stale_module" {
+                lines.push(format!(
+                    "  Shortcuts: Rex still runs an older namedrop.lua. {}",
+                    text(&shortcuts["repair"])
+                ));
+            }
             if let Some(error) = shortcuts["error"].as_str() {
                 lines.push(format!(
                     "  Shortcuts need attention: {}",
