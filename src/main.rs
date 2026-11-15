@@ -168,6 +168,25 @@ fn main() -> ExitCode {
             );
         }
     };
+    if cli.rex_ensure_from_server() {
+        let parent = unsafe { libc::getppid() } as u32;
+        let Some(endpoint) = namedrop::rex_ui::server_start_endpoint(inherited, parent) else {
+            return ExitCode::SUCCESS;
+        };
+        let state = locator::state_directory(
+            cli.runtime.plugin_state.clone(),
+            namedrop::mux::MuxKind::Rex,
+            |name| inherited.var(name),
+        );
+        return rex_action_result(state.ok_or_else(state_required).and_then(|state| {
+            namedrop::rex_bridge::ensure(&state, &endpoint).map(|_| serde_json::Value::Null)
+        }));
+    }
+    if let Some(name) = cli.rex_action()
+        && let Err(error) = namedrop::rex_ui::action(name)
+    {
+        return rex_action_result(Err(error));
+    }
     if let Some((state, host)) = cli.subagent_hook() {
         let _ = namedrop::reminder::ensure_clock(state, None, Starter::Caller);
         return run_subagent_hook(state, host, inherited);
@@ -254,6 +273,9 @@ fn main() -> ExitCode {
     {
         Ok(guard) => guard,
         Err(error) => {
+            if cli.rex_action().is_some() {
+                return rex_action_result(Err(error));
+            }
             eprintln!("{error}");
             return refuse_before_screen(&cli, inherited, 69);
         }
@@ -270,6 +292,11 @@ fn main() -> ExitCode {
             if selected.as_ref().ok() != running.as_ref().ok() || selected.is_err() {
                 use std::os::unix::process::CommandExt;
                 let error = Command::new(launcher).args(env::args_os().skip(1)).exec();
+                if cli.rex_action().is_some() {
+                    return rex_action_result(Err(format!(
+                        "Could not run the selected Namedrop runtime: {error}"
+                    )));
+                }
                 eprintln!("Could not run the selected Namedrop runtime: {error}");
                 // A layer may wait long for its key, and an update, the
                 // repair here, needs the gate meanwhile.
@@ -277,6 +304,9 @@ fn main() -> ExitCode {
                 return refuse_before_screen(&cli, inherited, 69);
             }
         }
+    }
+    if let Some(name) = cli.rex_action() {
+        return rex_action_result(run_rex_action(name, &cli.runtime, inherited));
     }
     if cli.dashboard_tailscale() == Some(false) {
         let result = selected_state
@@ -920,6 +950,53 @@ fn finish(
     }
 }
 
+fn rex_action_result(result: Result<serde_json::Value, String>) -> ExitCode {
+    match result {
+        Ok(_) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("{}", namedrop::rex_ui::error_line(&error));
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn run_rex_action(
+    name: &str,
+    options: &RuntimeOptions,
+    inherited: &dyn Inherited,
+) -> Result<serde_json::Value, String> {
+    use namedrop::rex_ui::Action;
+    if options
+        .endpoint
+        .as_deref()
+        .map(namedrop::mux::Endpoint::parse)
+        .is_none_or(|e| e.kind != namedrop::mux::MuxKind::Rex)
+    {
+        return Err("Namedrop Rex actions need a rex: --endpoint".into());
+    }
+    match namedrop::rex_ui::action(name)? {
+        Action::Popup(mode) => naming_ui::launch(options, inherited, mode),
+        Action::Activate => with_runtime_options(options, inherited, rex_activate),
+        Action::Channels => with_runtime_options(options, inherited, |runtime| {
+            namedrop::dashboard::open(runtime, true, None, None)
+        }),
+        Action::Pause | Action::Resume => run_operation(
+            if name == "pause" {
+                "worktree.pause"
+            } else {
+                "worktree.resume"
+            },
+            serde_json::json!({}),
+            OperationKind::Control,
+            options,
+            inherited,
+        ),
+        Action::Deactivate => {
+            run_lifecycle("deactivate", serde_json::json!({}), options, inherited)
+        }
+    }
+}
+
 /// A Rex layer keeps a quick failure open with no way to close it, so a
 /// screen refused before it starts waits for one key, as its own refusals do.
 fn refuse_before_screen(cli: &Cli, inherited: &dyn Inherited, code: u8) -> ExitCode {
@@ -941,6 +1018,77 @@ fn activation_complete(data: &serde_json::Value) -> bool {
                     .values()
                     .all(|package| package["installed"] == true && package["error"].is_null())
         })
+}
+
+fn rex_activate(runtime: &Runtime<'_>) -> Result<serde_json::Value, String> {
+    let report =
+        execute_lifecycle_operation("activate", serde_json::json!({"confirmed":true}), runtime)?;
+    if report["tour"]["shown"] != true {
+        naming_ui::launch_in_runtime(runtime, namedrop::cli::UiMode::Doctor)?;
+    }
+    if !activation_complete(&report) {
+        return Err("Namedrop is active, but part of its setup needs attention. Namedrop Doctor lists the repair.".into());
+    }
+    Ok(report)
+}
+
+#[cfg(test)]
+mod rex_action_tests {
+    use super::*;
+    use namedrop::mux::{Effect, PopupScreen, fake::FakeMux};
+
+    #[test]
+    fn palette_activation_opens_the_tour_or_doctor_once() {
+        for agent in [false, true] {
+            let root =
+                env::temp_dir().join(format!("nd-u6-activate-{}-{agent}", std::process::id()));
+            fs::create_dir_all(root.join("home")).unwrap();
+            let world = FakeMux::world()
+                .endpoint("rex:/tmp/u6-no-server.sock")
+                .space("s1")
+                .pane("p1")
+                .tab("window:w");
+            let fake = if agent {
+                world.claude().session("agent-1").idle()
+            } else {
+                world
+            }
+            .build();
+            let mux: Arc<dyn Mux> = Arc::new(fake.clone());
+            let ids = ProcessIds::default();
+            let runtime = LifecycleRuntime {
+                state_directory: &root.join("state"),
+                home_directory: Some(&root.join("home")),
+                agent_config: namedrop::AgentConfigDirectories::default(),
+                cwd: &root,
+                workspace_id: Some("s1"),
+                current_pane_id: Some("p1"),
+                session_socket_id: "rex:/tmp/u6-no-server.sock",
+                mux: &mux,
+                clock: &SystemClock,
+                ids: &ids,
+            };
+            rex_activate(&runtime).unwrap();
+            let effects = fake.attempted_effects();
+            let popups: Vec<_> = effects
+                .iter()
+                .filter_map(|e| match e {
+                    Effect::OpenPopup(p) => Some(p.screen),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                popups,
+                [if agent {
+                    PopupScreen::Tour
+                } else {
+                    PopupScreen::Doctor
+                }]
+            );
+            assert!(!root.join("home/.config/herdr/config.toml").exists());
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
 }
 
 fn run_lifecycle(

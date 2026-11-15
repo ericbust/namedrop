@@ -79,6 +79,77 @@ where
     I: IdGenerator,
 {
     let mut report = diagnose_space(runtime);
+    if runtime.mux.endpoint().kind == crate::mux::MuxKind::Rex
+        && let Some(inspected) =
+            crate::rex_ui::inspect(runtime.home_directory, runtime.mux.endpoint())
+    {
+        let (confirmed, diagnostic, explanation) = match inspected {
+            Ok(diagnostic) => {
+                let confirmed = diagnostic["confirmed"] == true;
+                let keys = diagnostic["keys"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|k| {
+                        format!(
+                            "{}: {}{}",
+                            k["key"].as_str().unwrap_or(""),
+                            k["status"].as_str().unwrap_or(""),
+                            k["source"]
+                                .as_str()
+                                .map(|s| format!(" ({s})"))
+                                .unwrap_or_default()
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let mut explanation = format!(
+                    "Registered module: {}\nLoaded module: {}\nLoaded launcher: {}\nLoaded state: {}\nServer config: {}\nServer environment: {}\n{}",
+                    diagnostic["module"].as_str().unwrap_or(""),
+                    diagnostic["about"]["module"].as_str().unwrap_or(""),
+                    diagnostic["about"]["launcher"].as_str().unwrap_or(""),
+                    diagnostic["about"]["state"].as_str().unwrap_or(""),
+                    diagnostic["config"]["path"].as_str().unwrap_or(""),
+                    diagnostic["env"],
+                    keys
+                );
+                if let Some(error) = diagnostic["error"].as_str() {
+                    explanation.push_str(&format!("\nReadback error: {error}"));
+                }
+                (confirmed, diagnostic, explanation)
+            }
+            Err(error) => (
+                false,
+                serde_json::json!({"confirmed":false,"error":error}),
+                error,
+            ),
+        };
+        let mut check = issue(
+            "ND-REX-001",
+            if confirmed {
+                HealthSeverity::Info
+            } else {
+                HealthSeverity::Notice
+            },
+            if confirmed {
+                "The Rex module is confirmed."
+            } else {
+                "The Rex module is not confirmed."
+            },
+            &explanation,
+            HealthRepairKind::ProductAction,
+            if confirmed {
+                "Keys bound later in init.lua override the Namedrop keys."
+            } else {
+                "Run sh scripts/install.sh, then check Namedrop Doctor again."
+            },
+        );
+        check.diagnostic = diagnostic;
+        report.issues.push(check);
+        if !confirmed && report.status == HealthStatus::Healthy {
+            report.status = HealthStatus::NeedsAttention;
+        }
+    }
     if let Some(diagnostic) = crate::dashboard::tailscale::diagnose(runtime.state_directory) {
         let explanation = match (&diagnostic.url, &diagnostic.problem) {
             (Some(url), Some(problem)) => format!("{url}: {problem}"),

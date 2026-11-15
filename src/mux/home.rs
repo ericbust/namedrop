@@ -369,6 +369,11 @@ fn rex_claim(inherited: &dyn Inherited) -> Option<Claim> {
     })
 }
 
+/// The load-time guard uses only the socket claim, before resolving a home.
+pub(crate) fn rex_socket(inherited: &dyn Inherited) -> Option<PathBuf> {
+    rex_claim(inherited).map(|claim| claim.socket)
+}
+
 /// Herdr's claimed socket: `HERDR_SOCKET_PATH`, else Herdr's default.
 fn herdr_claim(inherited: &dyn Inherited) -> Option<Claim> {
     if let Some(socket) = set(inherited, Locator::Endpoint.herdr_var()) {

@@ -12,6 +12,7 @@ pub(crate) mod events;
 mod live;
 mod local;
 mod popup;
+mod ui;
 pub(crate) mod wire;
 mod ws;
 
@@ -66,6 +67,14 @@ pub(super) fn connect(
 /// for the home's probe.
 pub(crate) fn peer_within(socket: &Path, within: Duration) -> std::io::Result<u32> {
     local::peer_within(socket, within)
+}
+
+pub(crate) fn ui_report(endpoint: &Endpoint, record: &Value) -> Result<Value, String> {
+    let socket = endpoint
+        .unix_socket()
+        .ok_or("Namedrop needs a Rex Unix socket")?;
+    let wire = Socket::new(socket.to_owned(), Budget::ADAPTER_DEFAULT, Arc::default());
+    ui::report(&wire, socket, record).map_err(|error| error.to_string())
 }
 
 /// What the Rex server at `socket` says about `block` of `session`, over one

@@ -36,6 +36,7 @@ WRITERS={
     'src/install/claude_permissions.rs::recover':['activate','deactivate','event','hook'],
     'src/install/claude_permissions.rs::discard_pending':['activate','deactivate','event','hook'],
     'src/locator.rs::write_install_record':['activate','name','event','hook'],
+    'src/rex_ui.rs::refresh':['activate','name','event','hook'],
 }
 def balanced(text,start):
     """The end of the bracketed group that opens at text[start]."""
@@ -67,7 +68,7 @@ for name,text in sources.items():
 assert found==set(WRITERS),{'unmapped':sorted(found-set(WRITERS)),'stale':sorted(set(WRITERS)-found)}
 
 def snapshot(home):
-    targets=['.agents/skills/namedrop','.claude/skills/namedrop','.claude/settings.json','.codex/rules','.codex/config.toml','.local/bin/namedrop','.config/namedrop/state-directory','.profile','.bashrc']
+    targets=['.agents/skills/namedrop','.claude/skills/namedrop','.claude/settings.json','.codex/rules','.codex/config.toml','.local/bin/namedrop','.config/namedrop/state-directory','.config/namedrop/rex.json','.config/rex/namedrop.lua','.profile','.bashrc']
     result={}
     for name in targets:
         path=home/name
@@ -96,6 +97,12 @@ with tempfile.TemporaryDirectory(prefix='nd-lease-matrix-') as folder:
         launcher.write_text('#!/usr/bin/python3 -IB\nimport json,os,sys\nwith open('+repr(str(root/'pids'))+',"a") as f:f.write(json.dumps({"pid":os.getpid(),"args":sys.argv})+"\\n")\nos.execv('+repr(str(runtime/'current/namedrop'))+',sys.argv)\n')
         launcher.chmod(0o755)
         return state
+    def rex_fixture(home):
+        module=home/'.config/rex/namedrop.lua';module.parent.mkdir(parents=True,exist_ok=True)
+        module.write_text('-- Managed by Namedrop. `namedrop install` rewrites this file, so edits here are lost.\n-- stale module\n')
+        record=home/'.config/namedrop/rex.json';record.parent.mkdir(parents=True,exist_ok=True)
+        record.write_text(json.dumps({'module':str(module),'state':'/old','launcher':'/old/runtime/namedrop','line':'removed','predecessors':[{'state':'/retained'}]}))
+        return module,record
     old=installed('herdr','herdr')
     state=installed('standalone','standalone')
     inactive=installed('inactive','standalone')
@@ -121,6 +128,7 @@ with tempfile.TemporaryDirectory(prefix='nd-lease-matrix-') as folder:
     extra={'HERDR_PLUGIN_EVENT':'pane.agent_status_changed','HERDR_PLUGIN_EVENT_JSON':json.dumps({'event':'pane_agent_status_changed','data':{'type':'pane_agent_status_changed','pane_id':'p1','workspace_id':'w1','agent_status':'idle'}})}
     try:
         home=root/'home';p=run(home,old,activate);assert p.returncode==0,(p.stdout,p.stderr)
+        rex_fixture(home)
         for name,args in cases.items():
             before=snapshot(home);p=run(home,inactive if name=='name' else state,args,extra)
             assert 'ND-INSTALL-002' in p.stdout+p.stderr,(name,p.returncode,p.stdout,p.stderr)
@@ -137,6 +145,7 @@ with tempfile.TemporaryDirectory(prefix='nd-lease-matrix-') as folder:
                 p=run(own,state,activate);assert p.returncode==0,(name,p.stdout,p.stderr)
             if name in ['event','hook']:
                 skill=own/'.agents/skills/namedrop/SKILL.md';expected_skill=skill.read_text();skill.write_text('stale package\n')
+            module,rex_record=rex_fixture(own)
             before=snapshot(own);time.sleep(.6)
             p=run(own,inactive if name=='name' else state,args,extra)
             assert 'ND-INSTALL-002' not in p.stdout+p.stderr,(name,p.stdout,p.stderr)
@@ -145,6 +154,14 @@ with tempfile.TemporaryDirectory(prefix='nd-lease-matrix-') as folder:
                 # The worker stages files beside SKILL.md before it renames one over it.
                 until=time.monotonic()+10
                 while skill.read_text()!=expected_skill and time.monotonic()<until:time.sleep(.05)
+            if name!='deactivate':
+                until=time.monotonic()+10
+                while json.loads(rex_record.read_text())['state']!=str(selected) and time.monotonic()<until:time.sleep(.05)
+                registered=json.loads(rex_record.read_text())
+                assert registered['state']==str(selected),(name,registered)
+                assert registered['launcher']==str(selected/'runtime/namedrop'),(name,registered)
+                assert registered['line']=='removed' and registered['predecessors']==[{'state':'/retained'}],(name,registered)
+                assert 'namedrop_about' in module.read_text() and '-- stale module' not in module.read_text(),name
             after=snapshot(own)
             assert after!=before,('admitted writer changed no shared file',name,p.stdout,p.stderr)
             if name in ['activate','name']:
