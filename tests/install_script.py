@@ -282,6 +282,26 @@ class Installer(unittest.TestCase):
         self.assertEqual(self.snapshot(self.root), before)
         self.assertTrue((state / 'runtime/current').is_dir())
 
+    def registry(self, plugins, config=None):
+        """Herdr's plugin registry, in `config` or ~/.config, holding
+        `plugins`: a list of plugin IDs, or bytes written as they are."""
+        path = (config or self.home / '.config') / 'herdr/plugins.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(plugins if isinstance(plugins, bytes) else json.dumps(
+            [dict(plugin_id=plugin, name=plugin, enabled=True) for plugin in plugins]).encode())
+        return path
+
+    def refused(self, *expected):
+        before = self.snapshot(self.root)
+        result = self.run_install('--yes')
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        for text in expected:
+            self.assertIn(text, result.stderr)
+        self.assertNotIn('Errno', result.stderr)
+        self.assertNotIn('Namedrop Rex install:', result.stdout)
+        self.unchanged(before)
+        return result.stderr
+
     def test_herdr_without_a_record_is_refused(self):
         # Herdr's Namedrop before step 6 writes no record, only its state.
         for xdg in (None, self.root / 'xdg state'):
@@ -290,17 +310,86 @@ class Installer(unittest.TestCase):
                     self.env['XDG_STATE_HOME'] = str(xdg)
                 herdr = (xdg or self.home / '.local/state') / 'herdr/plugins/namedrop'
                 (herdr / 'runtime/current').mkdir(parents=True)
-                before = self.snapshot(self.root)
-                result = self.run_install('--yes')
-                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
-                self.assertIn('Update Namedrop in Herdr first, then run sh scripts/install.sh again.', result.stderr)
-                self.assertIn(str(herdr), result.stderr)
-                self.assertNotIn('Namedrop Rex install:', result.stdout)
-                self.unchanged(before)
+                self.registry(['other', 'namedrop'])
+                self.refused(f'Namedrop is already installed in Herdr ({herdr}). '
+                             'Update Namedrop in Herdr first, then run sh scripts/install.sh again.')
                 shutil.rmtree(herdr)
         # The home default is not Herdr's when XDG_STATE_HOME moves it.
         (self.home / '.local/state/herdr/plugins/namedrop/runtime/current').mkdir(parents=True)
         self.assertIn('install: new', self.ok(self.run_install(answer='n\n')))
+
+    def test_herdr_state_counts_only_while_herdr_lists_namedrop(self):
+        # `herdr plugin uninstall` keeps the plugin's state (the U9 review's N1).
+        herdr = self.home / '.local/state/herdr/plugins/namedrop'
+        (herdr / 'runtime/current').mkdir(parents=True)
+        update = 'Update Namedrop in Herdr first, then run sh scripts/install.sh again.'
+        for label, plugins in [('no registry', None), ('no plugins', []), ('another plugin', ['other'])]:
+            with self.subTest(label):
+                if plugins is not None:
+                    self.registry(plugins)
+                self.assertIn('install: new', self.ok(self.run_install(answer='n\n')))
+        # Herdr's own rule for its config directory: an absolute
+        # XDG_CONFIG_HOME, else ~/.config.
+        config = self.root / 'xdg config'
+        self.registry(['namedrop'], config)
+        self.env['XDG_CONFIG_HOME'] = str(config)
+        self.refused(update)
+        self.env['XDG_CONFIG_HOME'] = 'relative config'
+        self.assertIn('install: new', self.ok(self.run_install(answer='n\n')))
+        del self.env['XDG_CONFIG_HOME']
+        # A registry it cannot read names the way out.
+        for label, contents in [('not JSON', b'['), ('an object', b'{"plugin_id": "namedrop"}')]:
+            with self.subTest(label):
+                registry = self.registry(contents)
+                self.refused(f"Namedrop cannot read Herdr's plugin list in {registry}, so it cannot tell whether "
+                             f'Namedrop is still installed in Herdr ({herdr}). If it is not, move that directory '
+                             'away, then run sh scripts/install.sh again.')
+        registry.unlink()
+        registry.mkdir()
+        self.refused(f"Namedrop cannot read Herdr's plugin list in {registry},")
+        shutil.rmtree(herdr)
+        self.assertIn('install: new', self.ok(self.run_install(answer='n\n')))
+
+    def test_a_current_herdr_whose_record_was_lost_is_told_to_activate(self):
+        herdr = self.home / '.local/state/herdr/plugins/namedrop'
+        (herdr / 'runtime').mkdir(parents=True)
+        (herdr / 'runtime/owner').write_text('herdr\n')
+        shutil.copy2(self.binary, herdr / 'runtime/namedrop')
+        self.registry(['namedrop'])
+        self.refused(f'Namedrop is already installed in Herdr ({herdr}). '
+                     'Run Activate Namedrop in Herdr first, then run sh scripts/install.sh again.')
+        self.assertEqual([call[1:] for call in self.calls()], [['--runtime-info']])
+        # A launcher without rex_ui, or none, is a release to update.
+        (herdr / 'runtime/namedrop').write_text('#!/bin/sh\necho \'{"runtime_protocol":1}\'\n')
+        self.refused('Update Namedrop in Herdr first, then run sh scripts/install.sh again.')
+        (herdr / 'runtime/namedrop').unlink()
+        self.refused('Update Namedrop in Herdr first, then run sh scripts/install.sh again.')
+
+    def test_an_owner_that_cannot_be_read_is_named(self):
+        herdr = self.home / '.local/state/herdr/plugins/namedrop'
+        (herdr / 'runtime/owner').mkdir(parents=True)
+        self.registry(['namedrop'])
+        message = (f"Namedrop cannot read the owner of Herdr's Namedrop state in {herdr / 'runtime/owner'}: "
+                   'it is not a readable file. Inspect that file, then run sh scripts/install.sh again.')
+        self.refused(message)
+        (herdr / 'runtime/owner').rmdir()
+        (herdr / 'runtime/owner').write_bytes(b'\xffherdr\n')
+        self.refused(message)
+        if os.geteuid():
+            (herdr / 'runtime/owner').write_text('herdr\n')
+            before = self.snapshot(self.root)
+            (herdr / 'runtime/owner').chmod(0)
+            result = self.run_install('--yes')
+            (herdr / 'runtime/owner').chmod(0o644)
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            self.assertIn(message, result.stderr)
+            self.unchanged(before)
+        shutil.rmtree(herdr)
+        state = self.root / 'selected state'
+        (state / 'runtime/owner').mkdir(parents=True)
+        self.env['NAMEDROP_STATE_DIR'] = str(state)
+        self.refused(f"Namedrop cannot read the owner of this Namedrop state in {state / 'runtime/owner'}: "
+                     'it is not a readable file.')
 
     def test_herdr_adoption_publishes_nothing(self):
         state = self.record('herdr')

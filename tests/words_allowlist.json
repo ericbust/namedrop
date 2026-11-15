@@ -64,9 +64,9 @@
       ],
       "sources": [
         {"file": "src/installed_runtime/packages.rs", "line": 123, "source": "ND-INSTALL-002: Namedrop's shared agent packages belong to Herdr's install in {}. Run Activate Namedrop in Herdr to update them."},
-        {"file": "scripts/install.sh", "line": 115, "source": "ND-INSTALL-002: Namedrop's shared agent packages belong to Herdr's install in "},
+        {"file": "scripts/install.sh", "line": 149, "source": "ND-INSTALL-002: Namedrop's shared agent packages belong to Herdr's install in "},
         {"file": "scripts/runtime_install.py", "line": 23, "source": "ND-INSTALL-002: Namedrop's shared agent packages belong to Herdr's install in "},
-        {"file": "scripts/install.sh", "line": 116, "source": "{state}. Run Activate Namedrop in Herdr to update them."},
+        {"file": "scripts/install.sh", "line": 150, "source": "{state}. Run Activate Namedrop in Herdr to update them."},
         {"file": "scripts/runtime_install.py", "line": 24, "source": "{self.state}. Run Activate Namedrop in Herdr to update them."}
       ],
       "reason": "ND-INSTALL-002's Herdr form: a Rex install's writer refuses packages that Herdr's install owns. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
@@ -130,7 +130,7 @@
       ],
       "sources": [
         {"file": "scripts/runtime.py", "line": 856, "source": "Namedrop is moving to Herdr. Run Activate Namedrop in Herdr again."},
-        {"file": "scripts/install.sh", "line": 111, "source": "Namedrop is moving to Herdr. Run Activate Namedrop in Herdr again."}
+        {"file": "scripts/install.sh", "line": 145, "source": "Namedrop is moving to Herdr. Run Activate Namedrop in Herdr again."}
       ],
       "reason": "A Rex state that Herdr is taking over refuses the install. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
     },
@@ -152,10 +152,45 @@
         "install.sh"
       ],
       "sources": [
-        {"file": "scripts/install.sh", "line": 124, "source": "Namedrop is already installed in Herdr ({herdr}). "},
-        {"file": "scripts/install.sh", "line": 125, "source": "Update Namedrop in Herdr first, then run sh scripts/install.sh again."}
+        {"file": "scripts/install.sh", "line": 167, "source": "Namedrop is already installed in Herdr ({herdr}). "},
+        {"file": "scripts/install.sh", "line": 168, "source": "Update Namedrop in Herdr first, then run sh scripts/install.sh again."}
       ],
       "reason": "A Herdr release from before step 6 owns this HOME's Namedrop. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
+    },
+    {
+      "kind": "shared-home",
+      "text": "Namedrop is already installed in Herdr (<path>). Run Activate Namedrop in Herdr first, then run sh scripts/install.sh again.",
+      "surfaces": [
+        "install.sh"
+      ],
+      "sources": [
+        {"file": "scripts/install.sh", "line": 165, "source": "Namedrop is already installed in Herdr ({herdr}). "},
+        {"file": "scripts/install.sh", "line": 166, "source": "Run Activate Namedrop in Herdr first, then run sh scripts/install.sh again."}
+      ],
+      "reason": "A current Herdr release owns this HOME's Namedrop and lost its install record, which its activation writes again. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
+    },
+    {
+      "kind": "shared-home",
+      "text": "Namedrop cannot read Herdr's plugin list in <path>, so it cannot tell whether Namedrop is still installed in Herdr (<path>). If it is not, move that directory away, then run sh scripts/install.sh again.",
+      "surfaces": [
+        "install.sh"
+      ],
+      "sources": [
+        {"file": "scripts/install.sh", "line": 81, "source": "Namedrop cannot read Herdr's plugin list in {registry}, so it cannot tell whether "},
+        {"file": "scripts/install.sh", "line": 82, "source": "Namedrop is still installed in Herdr ({herdr}). If it is not, move that directory "}
+      ],
+      "reason": "Herdr's state for Namedrop outlives `herdr plugin uninstall`, so install.sh refuses beside it only while Herdr's plugin list names Namedrop, and names the way out when it cannot read that list. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
+    },
+    {
+      "kind": "shared-home",
+      "text": "Namedrop cannot read the owner of Herdr's Namedrop state in <path>: it is not a readable file. Inspect that file, then run sh scripts/install.sh again.",
+      "surfaces": [
+        "install.sh"
+      ],
+      "sources": [
+        {"file": "scripts/install.sh", "line": 161, "source": "Herdr's Namedrop state"}
+      ],
+      "reason": "Herdr's Namedrop state still listed by Herdr, with an owner file install.sh cannot read. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
     },
     {
       "kind": "shared-home",
@@ -164,7 +199,7 @@
         "install.sh"
       ],
       "sources": [
-        {"file": "scripts/install.sh", "line": 135, "source": "Update Namedrop in Herdr first, then run sh scripts/install.sh again."}
+        {"file": "scripts/install.sh", "line": 172, "source": "Update Namedrop in Herdr first, then run sh scripts/install.sh again."}
       ],
       "reason": "Herdr's runtime cannot install the Rex module yet. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
     },
@@ -175,7 +210,7 @@
         "install.sh"
       ],
       "sources": [
-        {"file": "scripts/install.sh", "line": 154, "source": "Herdr keeps its runtime and updates it. This archive publishes no runtime."}
+        {"file": "scripts/install.sh", "line": 191, "source": "Herdr keeps its runtime and updates it. This archive publishes no runtime."}
       ],
       "reason": "install.sh adopts Herdr's runtime. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
     },
@@ -186,7 +221,7 @@
         "install.sh"
       ],
       "sources": [
-        {"file": "scripts/install.sh", "line": 166, "source": "Installing the Rex module and agent packages with Herdr's runtime…"}
+        {"file": "scripts/install.sh", "line": 203, "source": "Installing the Rex module and agent packages with Herdr's runtime…"}
       ],
       "reason": "install.sh adopts Herdr's runtime. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
     },
@@ -292,7 +327,16 @@
       "file": "scripts/install.sh",
       "reason": "A file or directory name of the agent packages, read and written, never printed as text.",
       "literals": [
-        [122, "herdr/plugins/namedrop"]
+        [159, "herdr/plugins/namedrop"]
+      ]
+    },
+    {
+      "kind": "unshown",
+      "file": "scripts/install.sh",
+      "reason": "Herdr's plugin list, its file and the key that names a plugin, read to tell whether Herdr still lists Namedrop. The file shows only inside its path.",
+      "literals": [
+        [73, "herdr/plugins.json"],
+        [84, "plugin_id"]
       ]
     },
     {
@@ -300,12 +344,12 @@
       "file": "scripts/install.sh",
       "reason": "A value of runtime/owner or retired.json's reason, read and written, never printed.",
       "literals": [
-        [59, "herdr"],
         [60, "herdr"],
-        [111, "herdr_handoff"],
-        [114, "herdr"],
-        [123, "herdr"],
-        [127, "herdr"]
+        [64, "herdr"],
+        [145, "herdr_handoff"],
+        [148, "herdr"],
+        [161, "herdr"],
+        [170, "herdr"]
       ]
     },
     {
