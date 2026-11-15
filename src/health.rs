@@ -440,9 +440,9 @@ where
             )));
         }
     }
-    match crate::update_check::settings() {
+    match crate::update_check::settings(runtime.state_directory) {
         Err(error) => {
-            let path = crate::update_check::settings_path().ok();
+            let path = crate::update_check::settings_path(runtime.state_directory).ok();
             let mut setting = issue(
                 "ND-UPDATE-002",
                 HealthSeverity::Info,
@@ -456,6 +456,14 @@ where
         }
         Ok(_) => {
             if let Some(update) = crate::update_check::available(runtime.state_directory) {
+                let instruction = update.instruction();
+                let detail = if update.standalone {
+                    format!("Update: {instruction}")
+                } else {
+                    format!(
+                        "Updating keeps your names, groups, handoffs and running agents. Run `{instruction}` from a plain shell tab."
+                    )
+                };
                 let mut update_issue = issue(
                     "ND-UPDATE-001",
                     HealthSeverity::Info,
@@ -464,19 +472,20 @@ where
                         update.version,
                         env!("CARGO_PKG_VERSION")
                     ),
-                    &format!(
-                        "Updating keeps your names, groups, handoffs and running agents. Run `{}` from a plain shell tab.",
-                        crate::update_check::UPDATE_COMMAND
-                    ),
+                    &detail,
                     HealthRepairKind::HumanDecision,
-                    "Run Update Namedrop when you are ready.",
+                    if update.standalone {
+                        &detail
+                    } else {
+                        "Run Update Namedrop when you are ready."
+                    },
                 );
-                update_issue.repair.command = Some(
+                update_issue.repair.command = (!update.standalone).then(|| {
                     crate::update_check::UPDATE_COMMAND
                         .split(' ')
                         .map(str::to_owned)
-                        .collect(),
-                );
+                        .collect()
+                });
                 update_issue.diagnostic = serde_json::json!({
                     "installed_version": env!("CARGO_PKG_VERSION"), "available_version": update.version,
                     "checked_at":update.checked_at, "last_success_at":update.last_success_at,

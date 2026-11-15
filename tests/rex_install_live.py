@@ -4,7 +4,7 @@ and the palette's error lines.
 Usage: python3 -I tests/rex_install_live.py BINARY REX_BINARY OUT [SECTION...]
 
 Sections, all by default: shapes lines handoff drain palette helpers tour
-doctor step6 races fallback. The optional runtime section needs
+doctor step6 races fallback. The optional runtime and updates sections need
 NAMEDROP_TEST_STANDALONE_BASELINE and NAMEDROP_TEST_ARCHIVE from
 build_standalone_upgrade.py. Each fixture is a folder of OUT with its own HOME, its
 own Rex server on a socket under /tmp, and `--autostart=false -S unix://...`
@@ -34,8 +34,8 @@ import threading
 import time
 
 binary, rex, out = (Path(p).resolve() for p in sys.argv[1:4])
-SECTIONS = ['shapes', 'lines', 'handoff', 'drain', 'palette', 'helpers', 'tour', 'doctor', 'step6', 'races', 'fallback', 'runtime']
-chosen = sys.argv[4:] or [section for section in SECTIONS if section != 'runtime']
+SECTIONS = ['shapes', 'lines', 'handoff', 'drain', 'palette', 'helpers', 'tour', 'doctor', 'step6', 'races', 'fallback', 'runtime', 'updates']
+chosen = sys.argv[4:] or [section for section in SECTIONS if section not in ('runtime', 'updates')]
 assert set(chosen) <= set(SECTIONS), chosen
 repo = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('runtime_cleanup', repo / 'scripts/runtime.py')
@@ -156,6 +156,12 @@ class Fixture:
         self.home.mkdir()
         self.server_home = self.root / 'server-home' if different_home else self.home
         self.server_home.mkdir(exist_ok=True)
+        # The state is standalone, so its bridge would start the update
+        # check, which lists GitHub's tags with the `git` on the server's
+        # PATH. Only the updates lane turns it on, with a stub `git`.
+        for home in {self.home, self.server_home}:
+            (home / '.config/namedrop').mkdir(parents=True)
+            (home / '.config/namedrop/settings.json').write_text('{"check_for_updates": false}\n')
         self.config = self.root / 'custom/config.lua' if custom else self.server_home / '.config/rex/init.lua'
         self.config.parent.mkdir(parents=True)
         if contents is not None:
@@ -989,6 +995,8 @@ def section_fallback():
         f, h = handoff_fixture('fallback-herdr-' + condition, install=False, custom=True, start=False)
         try:
             config = f.home / '.config'
+            # No Rex server runs here, so no bridge needs the update opt-out.
+            shutil.rmtree(config)
             if condition == 'read-only-config':
                 config.mkdir()
                 config.chmod(0o555)
@@ -1209,6 +1217,181 @@ def section_runtime():
         say('U8 real Rex runtime preflight, tour, upgrade, cached-hook reinstall and removal race passed')
     finally:
         f.close()
+
+
+def section_updates():
+    import sqlite3
+    for mode in ('same', 'migrated', 'interrupted'):
+        migrated_failure = mode == 'migrated'
+        f = Fixture('updates-' + mode, b'-- U10 config\n', start=False)
+        try:
+            shutil.rmtree(f.state)
+            f.state.mkdir()
+            tools = f.root / 'tools'
+            tools.mkdir()
+            (tools / 'rex').symlink_to(rex)
+            # The bridge keeps the PATH of what started it, the server or a
+            # command in a block, so both put the stub `git` first.
+            f.env['PATH'] = f.server_env['PATH'] = str(tools) + ':/usr/bin:/bin'
+            git = tools / 'git'
+            git_calls = f.root / 'git-calls.jsonl'
+            git.write_text('#!/bin/sh\necho "git ran with no listing" >&2\nexit 1\n')
+            git.chmod(0o700)
+            f.start_server()
+            roots = []
+            for key, label in [('NAMEDROP_TEST_STANDALONE_BASELINE', 'baseline'), ('NAMEDROP_TEST_ARCHIVE', 'incoming')]:
+                folder = f.root / label
+                with tarfile.open(os.environ[key]) as archive:
+                    archive.extractall(folder, filter='data')
+                roots.append(next(folder.iterdir()))
+            old, new = roots
+            schemas = [json.loads((root / 'runtime.json').read_text())['state_schema'] for root in roots]
+            assert schemas[0] != schemas[1], schemas
+
+            def publish(source, code=0):
+                result = subprocess.run(['/bin/sh', str(source / 'scripts/install.sh'), '--yes'],
+                                        env=f.env, input='', capture_output=True, text=True, timeout=90)
+                with (f.root / 'updates.jsonl').open('a') as log:
+                    log.write(json.dumps(dict(source=str(source), code=result.returncode,
+                                              stdout=result.stdout, stderr=result.stderr)) + '\n')
+                assert result.returncode == code, (result.returncode, result.stdout, result.stderr)
+                return result
+
+            def store():
+                with contextlib.closing(sqlite3.connect(f.state / 'namedrop.sqlite3')) as db:
+                    return (db.execute('PRAGMA user_version').fetchone()[0],
+                            db.execute('SELECT * FROM alias_claims ORDER BY 1,2,3').fetchall())
+
+            def doctor_runs_selected(session, block):
+                existing = {row[0] for row in processes_under(f.root)}
+                before = set(f.blocks(session))
+                f.rx('do', '-s', session, '-b', block, 'namedrop_doctor')
+                layer = next(iter(wait(lambda: set(f.blocks(session)) - before, bool, 'Doctor opens')))
+                executable = str((f.state / 'runtime/current/namedrop').resolve())
+                wait(lambda: processes_under(f.root),
+                     lambda rows: any(row[0] not in existing and os.path.realpath(row[1]) == executable
+                                      and all(word in row[2] for word in ('ui', 'run', 'doctor'))
+                                      for row in rows), 'Doctor runs the selected runtime')
+                f.rx('send-key', '-s', session, '-b', layer, 'escape')
+                wait(lambda: f.blocks(session), lambda rows: layer not in rows, 'Doctor closes')
+
+            publish(old)
+            if mode == 'same':
+                # Nothing on Rex runs `reconcile`, so the bridge starts the
+                # check when it connects. Turn checks on and restart the
+                # server: the bridge reconnects and checks, with no command
+                # typed. The listing is the floor and the channel live: the
+                # baseline is a pre-release below the floor, so only 2.0.0 is
+                # offered.
+                installed = re.search(r'^version\s*=\s*"([^"]+)"', (old / 'herdr-plugin.toml').read_text(), re.M)[1]
+                incoming = re.search(r'^version\s*=\s*"([^"]+)"', (new / 'herdr-plugin.toml').read_text(), re.M)[1]
+                assert '-exp.' in installed and incoming.startswith(installed.partition('-exp.')[0] + '-exp.'), (installed, incoming)
+                listing = ''.join(f'{index:040x}\trefs/tags/v{release}\\n' for index, release in
+                                  enumerate([installed, incoming, '1.11.1', '2.1.0-exp.1', '2.0.0']))
+                git.write_text('#!/bin/sh\nbridge=$(ps -o ppid= -p "$PPID" | tr -d " ")\n'
+                               'printf \'{"args": "%s", "bridge": "%s"}\\n\' "$*" "$(ps -o command= -p "$bridge")" >> '
+                               + "'" + str(git_calls) + "'\nprintf '" + listing + "'\n")
+                (f.home / '.config/namedrop/settings.json').write_text('{"check_for_updates": true}\n')
+                assert not (f.state / 'update-check.json').exists(), 'a check ran while checks were off'
+                f.stop_server()
+                f.start_server()
+                cache = wait(lambda: json.loads((f.state / 'update-check.json').read_text())
+                             if (f.state / 'update-check.json').exists() else None,
+                             lambda cache: cache and cache['remote_version'], 'the bridge checks for updates', 20)
+                assert cache['remote_version'] == '2.0.0' and cache['last_error'] is None, cache
+                calls = [json.loads(line) for line in git_calls.read_text().splitlines()]
+                assert len(calls) == 1 and 'ls-remote --tags https://github.com/ericbust/namedrop.git v*' in calls[0]['args'], calls
+                assert ' rex bridge --endpoint ' + f.endpoint in calls[0]['bridge'], calls
+            session, block = f.session('u10-survivor')
+            f.in_block(session, block, 'name', 'survivor', '--type', 'terminal')
+            before = store()
+            assert 'survivor' in str(before[1]), before
+            if mode == 'interrupted':
+                publisher = new / 'scripts/runtime.py'
+                original = publisher.read_text()
+                anchor = 'def migrate_selected(runtime, target, gate):\n'
+                assert anchor in original
+                publisher.write_text(original.replace(anchor, anchor +
+                    "    if os.environ.get('NAMEDROP_U10_PAUSE'):\n"
+                    "        Path(os.environ['NAMEDROP_U10_PAUSE']).write_text(str(os.getpid()))\n"
+                    "        while True: time.sleep(1)\n", 1))
+                marker = f.root / 'migration-paused'
+                with (f.root / 'interrupted.log').open('w') as log:
+                    pending = subprocess.Popen([sys.executable, str(publisher), str(new), '--state-dir',
+                                                str(f.state), '--verify', 'install'],
+                                               env=dict(f.env, NAMEDROP_U10_PAUSE=str(marker)),
+                                               stdout=log, stderr=subprocess.STDOUT)
+                    with (f.root / 'pids.jsonl').open('a') as ledger:
+                        ledger.write(json.dumps(dict(pid=pending.pid, purpose='interrupted migration')) + '\n')
+                    try:
+                        wait(lambda: marker.exists() or pending.poll() is not None, bool, 'migration pauses')
+                        assert marker.exists() and pending.poll() is None
+                    finally:
+                        if pending.poll() is None:
+                            pending.kill()
+                        pending.wait(timeout=10)
+                publisher.write_text(original)
+                assert (f.state / 'runtime/migration.json').is_file()
+                refused = f.in_block(session, block, 'doctor', ok=False)
+                assert refused.returncode == 69 and ('Namedrop installation was interrupted. Run sh scripts/install.sh again to finish;'
+                                                     in (refused.stdout + refused.stderr)), refused
+                assert store() == before
+                publish(new)
+                assert not (f.state / 'runtime/migration.json').exists()
+                assert store() == (schemas[1], before[1]), store()
+                doctor_runs_selected(session, block)
+                say('U10 interrupted migration recovery passed')
+                continue
+            if not migrated_failure:
+                selected = os.readlink(f.state / 'runtime/current')
+                invalid = f.root / 'invalid-contract'
+                shutil.copytree(new, invalid)
+                contract = invalid / 'runtime.json'
+                value = json.loads(contract.read_text())
+                value['state_schema'] += 1
+                contract.write_text(json.dumps(value))
+                refused = publish(invalid, code=2)
+                assert 'Built runtime does not match' in refused.stderr
+                assert os.readlink(f.state / 'runtime/current') == selected and store() == before
+                notice = f.in_block(session, block, 'doctor').stdout
+                assert 'ND-UPDATE-001' in notice and 'download Namedrop 2.0.0 and run sh scripts/install.sh' in notice, notice
+                typed = [json.loads(line)['args'] for line in (f.root / 'commands.jsonl').read_text().splitlines()]
+                assert not any(word in args for args in typed for word in ('reconcile', 'event')), typed
+                publish(new)
+                assert store() == (schemas[1], before[1]), store()
+                before = store()
+                candidate = f.root / 'same-schema'
+                shutil.copytree(new, candidate)
+                executable = candidate / 'bin/namedrop'
+                if sys.platform == 'darwin':
+                    subprocess.run(['/usr/bin/codesign', '--force', '--sign', '-', '--identifier',
+                                    'namedrop-u10-failed-install', str(executable)], check=True, capture_output=True)
+                else:
+                    with executable.open('ab') as stream:
+                        stream.write(b'\nnamedrop-u10-failed-install\n')
+            else:
+                candidate = new
+            selected = os.readlink(f.state / 'runtime/current')
+            module = Path(registration(f)['module'])
+            contents = module.read_bytes()
+            module.write_text('-- foreign module: fixture install must refuse\n')
+            # install.sh exits with the launcher's own code, 65 for a refused install.
+            failed = publish(candidate, code=65)
+            module.write_bytes(contents)
+            after = os.readlink(f.state / 'runtime/current')
+            if migrated_failure:
+                assert after != selected
+                warning = failed.stderr.find('Activation failed after a possible state migration. The new runtime remains selected;')
+                assert -1 < warning < failed.stderr.find('Installation did not complete. Inspect setup before starting sessions.'), failed.stderr
+                assert store() == (schemas[1], before[1]), store()
+            else:
+                assert after == selected
+                assert 'Installation did not complete. The previous runtime remains selected; existing sessions can continue.' in failed.stderr
+                assert store() == before
+            doctor_runs_selected(session, block)
+            say('U10 migrated failure' if migrated_failure else 'U10 detection, migration and same-schema rollback', 'passed')
+        finally:
+            f.close()
 
 
 for section in chosen:

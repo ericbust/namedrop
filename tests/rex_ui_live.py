@@ -51,6 +51,8 @@ LINE = 'pcall(require, "namedrop");\n'
 PERSON = '-- the person\'s own config\nrex.action{ name = "mine", title = "Mine", run = function() return "mine" end }\n'
 init.write_text(LINE + PERSON)
 record.write_text(json.dumps({'module': str(module), 'config': str(init), 'line': 'inserted'}))
+# The state is standalone, so its bridge would start the update check.
+(record.parent / 'settings.json').write_text('{"check_for_updates": false}\n')
 base_env = {'HOME': str(home), 'PATH': '/usr/bin:/bin', 'USER': os.environ.get('USER', 'u'), 'SHELL': '/bin/sh',
             'LANG': 'en_US.UTF-8'}
 digest = hashlib.sha256(namedrop.read_bytes()).hexdigest()

@@ -77,3 +77,19 @@ fn standalone_real_rex_runtime_lane() {
         .unwrap();
     assert!(status.success());
 }
+
+#[test]
+#[ignore = "requires unrestricted scratch Rex; set NAMEDROP_U8_REX_BINARY, NAMEDROP_U8_LIVE_OUTPUT and both fixture archives"]
+fn standalone_real_rex_updates_lane() {
+    let rex = std::env::var("NAMEDROP_U8_REX_BINARY").unwrap();
+    let output = std::env::var("NAMEDROP_U8_LIVE_OUTPUT").unwrap();
+    let status = binary::command("python3")
+        .args([
+            "-I",
+            concat!(env!("CARGO_MANIFEST_DIR"), "/tests/rex_install_live.py"),
+        ])
+        .args([binary::namedrop_path(), &rex, &output, "updates"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+}

@@ -94,6 +94,40 @@ fn cached_update_is_informational_and_doctor_remains_healthy_and_read_only() {
 }
 
 #[test]
+fn standalone_doctor_uses_download_guidance_without_a_herdr_command() {
+    let f = Fixture::new();
+    if update_profile::isolate(&f.root, &f.home) {
+        return;
+    }
+    f.register();
+    fs::create_dir_all(f.root.join("runtime")).unwrap();
+    fs::write(f.root.join("runtime/owner"), "standalone\n").unwrap();
+    fs::write(
+        f.root.join("update-check.json"),
+        json!({
+            "schema_version":1, "checked_at":100, "last_success_at":100,
+            "last_error":null, "remote_version":"9.10.0"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let report = diagnose_collaboration(&f.runtime());
+    let update = report
+        .issues
+        .iter()
+        .find(|issue| issue.code == "ND-UPDATE-001")
+        .unwrap();
+    assert!(
+        update
+            .explanation
+            .contains("Update: download Namedrop 9.10.0 and run sh scripts/install.sh"),
+        "{update:?}"
+    );
+    assert_eq!(update.repair.command, None);
+    assert!(!render_health_report_to_text(&report).contains("herdr plugin action invoke update"));
+}
+
+#[test]
 fn invalid_update_settings_are_visible_in_doctor_without_a_health_failure() {
     let f = Fixture::new();
     if update_profile::isolate(&f.root, &f.home) {
@@ -127,6 +161,90 @@ fn invalid_update_settings_are_visible_in_doctor_without_a_health_failure() {
             .iter()
             .any(|issue| issue.code.starts_with("ND-UPDATE-"))
     );
+}
+
+/// The U10 review's F5: an owner that is not `standalone` or `herdr`, an
+/// empty one, or a directory, keeps Herdr's settings file and notice. Doctor
+/// names Herdr's file for invalid settings and never blames an owner it
+/// cannot read on settings.json.
+#[test]
+fn doctor_keeps_herdrs_settings_and_notice_under_an_invalid_owner() {
+    let f = Fixture::new();
+    if update_profile::isolate(&f.root, &f.home) {
+        return;
+    }
+    f.register();
+    let herdr = f
+        .home
+        .join(".config/herdr/plugins/config/namedrop/settings.json");
+    fs::create_dir_all(herdr.parent().unwrap()).unwrap();
+    let standalone = f.home.join(".config/namedrop/settings.json");
+    fs::create_dir_all(standalone.parent().unwrap()).unwrap();
+    fs::write(&standalone, "{").unwrap();
+    let owner = f.root.join("runtime/owner");
+    fs::create_dir_all(owner.parent().unwrap()).unwrap();
+    for (label, contents) in [
+        ("Herdr", Some(&b"Herdr\n"[..])),
+        ("empty", Some(&b""[..])),
+        ("not UTF-8", Some(&b"\xffstandalone"[..])),
+        ("a directory", None),
+    ] {
+        let _ = fs::remove_file(&owner);
+        let _ = fs::remove_dir(&owner);
+        match contents {
+            Some(contents) => fs::write(&owner, contents).unwrap(),
+            None => fs::create_dir(&owner).unwrap(),
+        }
+        fs::write(&herdr, "{\"check_for_updates\":true}").unwrap();
+        fs::write(
+            f.root.join("update-check.json"),
+            json!({"schema_version":1, "checked_at":100, "last_success_at":100,
+                "last_error":null, "remote_version":"9.10.0"})
+            .to_string(),
+        )
+        .unwrap();
+        let report = diagnose_collaboration(&f.runtime());
+        assert!(
+            !report
+                .issues
+                .iter()
+                .any(|issue| issue.code == "ND-UPDATE-002"),
+            "{label}: {report:?}"
+        );
+        let update = report
+            .issues
+            .iter()
+            .find(|issue| issue.code == "ND-UPDATE-001")
+            .unwrap_or_else(|| panic!("{label}: no update notice: {report:?}"));
+        assert!(
+            update.explanation.contains(
+                "Run `herdr plugin action invoke update --plugin namedrop` from a plain shell tab."
+            ),
+            "{label}: {update:?}"
+        );
+        assert_eq!(
+            update.repair.command.as_deref(),
+            Some(
+                &[
+                    "herdr", "plugin", "action", "invoke", "update", "--plugin", "namedrop"
+                ]
+                .map(str::to_owned)[..]
+            ),
+            "{label}"
+        );
+        fs::write(&herdr, "{").unwrap();
+        let setting = diagnose_collaboration(&f.runtime())
+            .issues
+            .into_iter()
+            .find(|issue| issue.code == "ND-UPDATE-002")
+            .unwrap_or_else(|| panic!("{label}: invalid Herdr settings unreported"));
+        assert_eq!(
+            setting.diagnostic["path"],
+            herdr.to_string_lossy().as_ref(),
+            "{label}"
+        );
+        assert!(setting.explanation.contains("Fix settings.json"), "{label}");
+    }
 }
 
 /// The U6 review's F3: Doctor reads the Rex module only on a Rex endpoint,

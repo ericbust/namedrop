@@ -389,6 +389,38 @@ that start more of the profile's agents, with Claude Code's wrapper named in
 full. `rex down` kills every session, stops the server and
 any Codex app server, and keeps the profile. No Herdr runs on this lane.
 
+### Install orders
+
+```sh
+python3 -I testbed/rex-orders-live.py --link . --rex PATH/TO/rex --out DIR rex-first
+python3 -I testbed/rex-orders-live.py --out DIR down
+```
+
+`rex-orders-live.py` runs UI.md's U13: a machine with both hosts, installed in
+either order, `install --remove` after each, and the relay between two Rex
+lanes. Each scenario makes its own `rex-u13-*` profiles fresh. A profile with
+both hosts runs a profile Herdr and a scratch Rex server from one `HOME`: the
+Rex lane's environment comes from Herdr's, without its `HERDR_*` names and
+without a host directory that holds a `herdr`. The profile links `herdr` only
+after the Rex lane's install, so that install still runs with no `herdr` on
+`PATH`. Herdr installs from the build's release archive, as a person does, by
+`sh ARCHIVE/scripts/setup.sh install --json` typed into a Herdr pane.
+
+| Scenario | What it runs |
+| --- | --- |
+| `herdr-first` | Herdr installs the build, then `install.sh` adopts Herdr's runtime, and `install --remove` takes the Rex half away |
+| `old-herdr` | Herdr runs Namedrop 1.11.1, and `install.sh` refuses and changes nothing. Herdr then updates to the build, `install.sh` adopts, and `install --remove` follows |
+| `rex-first` | The Rex lane installs, real Claude Code and Codex bind and are named, and Herdr's install hands off. It checks the old bridge, the module, the old runtime's refusal, Doctor's `ND-INSTALL-001` before and after every Namedrop process stops, Codex's next turn, a Rex server restart, and `install --remove` |
+| `stopped-server` | The Rex lane installs, its server stops, Herdr hands off, and the server's next start loads the module baked to Herdr's launcher |
+| `two-lanes` | A and B install with `install.sh` only. B's server restarts with no session, a Codex starts on B and is activated and named from Rex's palette actions, and a terminal on A mentions it through A's `rex hosts` entry for B, which a pass-through forwarder in the driver serves |
+
+Every `rex` call names the lane's server with `-S` and `--autostart=false`.
+Claude Code starts only as the profile's token wrapper. Each scenario logs
+every command to `DIR/SCENARIO/commands.log`, writes
+`DIR/SCENARIO/evidence.json`, prints one `ok` or `FAIL` line per check, and
+brings its profiles down at the end unless `--keep`. `down` stops every
+`rex-u13-*` profile, deletes its build directories, and keeps its files.
+
 ### Step 6's live check
 
 ```sh

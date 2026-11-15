@@ -44,6 +44,21 @@ class CodexActivation(unittest.TestCase):
             self.assertEqual(call.kwargs['stdin'], subprocess.DEVNULL)
             self.assertLessEqual(call.kwargs['timeout'], 30)
 
+    def test_the_handoff_report_survives_the_refresh(self):
+        handoff = [{'state': '/rex/state', 'notice': 'The names made on Rex stay in /rex/state.',
+                    'invalid_bindings': [], 'module': {'status': 'confirmed', 'sealed': True}}]
+        self.payload['data']['handoff'] = copy.deepcopy(handoff)
+        value, code, _ = self.install()
+        self.assertEqual(code, 0)
+        self.assertEqual(value['data']['handoff'], handoff)
+        self.assertTrue(value['data']['agent_integration_hook_activation']['codex']['cache_current'])
+        # A second activation that ran the handoff again reports its own result.
+        again = [dict(handoff[0], module={'status': 'not_confirmed', 'sealed': False})]
+        repeated = copy.deepcopy(self.verified)
+        repeated['data']['handoff'] = copy.deepcopy(again)
+        value, _, _ = self.install(verified=repeated)
+        self.assertEqual(value['data']['handoff'], again)
+
     def test_current_cache_does_no_work(self):
         _, code, run = self.install(self.verified)
         self.assertEqual(code, 0)
