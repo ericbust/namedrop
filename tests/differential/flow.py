@@ -17,6 +17,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -113,7 +114,7 @@ def norm(text):
     text = re.sub(r"\b1[0-9]{9,12}\b", "<TIME>", text)
     text = re.sub(r"\b[0-9]{4,}-[0-9]{6,}\b", "<PIDTIME>", text)
     text = re.sub(r"\"(pid|shell_pid|foreground_process_group_id)\": ?[0-9]+", r'"\1":<PID>', text)
-    text = re.sub(r"(attempt|thread|message|delivery|observation|registration|binding|address|nonce|reminder|grant|claim|request|snapshot|batch|role|challenge)[-_][0-9a-z_-]{4,}", r"\1-<ID>", text)
+    text = re.sub(r"(attempt|thread|message|delivery|observation|registration|binding|address|nonce|reminder|grant|claim|request|snapshot|batch|role|challenge)[-_](?=[0-9a-z_-]*[0-9])[0-9a-z_-]{4,}", r"\1-<ID>", text)
     return text
 
 
@@ -269,7 +270,10 @@ def files():
                         text = norm(data.decode("utf-8")) if b"\0" not in data else "<BINARY>"
                     except UnicodeDecodeError:
                         text = "<BINARY>"
-                rows.append(json.dumps({"path": rel, "text": text}, sort_keys=True))
+                row = {"path": rel, "text": text}
+                if not os.path.islink(path):
+                    row["mode"] = oct(stat.S_IMODE(os.lstat(path).st_mode))
+                rows.append(json.dumps(row, sort_keys=True))
     return sorted(rows)
 
 
