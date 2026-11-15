@@ -150,7 +150,7 @@ fn open_says_hello_reads_the_welcome_and_dropping_closes_with_1000() {
     drop(open(client, DEFAULT, &cancelled).unwrap());
     let (hello, close) = server.join().unwrap();
     assert_eq!(hello["type"], "hello");
-    assert_eq!(hello["api_revision"], 13);
+    assert_eq!(hello["api_revision"], 14);
     assert_eq!(hello["api_min_revision"], 12);
     assert_eq!(hello["client"]["kind"], "other");
     assert_eq!(hello["client"]["name"], "namedrop");
@@ -160,7 +160,7 @@ fn open_says_hello_reads_the_welcome_and_dropping_closes_with_1000() {
 
 #[test]
 fn welcomes_for_each_supported_revision_connect() {
-    for revision in [12, 13] {
+    for revision in [12, 13, 14] {
         let (client, server) = scripted(move |server| {
             server.message();
             server.send(json!({
@@ -179,7 +179,7 @@ fn welcomes_for_each_supported_revision_connect() {
 fn a_welcome_for_another_protocol_or_revision_is_refused() {
     for welcome in [
         json!({"type": "welcome", "protocol": "rex.control.v1", "api_revision": 11, "limits": {"max_message_bytes": 65536}}),
-        json!({"type": "welcome", "protocol": "rex.control.v1", "api_revision": 14, "limits": {"max_message_bytes": 65536}}),
+        json!({"type": "welcome", "protocol": "rex.control.v1", "api_revision": 15, "limits": {"max_message_bytes": 65536}}),
         json!({"type": "welcome", "protocol": "rex.control.v2", "api_revision": 12, "limits": {"max_message_bytes": 65536}}),
         json!({"type": "welcome", "protocol": "rex.control.v1", "limits": {"max_message_bytes": 65536}}),
         json!({"type": "event", "seq": 1, "payload": {}}),
@@ -193,7 +193,7 @@ fn a_welcome_for_another_protocol_or_revision_is_refused() {
         let refused = open(client, DEFAULT, &cancelled).map(|_| ());
         server.join().unwrap();
         assert!(
-            matches!(&refused, Err(Fault::Closed(error)) if error.contains("revisions 12 to 13")),
+            matches!(&refused, Err(Fault::Closed(error)) if error.contains("revisions 12 to 14")),
             "{welcome}: {refused:?}"
         );
     }

@@ -279,15 +279,21 @@ where
             issues.push(hook_issue);
         }
     }
-    if runtime.mux.endpoint().kind == crate::mux::MuxKind::Rex
-        && let Some(home) = runtime.home_directory
-        && let Ok(bytes) = std::fs::read(crate::locator::rex_registration(home))
-        && let Ok(registration) = serde_json::from_slice::<serde_json::Value>(&bytes)
-        && let Some(module_state) = registration["state"].as_str()
-        && let Some(recorded) =
-            crate::locator::read_install_record(&crate::locator::install_record(home))
-        && std::path::Path::new(module_state) != recorded
-    {
+    // UI.md's third case: a Herdr release from before step 6 rebaked the
+    // packages for its own state and left the module naming the standalone
+    // one. Activating again here would take the packages back, so the
+    // record's repair is not offered beside this one.
+    let module_mismatch = runtime.mux.endpoint().kind == crate::mux::MuxKind::Rex
+        && runtime.home_directory.is_some_and(|home| {
+            std::fs::read(crate::locator::rex_registration(home))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .and_then(|registration| {
+                    registration["state"].as_str().map(std::path::PathBuf::from)
+                })
+                .is_some_and(|module| crate::install::packages_bake_another_state(home, &module))
+        });
+    if module_mismatch {
         issues.push(issue(
             "ND-INSTALL-003",
             HealthSeverity::Notice,
@@ -297,9 +303,10 @@ where
             "Update Namedrop in Herdr, then run Activate Namedrop there again.",
         ));
     }
-    if let Some((record, recorded)) = runtime
-        .home_directory
-        .and_then(|home| crate::install::install_record_mismatch(home, runtime.agent_config))
+    if !module_mismatch
+        && let Some((record, recorded)) = runtime
+            .home_directory
+            .and_then(|home| crate::install::install_record_mismatch(home, runtime.agent_config))
     {
         let mut record_issue = issue(
             "ND-INTEGRATION-002",

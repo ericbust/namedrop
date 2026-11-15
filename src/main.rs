@@ -1358,10 +1358,13 @@ fn run_agent_status_changed_hook(inherited: &dyn Inherited) -> ExitCode {
             return ExitCode::from(65);
         }
     };
-    let directories = namedrop::InheritedDirectories::from_environment();
-    if let Err(error) = namedrop::check_package_ownership(directories.home(), &state_directory) {
-        eprintln!("could not queue Namedrop reconciliation: {error}");
-        return ExitCode::from(65);
+    // The hook takes no package lock: its worker's refresh does, and leaves
+    // the packages to the next activation when it may not write them.
+    if let Some(refusal) = namedrop::package_refusal(
+        namedrop::InheritedDirectories::from_environment().home(),
+        &state_directory,
+    ) {
+        eprintln!("{refusal}");
     }
     let endpoint = namedrop::mux::Endpoint::parse(&socket_id);
     let space = namedrop::SpaceId::new(&space_id);

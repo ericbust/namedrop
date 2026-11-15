@@ -426,7 +426,11 @@ pub fn install_integration_package(
     executable: &Path,
     state_directory: &Path,
 ) -> Result<PathBuf, String> {
-    let lease = crate::installed_runtime::package_guard(Some(root), state_directory)?;
+    let lease = crate::installed_runtime::package_guard(
+        Some(root),
+        state_directory,
+        crate::installed_runtime::Writer::Activation,
+    )?;
     install_integration_package_with_config(
         &lease,
         root,
@@ -629,10 +633,18 @@ pub(crate) fn install_record_mismatch(
 ) -> Option<(PathBuf, PathBuf)> {
     let record = config.install_record(home);
     let recorded = crate::locator::read_install_record(&record)?;
-    let baked = format!(
-        "--state-directory {}",
-        shell_single_quote(recorded.to_str()?)
-    );
+    packages_bake_another_state(home, &recorded).then_some((record, recorded))
+}
+
+/// Whether an installed SessionStart wrapper bakes another state directory
+/// than `state`.
+pub(crate) fn packages_bake_another_state(home: &Path, state: &Path) -> bool {
+    let Some(baked) = state
+        .to_str()
+        .map(|state| format!("--state-directory {}", shell_single_quote(state)))
+    else {
+        return false;
+    };
     [AgentRuntime::Codex, AgentRuntime::ClaudeCode]
         .into_iter()
         .filter_map(|runtime| {
@@ -640,7 +652,6 @@ pub(crate) fn install_record_mismatch(
                 .ok()
         })
         .any(|wrapper| !wrapper.contains(&baked))
-        .then_some((record, recorded))
 }
 
 /// Each installed SessionStart or UserPromptSubmit wrapper that sets no
@@ -898,37 +909,50 @@ impl IntegrationPackageInstallation {
 pub(crate) fn refresh_user_integration_packages<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
     discovered: &DiscoveredWorktree,
+    writer: crate::installed_runtime::Writer,
 ) -> Result<IntegrationPackageInstallation, String>
 where
     M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
-    let lease =
-        crate::installed_runtime::package_guard(runtime.home_directory, runtime.state_directory)?;
-    let current = lease.writable()?;
+    let lease = crate::installed_runtime::package_guard(
+        runtime.home_directory,
+        runtime.state_directory,
+        writer,
+    )?;
+    // A refusal is this refresh's report, so the event that ran it still
+    // does its own work instead of failing.
+    let current = lease.writable();
+    if let Err(refusal) = &current {
+        eprintln!("{refusal}");
+    }
     let executable = crate::collaboration_executable().map(PathBuf::from);
     let outcomes = [AgentRuntime::Codex, AgentRuntime::ClaudeCode].map(|agent_runtime| {
-        let outcome = match (runtime.home_directory, &executable) {
-            (Some(home_directory), _) if !current => {
+        let outcome = match (runtime.home_directory, &executable, &current) {
+            (_, _, Err(refusal)) => Err(refusal.clone()),
+            (Some(home_directory), _, Ok(false)) => {
                 verified_package_directory(home_directory, agent_runtime)
             }
-            (Some(home_directory), Ok(executable)) => install_integration_package_with_config(
-                &lease,
-                home_directory,
-                agent_runtime,
-                executable,
-                runtime.state_directory,
-                runtime.agent_config,
-            ),
-            (None, _) => Err(
+            (Some(home_directory), Ok(executable), Ok(true)) => {
+                install_integration_package_with_config(
+                    &lease,
+                    home_directory,
+                    agent_runtime,
+                    executable,
+                    runtime.state_directory,
+                    runtime.agent_config,
+                )
+            }
+            (None, _, _) => Err(
                 "no user home directory is available for the shared Agent Integration package"
                     .to_owned(),
             ),
-            (_, Err(error)) => Err(error.clone()),
+            (_, Err(error), _) => Err(error.clone()),
         };
         (agent_runtime, outcome)
     });
+    drop(lease);
     let namespace = discovered.namespace(runtime.session_socket_id);
     let attribution = MutationAttribution::new(
         crate::ActorKind::Plugin,

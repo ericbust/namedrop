@@ -14,7 +14,10 @@ pub(crate) fn install_shell_command(
     executable: &Path,
     state: &Path,
 ) -> Result<Value, String> {
-    lease.require_write()?;
+    // A runtime an update replaced leaves the command to the selected one.
+    if !lease.writable()? {
+        return Ok(Value::Null);
+    }
     if !home.is_absolute() || !executable.is_absolute() || !state.is_absolute() {
         return Err(
             "shell command installation requires absolute home, executable and state paths".into(),

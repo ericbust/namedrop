@@ -311,6 +311,7 @@ where
             let lease = crate::installed_runtime::package_guard(
                 runtime.home_directory,
                 runtime.state_directory,
+                crate::installed_runtime::Writer::Command,
             )?;
             let sandbox_current = lease.writable()?;
             let address_id = store
@@ -423,6 +424,7 @@ where
                 runtime,
                 &attribution,
                 false,
+                crate::installed_runtime::Writer::Command,
             )?;
             let served =
                 crate::codex_app_server::served_codex_panes(runtime, std::slice::from_ref(pane));
@@ -513,20 +515,17 @@ where
             let lease = crate::installed_runtime::package_guard(
                 runtime.home_directory,
                 runtime.state_directory,
+                crate::installed_runtime::Writer::Activation,
             )?;
             let sandbox_current = lease.writable()?;
-            let shell_command = if sandbox_current {
-                crate::install::install_shell_command(
-                    &lease,
-                    runtime
-                        .home_directory
-                        .ok_or("no HOME is available for shell command installation")?,
-                    Path::new(&crate::collaboration_executable()?),
-                    runtime.state_directory,
-                )?
-            } else {
-                json!({"status":"not_current"})
-            };
+            let shell_command = crate::install::install_shell_command(
+                &lease,
+                runtime
+                    .home_directory
+                    .ok_or("no HOME is available for shell command installation")?,
+                Path::new(&crate::collaboration_executable()?),
+                runtime.state_directory,
+            )?;
             store
                 .transaction(|transaction| {
                     if sandbox_current {
@@ -553,6 +552,7 @@ where
                 runtime,
                 &attribution,
                 false,
+                crate::installed_runtime::Writer::Activation,
             )?;
             let shortcuts =
                 crate::shortcuts::activate_shortcuts(runtime.home_directory, runtime.mux);
@@ -583,26 +583,31 @@ where
         }
         "deactivate" => {
             parse_input::<EmptyInput>(input)?;
-            let lease = crate::installed_runtime::package_guard(
-                runtime.home_directory,
-                runtime.state_directory,
-            )?;
-            lease.writable()?;
             store
                 .transaction(|transaction| {
                     transaction.deactivate_worktree(&namespace, &attribution)
                 })
                 .map_err(|error| error.to_string())?;
             let _ = reconcile_managed_tab_labels(&mut store, &namespace, &discovered, runtime);
-            let permission_removal =
-                crate::install::remove_claude_permissions(&lease, runtime.state_directory);
-            let sandbox_removal =
-                crate::install::codex_sandbox::remove(&lease, runtime.state_directory);
-            let subagent_removal = crate::install::remove_subagent_hooks(
-                &lease,
-                runtime.state_directory,
+            // A lease that cannot be taken fails each removal, which the
+            // report names, and the space stays deactivated.
+            let lease = crate::installed_runtime::package_guard(
                 runtime.home_directory,
+                runtime.state_directory,
+                crate::installed_runtime::Writer::Removal,
             );
+            let (permission_removal, sandbox_removal, subagent_removal) = match &lease {
+                Ok(lease) => (
+                    crate::install::remove_claude_permissions(lease, runtime.state_directory),
+                    crate::install::codex_sandbox::remove(lease, runtime.state_directory),
+                    crate::install::remove_subagent_hooks(
+                        lease,
+                        runtime.state_directory,
+                        runtime.home_directory,
+                    ),
+                ),
+                Err(error) => (Err(error.clone()), Err(error.clone()), Err(error.clone())),
+            };
             Ok(json!({
                 "space_id": discovered.workspace_id,
                 "worktree_id": discovered.worktree_attached.then_some(discovered.worktree_id),
@@ -698,7 +703,11 @@ where
                     Ok(enrich_record(record, &discovered.panes))
                 })
                 .map_err(|error| error.to_string())?;
-            onboard_settled_integrations(runtime, &discovered)?;
+            onboard_settled_integrations(
+                runtime,
+                &discovered,
+                crate::installed_runtime::Writer::Command,
+            )?;
             serde_json::to_value(record).map_err(|error| error.to_string())
         }
         "address.list" => {
@@ -751,7 +760,11 @@ where
                     )
                 },
             )?;
-            onboard_settled_integrations(runtime, &discovered)?;
+            onboard_settled_integrations(
+                runtime,
+                &discovered,
+                crate::installed_runtime::Writer::Command,
+            )?;
             let _ = reconcile_managed_tab_labels(&mut store, &namespace, &discovered, runtime);
             Ok(record)
         }
@@ -856,6 +869,7 @@ where
                 runtime,
                 &attribution,
                 true,
+                crate::installed_runtime::Writer::Refresh,
             )?;
             Ok(json!({
                 "space_id": discovered.workspace_id,
@@ -1005,6 +1019,7 @@ where
         &event_runtime,
         attribution,
         false,
+        crate::installed_runtime::Writer::Refresh,
     )
     .map_err(EventError::Retry)?;
     Ok(json!({
@@ -1371,7 +1386,12 @@ where
         workspace_id: Some(workspace_id),
         ..*runtime
     };
-    onboard_settled_integrations(&event_runtime, &event_worktree).map_err(EventError::Retry)?;
+    onboard_settled_integrations(
+        &event_runtime,
+        &event_worktree,
+        crate::installed_runtime::Writer::Refresh,
+    )
+    .map_err(EventError::Retry)?;
     // Only a detection means an agent newly appeared; status changes
     // arrive constantly and must never open a popup.
     let tour = detected
@@ -1514,6 +1534,7 @@ fn reconcile_worktree<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
     attribution: &MutationAttribution,
     after_restart: bool,
+    writer: crate::installed_runtime::Writer,
 ) -> Result<WorktreeReconciliation, String>
 where
     M: crate::mux::Mux,
@@ -1554,7 +1575,7 @@ where
     let epoch = store
         .transaction(|transaction| transaction.complete_reconciliation(namespace))
         .map_err(|error| error.to_string())?;
-    let installation = onboard_settled_integrations(runtime, discovered)?;
+    let installation = onboard_settled_integrations(runtime, discovered, writer)?;
     let drain = crate::drain_mailboxes(runtime)?;
     Ok(WorktreeReconciliation {
         epoch,

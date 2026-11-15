@@ -315,3 +315,62 @@ fn rex_doctor_reports_a_module_left_behind_by_an_older_herdr_install() {
         "Update Namedrop in Herdr, then run Activate Namedrop there again."
     );
 }
+
+/// UI.md's "Rex first, then a Herdr release from before step 6": that
+/// release rebakes the packages for its own state and writes no record, so
+/// the record and the module still name the standalone state.
+#[test]
+fn rex_doctor_compares_the_packages_with_the_module_after_a_released_herdr_rebakes_them() {
+    let f = Fixture::new();
+    let home = f.0.join("home");
+    let ids = Ids(AtomicU64::new(0));
+    let host = host(
+        "rex:/tmp/fake.sock",
+        Ok(Applied::Unsupported),
+        Applied::Done,
+    );
+    let rt = runtime(&f, &host, &home, &ids);
+    execute_lifecycle_operation("activate", json!({"confirmed":true}), &rt).unwrap();
+    let record = home.join(".config/namedrop/state-directory");
+    let standalone = fs::read(&record).unwrap();
+    fs::write(
+        home.join(".config/namedrop/rex.json"),
+        json!({"state": f.0}).to_string(),
+    )
+    .unwrap();
+    let report = namedrop::diagnose_collaboration(&rt);
+    assert!(
+        !report
+            .issues
+            .iter()
+            .any(|issue| issue.code == "ND-INSTALL-003"),
+        "the packages and the module agree"
+    );
+    let herdr_state = f.0.join("herdr-state");
+    fs::create_dir_all(&herdr_state).unwrap();
+    let launcher = std::env::current_exe().unwrap();
+    for agent in [
+        namedrop::AgentRuntime::Codex,
+        namedrop::AgentRuntime::ClaudeCode,
+    ] {
+        namedrop::install_integration_package(&home, agent, &launcher, &herdr_state).unwrap();
+    }
+    fs::write(&record, &standalone).unwrap();
+    let report = namedrop::diagnose_collaboration(&rt);
+    let issue = report
+        .issues
+        .iter()
+        .find(|issue| issue.code == "ND-INSTALL-003")
+        .expect("the packages bake another state than the module");
+    assert_eq!(
+        issue.repair.prompt,
+        "Update Namedrop in Herdr, then run Activate Namedrop there again."
+    );
+    assert!(
+        !report
+            .issues
+            .iter()
+            .any(|issue| issue.code == "ND-INTEGRATION-002"),
+        "activating again on Rex would take the packages back"
+    );
+}
