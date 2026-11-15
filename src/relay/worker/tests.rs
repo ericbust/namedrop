@@ -429,6 +429,37 @@ fn a_later_message_of_a_thread_waits_behind_one_b_has_not_taken() {
     );
 }
 
+/// A later message of a thread waits behind one B's limit paused, as behind
+/// any B has not taken, and is sent once B takes the first.
+#[test]
+fn a_later_message_of_a_thread_waits_behind_one_b_s_limit_paused() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    crate::rex_bridge::remember_host_id(&space.state, &Endpoint::parse(REX), "host-a");
+    let id = |sent: Result<Value, String>| sent.unwrap()["message_id"].as_str().unwrap().to_owned();
+    let first = id(rex.run(|| space.send("request-1", "@bob@devbox ping")));
+    let follow_up = id(rex.run(|| space.reply("reply-1", &first, "@bob@devbox one more thing")));
+    capture(&space);
+    rex.answer_with(answer(
+        "paused",
+        Some("the Automatic Reply Limit requires human continuation"),
+        json!([]),
+    ));
+    let sent_ids = || -> Vec<Value> {
+        rex.requests()
+            .iter()
+            .map(|request| request["item"]["id"].clone())
+            .collect()
+    };
+    let (waits, _) = work_for(&space, &rex, 1);
+    assert_eq!(waits, [BACKOFF[0]]);
+    assert_eq!(sent_ids(), [json!(first)], "the follow-up waits");
+    rex.answer_with(answer("accepted", None, json!([])));
+    rex.answer_with(answer("accepted", None, json!([])));
+    work_for(&space, &rex, 1);
+    assert_eq!(sent_ids(), [json!(first), json!(first), json!(follow_up)]);
+}
+
 /// A collect that B answers with a fault of its own, or with any outcome,
 /// is not an answer: the worker backs off before it collects again.
 #[test]
@@ -1760,6 +1791,98 @@ fn reports(rex: &Script, label: &str, host_id: &str) {
         json!({"pid": 1, "host_id": host_id}).to_string(),
     )
     .unwrap();
+}
+
+/// Runs `label`'s worker for at most `rounds` waits, and returns each wait.
+fn waits_of(space: &Space, rex: &Script, label: &str, rounds: usize) -> Vec<Duration> {
+    let mut waits = Vec::new();
+    rex.run(|| {
+        work(&mut Run {
+            state: &space.state,
+            endpoint: &Endpoint::parse(REX),
+            label,
+            gate: &|| Ok(None),
+            pause: &mut |wait| {
+                waits.push(wait);
+                waits.len() < rounds
+            },
+            woken: &std::cell::RefCell::default(),
+            wake: &mut |_| {},
+        });
+    });
+    waits
+}
+
+/// A listed label whose server last reported a `host_id`, and that no
+/// longer answers, still holds it: a server another label reaches that
+/// reports it is refused, and is sent nothing.
+#[test]
+fn a_label_that_held_a_host_id_and_no_longer_answers_still_holds_it() {
+    let space = Space::new(REX);
+    let rex = rex(&["old", "new"]);
+    crate::rex_bridge::remember_host_id(&space.state, &Endpoint::parse(REX), "host-a");
+    crate::relay::tests_support::store(&space.state)
+        .set_peer("old", "host-x", 1)
+        .unwrap();
+    fs::write(rex.directory.join("status-old.json"), "Error: unreachable").unwrap();
+    reports(&rex, "new", "host-x");
+    rex.run(|| space.send("request-1", "@bob@new hello"))
+        .unwrap();
+    run_label(&space, &rex, "new");
+    assert_eq!(
+        outbound(&space),
+        [(
+            "failed".to_owned(),
+            Some(
+                "new's Rex server answers as the one old reaches, which your Rex hosts list \
+                 gives other addresses"
+                    .to_owned()
+            ),
+            None
+        )]
+    );
+    assert!(rex.requests().is_empty());
+}
+
+/// A refused server's items that were sent to it before, so pinned to its
+/// `host_id`, stay queued, since B may have taken one, and the worker backs
+/// off to try them again. Only the items never sent fail.
+#[test]
+fn a_refused_server_s_items_sent_before_stay_queued_and_the_worker_backs_off() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox", "studio"]);
+    crate::rex_bridge::remember_host_id(&space.state, &Endpoint::parse(REX), "host-a");
+    reports(&rex, "studio", "host-s");
+    rex.run(|| space.send("request-1", "@eve@studio one"))
+        .unwrap();
+    rex.answer_with(answer("retry", Some("busy"), json!([])));
+    assert_eq!(waits_of(&space, &rex, "studio", 1), [BACKOFF[0]]);
+    crate::relay::tests_support::store(&space.state)
+        .set_peer("devbox", "host-s", 1)
+        .unwrap();
+    reports(&rex, "devbox", "host-s");
+    rex.run(|| space.send("request-2", "@eve@studio two"))
+        .unwrap();
+    let before = rex.requests().len();
+    assert_eq!(
+        waits_of(&space, &rex, "studio", 1),
+        [BACKOFF[0]],
+        "the worker keeps on for its pinned item"
+    );
+    assert_eq!(
+        rex.requests().len(),
+        before,
+        "a refused server is sent nothing"
+    );
+    let reason = "studio's Rex server answers as the one devbox reaches, which your Rex hosts \
+                  list gives other addresses";
+    assert_eq!(
+        outbound(&space),
+        [
+            ("queued".to_owned(), None, Some("host-s".to_owned())),
+            ("failed".to_owned(), Some(reason.to_owned()), None)
+        ]
+    );
 }
 
 /// A server behind `devbox` that reports the `host_id` of studio's, which
