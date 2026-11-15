@@ -384,13 +384,16 @@ fn decide(
         Status::Refused | Status::Ambiguous => {
             store.settle(label, item, Settled::Failed, Some(reason), now)
         }
+        // An item kept for another reason than B's limit is no longer
+        // paused, so an expiry names what happened last.
         Status::Retry => {
             *kept = true;
+            let _ = store.set_paused(label, item, false);
             return true;
         }
         Status::Paused => {
             *kept = true;
-            let _ = store.paused(label, item);
+            let _ = store.set_paused(label, item, true);
             return true;
         }
     };

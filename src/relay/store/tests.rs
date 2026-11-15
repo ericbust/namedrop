@@ -824,7 +824,7 @@ fn a_paused_item_expires_with_its_thread_s_pause_as_the_reason() {
     let store = state.open(NOW);
     queue(&store, "paused", NOW - OUTBOUND_LIFETIME_MS);
     let item = store.queued("devbox", "rex:/tmp/a.sock").unwrap().remove(0);
-    store.paused("devbox", &item).unwrap();
+    store.set_paused("devbox", &item, true).unwrap();
     assert_eq!(store.paused_untold("rex:/tmp/a.sock").unwrap().len(), 1);
     drop(store);
     let store = state.open(NOW);
@@ -833,6 +833,83 @@ fn a_paused_item_expires_with_its_thread_s_pause_as_the_reason() {
     assert_eq!(
         unsent[0].reason,
         "the Automatic Reply Limit kept its thread on devbox paused for 24 hours"
+    );
+}
+
+/// A later message of a thread that waited behind a paused one expires for
+/// its reason too. Another recipient of the paused message, another
+/// thread, a thread whose first item B kept for another reason, and an item
+/// before the paused one, did not wait behind it, and an item B no longer
+/// says is paused is not.
+#[test]
+fn the_items_behind_a_paused_one_expire_with_its_reason() {
+    let state = State::new();
+    let store = state.open(NOW);
+    let old = NOW - OUTBOUND_LIFETIME_MS;
+    for (message, recipient, thread, at) in [
+        ("paused", "bob", "thread-1", old - 3),
+        ("paused", "carol", "thread-1", old - 3),
+        ("behind", "bob", "thread-1", old - 2),
+        ("elsewhere", "bob", "thread-2", old - 1),
+        ("was-paused", "bob", "thread-3", old),
+        ("retry-first", "bob", "thread-4", old - 1),
+        ("retry-second", "bob", "thread-4", old),
+        ("before", "bob", "thread-5", old - 2),
+        ("paused-after", "bob", "thread-5", old - 1),
+    ] {
+        store
+            .connection
+            .execute(
+                "INSERT INTO outbound (label, message_id, recipient, endpoint, space, sender,
+                    thread, text, state, created_at_ms, updated_at_ms)
+                 VALUES ('devbox', ?1, ?2, 'rex:/tmp/a.sock', 'session:a', 'alice', ?3, 'hi',
+                    'queued', ?4, ?4)",
+                params![message, recipient, thread, at],
+            )
+            .unwrap();
+    }
+    let item = |message: &str, recipient: &str| {
+        store
+            .queued("devbox", "rex:/tmp/a.sock")
+            .unwrap()
+            .into_iter()
+            .find(|item| item.message_id == message && item.recipient == recipient)
+            .unwrap()
+    };
+    for (message, recipient) in [("paused", "bob"), ("paused-after", "bob")] {
+        store
+            .set_paused("devbox", &item(message, recipient), true)
+            .unwrap();
+    }
+    let was = item("was-paused", "bob");
+    store.set_paused("devbox", &was, true).unwrap();
+    store.set_paused("devbox", &was, false).unwrap();
+    drop(store);
+    let store = state.open(NOW);
+    let reasons: Vec<(String, String, String)> = store
+        .unsent("rex:/tmp/a.sock")
+        .unwrap()
+        .into_iter()
+        .map(|unsent| (unsent.message_id, unsent.recipient, unsent.reason))
+        .collect();
+    let paused = "the Automatic Reply Limit kept its thread on devbox paused for 24 hours";
+    let unreachable = "devbox was unreachable for 24 hours";
+    let row = |message: &str, recipient: &str, reason: &str| {
+        (message.to_owned(), recipient.to_owned(), reason.to_owned())
+    };
+    assert_eq!(
+        reasons,
+        [
+            row("paused", "bob", paused),
+            row("paused", "carol", unreachable),
+            row("behind", "bob", paused),
+            row("elsewhere", "bob", unreachable),
+            row("was-paused", "bob", unreachable),
+            row("retry-first", "bob", unreachable),
+            row("retry-second", "bob", unreachable),
+            row("before", "bob", unreachable),
+            row("paused-after", "bob", paused),
+        ]
     );
 }
 

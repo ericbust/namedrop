@@ -2595,6 +2595,40 @@ fn an_item_b_s_limit_paused_stays_queued_and_its_sender_is_told_once() {
     assert!(notices(&space).is_empty(), "nothing failed");
 }
 
+/// An item B's limit paused and then answered `retry` for is no longer
+/// paused, so when it expires its reason says B was unreachable, not that
+/// the limit kept its thread paused.
+#[test]
+fn an_item_paused_then_kept_for_another_reason_expires_for_that_reason() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    sent(&space, &rex);
+    rex.answer_with(answer(
+        "paused",
+        Some("the Automatic Reply Limit requires human continuation"),
+        json!([]),
+    ));
+    work_for(&space, &rex, 1);
+    rex.answer_with(answer("retry", Some("busy"), json!([])));
+    work_for(&space, &rex, 1);
+    Connection::open(space.state.join("relay.sqlite3"))
+        .unwrap()
+        .execute(
+            "UPDATE outbound SET created_at_ms = created_at_ms - ?1",
+            [crate::relay::store::OUTBOUND_LIFETIME_MS],
+        )
+        .unwrap();
+    work_for(&space, &rex, 1);
+    assert_eq!(
+        outbound(&space)[0],
+        (
+            "expired".to_owned(),
+            Some("devbox was unreachable for 24 hours".to_owned()),
+            Some("host-b".to_owned())
+        )
+    );
+}
+
 /// A sender hears in its thread, once, from the relay author it sent to,
 /// that an item failed, with B's reason, and its space is woken.
 #[test]

@@ -1382,13 +1382,19 @@ impl RelayStore {
         Ok(counts)
     }
 
-    /// Records that B's Automatic Reply Limit paused the thread `item` goes
-    /// to on B, so its sender is told once.
-    pub(crate) fn paused(&self, label: &str, item: &Queued) -> Result<(), StoreError> {
+    /// Records whether B's last answer for `item` said that its Automatic
+    /// Reply Limit paused the thread it goes to on B, whose sender is told
+    /// once, and which an item that expires names as its reason.
+    pub(crate) fn set_paused(
+        &self,
+        label: &str,
+        item: &Queued,
+        paused: bool,
+    ) -> Result<(), StoreError> {
         self.connection.execute(
-            "UPDATE outbound SET paused = 1
+            "UPDATE outbound SET paused = ?4
              WHERE label = ?1 AND message_id = ?2 AND recipient = ?3 AND state = 'queued'",
-            params![label, item.message_id, item.recipient],
+            params![label, item.message_id, item.recipient, paused],
         )?;
         Ok(())
     }
@@ -2178,6 +2184,21 @@ impl RelayStore {
     /// `dropped` row, so their sender is told. `cursors` keeps what A acks.
     fn expire(&mut self, now_ms: i64) -> Result<(), StoreError> {
         let transaction = self.connection.transaction()?;
+        // A later message of a thread waits behind one B's limit paused, so
+        // it expires for the same reason. It goes first, while the first
+        // paused one, which no other is behind, is still queued.
+        transaction.execute(
+            "UPDATE outbound SET state = 'expired',
+                reason = 'the Automatic Reply Limit kept its thread on ' || label
+                    || ' paused for 24 hours',
+                updated_at_ms = ?1
+             WHERE state = 'queued' AND created_at_ms <= ?2
+                AND EXISTS (SELECT 1 FROM outbound p WHERE p.endpoint = outbound.endpoint
+                    AND p.label = outbound.label AND p.thread = outbound.thread
+                    AND p.message_id <> outbound.message_id AND p.state = 'queued' AND p.paused
+                    AND (p.created_at_ms, p.rowid) < (outbound.created_at_ms, outbound.rowid))",
+            params![now_ms, now_ms - OUTBOUND_LIFETIME_MS],
+        )?;
         transaction.execute(
             "UPDATE outbound SET state = 'expired',
                 reason = CASE WHEN paused
