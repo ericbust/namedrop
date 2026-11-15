@@ -988,6 +988,23 @@ def section_runtime():
             with contextlib.closing(sqlite3.connect(f.state / 'namedrop.sqlite3')) as db:
                 return '\n'.join(db.iterdump())
 
+        def settled():
+            # The bridge records a block's observations a moment after the
+            # block changes, so the snapshot waits for those writes to end.
+            last = store()
+            for _ in range(15):
+                time.sleep(1)
+                now = store()
+                if now == last:
+                    return now
+                last = now
+            raise AssertionError('the store kept changing before the publish')
+
+        def unchanged(before):
+            import difflib
+            after = store()
+            assert after == before, '\n'.join(difflib.unified_diff(before.splitlines(), after.splitlines(), lineterm=''))
+
         publish(old)
         assert (f.state / 'runtime/owner').read_text() == 'standalone\n'
         assert json.loads((f.state / 'runtime/source.json').read_text())['kind'] == 'archive'
@@ -996,13 +1013,16 @@ def section_runtime():
         cutoff = json.loads(migration.read_text())
         survey = json.loads(f.nd('rex', 'sessions', '--endpoint', f.endpoint).stdout)['data']['panes']
         agent = next(p for p in survey if p['block'] == blocks[0])
-        assert agent['agent'] and agent['session'], agent
+        # A stand-in writes no status record, so the adapter reports its bound
+        # session with no agent kind (`unreported_kind` in src/mux/rex/agent.rs).
+        assert agent['session'] and agent['reports_session'], agent
         cutoff['sessions'].append([f.endpoint, agent['session']])
         migration.write_text(json.dumps(cutoff))
-        selected, before = os.readlink(f.state / 'runtime/current'), store()
+        selected, before = os.readlink(f.state / 'runtime/current'), settled()
         refused = publish(new, ok=False)
         assert 'Some Rex sessions still use pre-launcher tools' in refused.stderr
-        assert os.readlink(f.state / 'runtime/current') == selected and store() == before
+        assert os.readlink(f.state / 'runtime/current') == selected
+        unchanged(before)
         agent_pid = int(bindings(f)[0]['agent'].split('@')[0])
         (f.root / 'end-0').touch()
         wait(lambda: identity(agent_pid), lambda alive: alive is None, 'the working agent ended')
@@ -1016,12 +1036,13 @@ def section_runtime():
         f.in_block(session, block, 'ui', 'launch', 'tour')
         layer = next(iter(wait(lambda: set(f.blocks(session)) - before_blocks, bool, 'the U8 tour opened')))
         wait(lambda: runtime.gate_holders(f.state / 'runtime/commands.lock'), bool, 'the U8 tour holds its gate')
-        selected, before = os.readlink(f.state / 'runtime/current'), store()
+        selected, before = os.readlink(f.state / 'runtime/current'), settled()
         started = time.monotonic()
         refused = publish(new, ok=False)
         assert time.monotonic() - started >= 20
         assert 'close' in refused.stderr and 'tour' in refused.stderr
-        assert os.readlink(f.state / 'runtime/current') == selected and store() == before
+        assert os.readlink(f.state / 'runtime/current') == selected
+        unchanged(before)
         assert layer in f.blocks(session)
 
         same = f.root / 'same-schema'
@@ -1032,8 +1053,9 @@ def section_runtime():
         shutil.copy2(binary, same / 'bin/namedrop')
         publish(same)
         assert os.readlink(f.state / 'runtime/current') != selected
-        assert any(str(f.state / selected / 'namedrop') == row[1]
-                   and 'ui' in row[2] and 'run' in row[2] for row in processes_under(f.root)), 'tour changed runtimes'
+        old_runtime = os.path.realpath(f.state / 'runtime' / selected / 'namedrop')
+        assert any(os.path.realpath(row[1]) == old_runtime and 'ui' in row[2] and 'run' in row[2]
+                   for row in processes_under(f.root)), ('tour changed runtimes', processes_under(f.root))
         assert layer in f.blocks(session)
         f.rx('send-key', '-s', session, '-b', layer, 'escape')
         wait(lambda: f.blocks(session), lambda b: layer not in b, 'the U8 tour closed')
