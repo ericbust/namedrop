@@ -36,15 +36,33 @@ WRITERS={
     'src/install/claude_permissions.rs::discard_pending':['activate','deactivate','event','hook'],
     'src/locator.rs::write_install_record':['activate','name','event','hook'],
 }
+def balanced(text,start):
+    """The end of the bracketed group that opens at text[start]."""
+    pairs={'(':')','{':'}','<':'>'};opening=text[start];closing=pairs[opening];depth,end=1,start+1
+    while depth and end<len(text):
+        depth+={opening:1,closing:-1}.get(text[end],0);end+=1
+    return end
+sources={str(path.relative_to(repo)):re.sub(r'(?ms)^#\[cfg\(test\)\]\nmod \w+ \{$.*?^\}$','',path.read_text()) for path in (repo/'src').rglob('*.rs')}
+# A type that holds a lease, in a field or a variant, carries it as well.
+holders={'PackageLease'}
+while True:
+    grown={match.group(1) for text in sources.values() for match in re.finditer(r'\b(?:struct|enum)\s+(\w+)[^;{(]*[{(]',text)
+           if re.search(r'\b(?:%s)\b'%'|'.join(holders),text[match.end()-1:balanced(text,match.end()-1)])}-holders
+    if not grown:break
+    holders|=grown
+named=re.compile(r'\b(?:%s)\b'%'|'.join(holders))
 found=set()
-for path in (repo/'src').rglob('*.rs'):
-    text=re.sub(r'(?ms)^#\[cfg\(test\)\]\nmod \w+ \{$.*?^\}$','',path.read_text())
+for name,text in sources.items():
+    methods=set()
+    for match in re.finditer(r'\bimpl\b(?:\s*<[^{}]*?>)?\s+(\w+)[^{;]*?(?:\bfor\s+(\w+)[^{;]*)?\{',text):
+        if (match.group(2) or match.group(1)) in holders-{'PackageLease'}:methods.add((match.end()-1,balanced(text,match.end()-1)))
     for match in re.finditer(r"\bfn\s+(\w+)\s*(?:<[^{}]*?>)?\s*\(",text,re.S):
-        depth,end=1,match.end()
-        while depth and end<len(text):
-            depth+={'(':1,')':-1}.get(text[end],0);end+=1
-        if re.search(r'\bPackageLease\b',text[match.start():end]):
-            found.add(str(path.relative_to(repo))+'::'+match.group(1))
+        end=balanced(text,match.end()-1)
+        tail=text[end:min([i for i in (text.find('{',end),text.find(';',end)) if i>=0]+[len(text)])]
+        bounds=tail[tail.find('where'):] if re.search(r'\bwhere\b',tail) else ''
+        held=any(start<match.start()<stop for start,stop in methods) and re.search(r'\bself\b',text[match.end():end])
+        if named.search(text[match.start():end]+bounds) or held:
+            found.add(name+'::'+match.group(1))
 assert found==set(WRITERS),{'unmapped':sorted(found-set(WRITERS)),'stale':sorted(set(WRITERS)-found)}
 
 def snapshot(home):
@@ -118,8 +136,9 @@ with tempfile.TemporaryDirectory(prefix='nd-lease-matrix-') as folder:
             assert 'ND-INSTALL-002' not in p.stdout+p.stderr,(name,p.stdout,p.stderr)
             assert p.returncode==0,(name,p.stdout,p.stderr)
             if name=='hook':
+                # The worker stages files beside SKILL.md before it renames one over it.
                 until=time.monotonic()+10
-                while snapshot(own)==before and time.monotonic()<until:time.sleep(.05)
+                while skill.read_text()!=expected_skill and time.monotonic()<until:time.sleep(.05)
             after=snapshot(own)
             assert after!=before,('admitted writer changed no shared file',name,p.stdout,p.stderr)
             if name in ['activate','name']:
