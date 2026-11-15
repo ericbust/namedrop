@@ -228,6 +228,14 @@ def show_report(payload):
     for state in ("held", "failed", "expired", "requeued", "submitted", "terminal_running", "terminal_waiting"):
         if drain.get(state):
             step(f"Deliveries {state.replace('_', ' ')}: {len(drain[state])}. Run namedrop doctor for details.")
+    for moved in data.get("handoff", []):
+        print("\nNamedrop on Rex")
+        step(moved.get("notice", ""))
+        module = moved.get("module") or {}
+        if module.get("status") == "not_confirmed":
+            step("The Rex module is not confirmed: " + safe(module.get("error")))
+        for path in moved.get("invalid_bindings", []):
+            step("Could not read the Rex session binding " + safe(path))
     server = data.get("agent_integration_hook_activation", {}).get("codex", {}).get("app_server")
     if server:
         show_app_server(server)
