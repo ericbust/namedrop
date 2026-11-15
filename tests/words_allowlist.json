@@ -129,7 +129,7 @@
         "install.sh"
       ],
       "sources": [
-        {"file": "scripts/runtime.py", "line": 856, "source": "Namedrop is moving to Herdr. Run Activate Namedrop in Herdr again."},
+        {"file": "scripts/runtime.py", "line": 881, "source": "Namedrop is moving to Herdr. Run Activate Namedrop in Herdr again."},
         {"file": "scripts/install.sh", "line": 145, "source": "Namedrop is moving to Herdr. Run Activate Namedrop in Herdr again."}
       ],
       "reason": "A Rex state that Herdr is taking over refuses the install. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
@@ -419,8 +419,8 @@
       "file": "scripts/runtime.py",
       "reason": "run.sh's argv form; install.sh always passes the explicit --state-dir form.",
       "literals": [
-        [1222, "--herdr-pane"],
-        [1223, "Expected activate or --herdr-pane after ROOT; explicit calls need --state-dir DIR --verify activate|install."]
+        [1247, "--herdr-pane"],
+        [1248, "Expected activate or --herdr-pane after ROOT; explicit calls need --state-dir DIR --verify activate|install."]
       ]
     },
     {
@@ -428,10 +428,10 @@
       "file": "scripts/runtime.py",
       "reason": "A value of runtime/owner or retired.json's reason, read and written, never printed.",
       "literals": [
-        [861, "herdr_handoff"],
-        [952, "herdr_handoff"],
-        [1011, "herdr_handoff"],
-        [1129, "herdr\n"]
+        [886, "herdr_handoff"],
+        [977, "herdr_handoff"],
+        [1036, "herdr_handoff"],
+        [1154, "herdr\n"]
       ]
     },
     {
@@ -443,9 +443,9 @@
         [444, "HERDR_PLUGIN_STATE_DIR"],
         [444, "HERDR_SOCKET_PATH"],
         [444, "HERDR_WORKSPACE_ID"],
-        [1049, "HERDR_PLUGIN_STATE_DIR"],
-        [1140, "HERDR_WORKSPACE_ID"],
-        [1219, "HERDR_PLUGIN_STATE_DIR"]
+        [1074, "HERDR_PLUGIN_STATE_DIR"],
+        [1165, "HERDR_WORKSPACE_ID"],
+        [1244, "HERDR_PLUGIN_STATE_DIR"]
       ]
     },
     {
@@ -492,16 +492,16 @@
         [158, "HERDR_SOCKET_PATH"],
         [163, "Herdr did not accept the bound setup action: "],
         [170, "herdr "],
-        [254, "  For new Codex sessions, refresh the installed plugin:"],
-        [266, "Herdr "],
-        [280, "    herdr integration install codex\n    herdr integration install claude"],
-        [297, "plugin"],
-        [301, "plugin_action_invoked"],
-        [307, "--plugin"],
+        [264, "  For new Codex sessions, refresh the installed plugin:"],
+        [276, "Herdr "],
+        [290, "    herdr integration install codex\n    herdr integration install claude"],
         [307, "plugin"],
-        [308, "plugin_log_list"],
-        [315, "plugin_id"],
-        [365, "Inspect herdr plugin log list --plugin namedrop --limit 100; do not assume the action failed or retry automatically."]
+        [311, "plugin_action_invoked"],
+        [317, "--plugin"],
+        [317, "plugin"],
+        [318, "plugin_log_list"],
+        [325, "plugin_id"],
+        [375, "Inspect herdr plugin log list --plugin namedrop --limit 100; do not assume the action failed or retry automatically."]
       ]
     },
     {

@@ -593,6 +593,16 @@ def rollouts(profile):
     return counts
 
 
+def turns(profile):
+    """(started, completed) Codex turns over every session file of the profile."""
+    started = completed = 0
+    for path in (profile.dir / "codex/sessions").rglob("*.jsonl"):
+        text = path.read_text(errors="replace")
+        started += text.count('"type":"task_started"')
+        completed += text.count('"type":"task_complete"')
+    return started, completed
+
+
 def codex_turn(run, lane, session, block, prompt, within=300):
     """Types a prompt into Codex's block and waits for the turn to complete in its rollout."""
     before = rollouts(lane.profile)
@@ -628,6 +638,13 @@ def scenario_rex_first(run, args, request):
     run.observe("Codex plugin cache before the handoff", cache)
     old_runs = hook_runs(old)
     run.observe("standalone hook runs before the handoff", old_runs)
+    # `rex_live.up` returns once Codex's warm-up turn ran its first hook. The
+    # handoff's `codex plugin add` replaces the package copy that a running
+    # turn's later hooks still name, so a turn in flight ends with Hook failed
+    # (the U13 review's F2). Wait for the warm-up's task_complete.
+    done = wait(lambda: turns(profile), lambda counts: counts[1] >= 1 and counts[0] == counts[1],
+                "Codex's warm-up turn to complete", 300, 1)
+    run.observe("Codex turns (started, completed) before the handoff", done)
 
     add_herdr(profile, agents)
     pane = herdr_up(run, profile)
@@ -692,6 +709,7 @@ def scenario_rex_first(run, args, request):
     run.observe("Codex rollouts that completed a turn", changed)
     screen = rx(run, lane, "capture", "-s", session, "-b", blocks["codex"], "--trim", ok=False).stdout
     run.observe("Codex screen after its turn", screen[-3000:])
+    run.check("no Codex turn shows Hook failed", "Hook failed" not in screen, screen[-3000:])
     old_seen = [row for row in seen if str(old) + "/" in row["command"]]
     run.check("Codex's next turn started no helper of the old state",
               not [row for row in old_seen if watched_kind(row["command"])] and not helpers(old),

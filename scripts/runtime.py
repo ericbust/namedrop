@@ -841,16 +841,41 @@ def activate_codex_plugin(payload, refresh):
         require(verified['data'].get('agent_integration_hook_activation', {})
                 .get('codex', {}).get('cache_current') is True,
                 'Codex installation finished but its installed plugin cache could not be verified.')
-        # A handoff from a Rex install runs in the first activation only, and
-        # its report is the one place that names what it did.
+        # A handoff from a Rex install runs in the first activation, and its
+        # report is the one place that names what it did.
         if 'handoff' in data:
-            verified['data'].setdefault('handoff', data['handoff'])
+            verified['data']['handoff'] = carried_handoff(data['handoff'], verified['data'].get('handoff'))
         return verified, 0
     except (OSError, RuntimeError, ValueError, KeyError, subprocess.SubprocessError) as error:
         hook['status'] = 'setup_failed'
         hook['error'] = str(error)
         hook['steps'] = [str(error), 'Resolve the issue and run Activate Namedrop again.', *steps]
         return payload, 1
+
+
+def carried_handoff(first, refreshed):
+    """The first activation's handoff entries, each updated field by field from
+    the refreshed activation's entry for the same state, then the refreshed
+    run's other entries. An unsealed entry makes the refreshed run repeat
+    steps 4 to 6, so its module result is the later one, but only the first
+    run read the bindings, so the unreadable ones it named are kept (the U13
+    review's F5)."""
+    def entries(value):
+        return [entry for entry in value if isinstance(entry, dict)] if isinstance(value, list) else []
+
+    def unreadable(entry):
+        paths = entry.get('invalid_bindings')
+        return paths if isinstance(paths, list) else []
+
+    later = entries(refreshed)
+    merged = []
+    for entry in entries(first):
+        for update in [update for update in later if update.get('state') == entry.get('state')]:
+            later.remove(update)
+            paths = unreadable(entry) + [path for path in unreadable(update) if path not in unreadable(entry)]
+            entry = {**entry, **update, 'invalid_bindings': paths}
+        merged.append(entry)
+    return merged + later
 
 
 MOVING_TO_HERDR = 'Namedrop is moving to Herdr. Run Activate Namedrop in Herdr again.'
