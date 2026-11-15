@@ -71,36 +71,38 @@ pub fn install(
     let home = directories
         .home()
         .ok_or("Namedrop install needs an absolute HOME")?;
-    let socket = crate::mux::home::rex_socket(inherited).ok_or(
-        "Start Rex, or set REX_SERVER to its Unix socket, then run namedrop install again.",
-    )?;
-    let endpoint = Endpoint::parse(&format!("rex:{}", socket.display()));
-    let keymap = rpc(&endpoint, "client.keymap", None).map_err(|e| {
+    let Server {
+        endpoint,
+        keymap,
+        config,
+        module,
+    } = server(inherited, |error| {
         format!(
-            "Start Rex, or set REX_SERVER to its Unix socket, then run namedrop install again. {e}"
+            "Start Rex, or set REX_SERVER to its Unix socket, then run namedrop install again.{}",
+            error.map(|e| format!(" {e}")).unwrap_or_default()
         )
     })?;
-    let config = keymap["config"]["path"]
-        .as_str()
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .ok_or("Rex did not report an absolute config.path")?;
-    let module = config
-        .parent()
-        .ok_or("Rex config has no directory")?
-        .join("namedrop.lua");
     let launcher = crate::runtime_executable()?;
     if input["confirmed"] != true {
+        let writes = targets(home, directories.agent_config(), &config, &module);
+        let writes = writes
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|t| {
+                format!(
+                    "{}: {}",
+                    t["what"].as_str().unwrap_or_default(),
+                    t["path"].as_str().unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
         return Err(format!(
-            "installation requires confirmation: state_directory={}, launcher={}, module={}, config={} with first line {}, rex_registration={}, shared_agent_integration_packages={{{}}}, shell_command={}, Codex sandbox and permissions. Run namedrop install --input-json '{{\"confirmed\":true}}'.",
+            "installation requires confirmation: state_directory={}, launcher={}, first line of the config {}, and {writes}. Run namedrop install --input-json '{{\"confirmed\":true}}'.",
             state.display(),
             launcher.display(),
-            module.display(),
-            config.display(),
             CONFIG_LINE,
-            crate::locator::rex_registration(home).display(),
-            crate::disclosed_user_package_targets(Some(home), directories.agent_config()),
-            home.join(".local/bin/namedrop").display()
         ));
     }
     managed_module(&module)?;
@@ -191,8 +193,92 @@ pub fn install(
         return Err(format!("Namedrop's module is not confirmed: {report}"));
     }
     Ok(
-        json!({"state_directory":state,"module":module,"config":config,"line":line.word(),"config_line":CONFIG_LINE,"manual_config":matches!(line,Line::Printed|Line::Removed),"instruction":format!("Put {CONFIG_LINE} on its own line in {}.", config.display()),"keys":report["keys"],"confirmed":report["confirmed"],"integration_packages":package_report(home),"shell_command":shell,"agent_integration_hook_activation":crate::user_hook_activation_guidance(Some(home),directories.agent_config())}),
+        json!({"state_directory":state,"module":module,"config":config,"line":line.word(),"config_line":CONFIG_LINE,"manual_config":matches!(line,Line::Printed|Line::Removed),"instruction":format!("Put {CONFIG_LINE} on its own line in {}.", config.display()),"keys":report["keys"],"confirmed":report["confirmed"],"integration_packages":package_report(home),"shell_command":shell,"agent_integration_hook_activation":crate::user_hook_activation_guidance(Some(home),directories.agent_config()),"targets":targets(home,directories.agent_config(),&config,&module)}),
     )
+}
+
+/// The Rex server `install` edits, found as `rex_claim` finds it, and the
+/// config path it reports.
+struct Server {
+    endpoint: Endpoint,
+    keymap: Value,
+    config: PathBuf,
+    module: PathBuf,
+}
+
+fn server(
+    inherited: &dyn Inherited,
+    unreachable: impl Fn(Option<&str>) -> String,
+) -> Result<Server, String> {
+    let socket = crate::mux::home::rex_socket(inherited).ok_or_else(|| unreachable(None))?;
+    let endpoint = Endpoint::parse(&format!("rex:{}", socket.display()));
+    let keymap = rpc(&endpoint, "client.keymap", None).map_err(|e| unreachable(Some(&e)))?;
+    let config = keymap["config"]["path"]
+        .as_str()
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .ok_or("Rex did not report an absolute config.path")?;
+    let module = config
+        .parent()
+        .ok_or("Rex config has no directory")?
+        .join("namedrop.lua");
+    Ok(Server {
+        endpoint,
+        keymap,
+        config,
+        module,
+    })
+}
+
+/// Everything a confirmed `install` writes outside the state directory, in
+/// the order `install.sh` lists it.
+fn targets(
+    home: &Path,
+    config_directories: crate::AgentConfigDirectories<'_>,
+    config: &Path,
+    module: &Path,
+) -> Value {
+    let mut targets = vec![
+        ("Rex module", module.to_owned()),
+        (
+            "Rex config line, with a backup beside it",
+            config.to_owned(),
+        ),
+    ];
+    targets.extend(crate::install::package_targets(home, config_directories));
+    Value::Array(
+        targets
+            .into_iter()
+            .map(|(what, path)| json!({"what": what, "path": path}))
+            .collect(),
+    )
+}
+
+/// `install.sh`'s read-only look before it asks: the Rex server `install`
+/// would use, by the same rule, and what `install` would write. It writes
+/// nothing and takes no lock.
+pub fn install_preview(
+    directories: &InheritedDirectories,
+    inherited: &dyn Inherited,
+) -> Result<Value, String> {
+    let home = directories
+        .home()
+        .ok_or("Namedrop install needs an absolute HOME.")?;
+    let found = server(inherited, |error| {
+        match error {
+        Some(error) => format!(
+            "Namedrop found no running Rex server: {}. Start Rex, or set REX_SERVER to its Unix socket, then run sh scripts/install.sh again.",
+            super::error_line(error).trim_end_matches('.')
+        ),
+        _ => "Namedrop cannot tell where Rex's server is. Start Rex, or set REX_SERVER to its Unix socket, then run sh scripts/install.sh again.".into(),
+    }
+    })?;
+    Ok(json!({
+        "server": found.endpoint.key,
+        "config": found.config,
+        "module": found.module,
+        "targets": targets(home, directories.agent_config(), &found.config, &found.module),
+    }))
 }
 
 pub(super) fn install_packages(

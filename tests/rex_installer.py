@@ -72,4 +72,49 @@ with tempfile.TemporaryDirectory(prefix='nd-u7-protocol-',dir='/tmp') as folder:
         try:
             server.wrong=field;p=run(place,server,ok=False);assert b'not confirmed' in p.stdout and b'/another/install' in p.stdout;assert config.read_text().startswith(LINE)
         finally:server.close()
-print('protocol installer guards, rollback, identity, idempotence and removal passed')
+    def tree(place):
+        return {str(p.relative_to(place)):(os.readlink(p) if p.is_symlink() else p.read_bytes() if p.is_file() else None)
+                for p in place.rglob('*') if p.name!='r.sock'}
+    # install.sh lists the preview's targets before it asks, and the report's
+    # after. Every file the install writes must be under one of them.
+    for shell,login in [('/bin/zsh',None),('/bin/bash','.bash_profile'),('/bin/bash',None),('/bin/sh',None)]:
+        place,config,server=case('targets'+shell.replace('/','-')+str(login))
+        try:
+            if login:(place/'home'/login).write_text('# mine\n')
+            extra={'SHELL':shell,'CLAUDE_CONFIG_DIR':str(place/'claude config'),'CODEX_HOME':str(place/'codex home')}
+            env={'HOME':str(place/'home'),'PATH':'/usr/bin:/bin','NAMEDROP_STATE_DIR':str(place/'state'),'REX_SERVER':'unix://'+str(server.socket),**extra}
+            before=tree(place)
+            p=subprocess.run([str(BINARY),'--install-preview'],env=env,input=b'',capture_output=True,timeout=30)
+            assert p.returncode==0,(shell,p)
+            assert tree(place)==before,'the preview wrote a file'
+            preview=json.loads(p.stdout);listed=[(t['what'],t['path']) for t in preview['targets']]
+            assert preview['config']==str(config) and preview['module']==str(config.parent/'namedrop.lua'),preview
+            p=subprocess.run([str(BINARY),'--json','install','--input-json','{"confirmed":true}'],env=env,input=b'',capture_output=True,timeout=30)
+            assert p.returncode==0,(shell,p)
+            report=json.loads(p.stdout)['data']
+            assert [(t['what'],t['path']) for t in report['targets']]==listed,'the report names other targets'
+            after=tree(place);paths=[Path(path) for _,path in listed]+[place/'state']
+            for name in sorted(k for k in after.keys()|before.keys() if before.get(k)!=after.get(k)):
+                path=place/name
+                backup=path.parent==config.parent and path.name.startswith(config.name+'.namedrop-')
+                assert backup or any(path==t or t in path.parents for t in paths),(shell,name,'written but not listed')
+            for what,path in listed:assert Path(path).exists(),(shell,what,path,'listed but not written')
+            startup={path for what,path in listed if what=='PATH lines'}
+            home=place/'home'
+            expected={'/bin/zsh':{home/'.zshrc'},'/bin/bash':{home/'.bashrc',home/(login or '.profile')},'/bin/sh':set()}[shell]
+            assert startup=={str(p) for p in expected},(shell,startup)
+            assert {str(p) for p in report['shell_command']['shell_startup_files']}==startup
+            assert ('Claude Code package',str(home/'.claude/skills/namedrop')) in listed
+            assert ('Codex package',str(home/'.agents/skills/namedrop')) in listed
+            assert ('Claude Code permissions',str(place/'claude config/settings.json')) in listed
+        finally:server.close()
+    # Without a server the preview stops in plain words and writes nothing.
+    place,config,server=case('no-server');server.close()
+    env={'HOME':str(place/'home'),'PATH':'/usr/bin:/bin','REX_SERVER':'unix://'+str(place/'gone.sock'),'SHELL':'/bin/zsh'}
+    before=tree(place)
+    p=subprocess.run([str(BINARY),'--install-preview'],env=env,input=b'',capture_output=True,timeout=30)
+    assert p.returncode==69 and not p.stdout,p
+    message=p.stderr.decode()
+    assert 'Start Rex' in message and 'sh scripts/install.sh again' in message and '{' not in message,message
+    assert tree(place)==before
+print('protocol installer guards, rollback, identity, idempotence, removal and targets passed')
