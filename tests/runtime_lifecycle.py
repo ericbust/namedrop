@@ -336,7 +336,7 @@ else:
         live_checks = []
         def live_preflight(live=False):
             live_checks.append(live)
-            return {'other_servers': [], 'unfinished':1, 'joins':0, 'live_update':live}, [{}]
+            return {'other_servers': [], 'stopped_rex_servers': [], 'unchecked_rex_servers': [], 'unfinished':1, 'joins':0, 'live_update':live}, [{}]
         runtime.preflight = live_preflight
         incoming = release('schema-five')
         try:
@@ -346,7 +346,7 @@ else:
             assert 'pre-launcher tools' in str(error)
         assert live_checks == [True]
         assert runtime.current(schema_state / 'runtime') == previous_schema
-        runtime.preflight = lambda live=False: ({'other_servers': [], 'unfinished':1, 'joins':0, 'live_update':live}, [])
+        runtime.preflight = lambda live=False: ({'other_servers': [], 'stopped_rex_servers': [], 'unchecked_rex_servers': [], 'unfinished':1, 'joins':0, 'live_update':live}, [])
         assert runtime.activate(incoming, ['activate']) == 0
         assert runtime.state_schema(schema_state / 'runtime') == 5
         # Checkouts built before bin/namedrop staging keep activating from
@@ -418,7 +418,7 @@ else:
             assert runtime.current(launcher.parent) == active_before
             assert subprocess.check_output(cached_command, text=True).strip() == 'second'
             broken = release('breaking', epoch=2)
-            runtime.preflight = lambda: ({'other_servers': [], 'unfinished':1, 'joins':0}, [])
+            runtime.preflight = lambda: ({'other_servers': [], 'stopped_rex_servers': [], 'unchecked_rex_servers': [], 'unfinished':1, 'joins':0}, [])
             try:
                 runtime.activate(broken, ['activate'])
                 raise AssertionError('Breaking update accepted unfinished work')
@@ -426,7 +426,7 @@ else:
                 assert 'session refresh' in str(error)
             assert runtime.current(launcher.parent) == active_before
             assert subprocess.check_output(cached_command, text=True).strip() == 'second'
-            runtime.preflight = lambda: ({'other_servers': [], 'unfinished':0, 'joins':0}, [])
+            runtime.preflight = lambda: ({'other_servers': [], 'stopped_rex_servers': [], 'unchecked_rex_servers': [], 'unfinished':0, 'joins':0}, [])
             future = release('future', failure=True, epoch=2, schema=6)
             assert runtime.activate(future, ['activate']) == 7
             assert runtime.current(launcher.parent) != active_before

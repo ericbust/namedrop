@@ -246,6 +246,43 @@ for line in subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True,
         live.append(command + "  ENV " + " ".join(n for n in names if not n.startswith("HERDR_BIN_PATH")))
 for pid in mine:
     subprocess.run(["kill", pid], stderr=subprocess.DEVNULL)
+
+# U4, after the base flow and in a profile of its own so the base flow's
+# timing is untouched: a first publish through `run.sh activate` and
+# runtime.py, from the scripts two levels above the binary, then a live update.
+runtime_home = os.path.join(root_real, "home-runtime")
+runtime_state = os.path.join(root_real, "state-runtime")
+os.makedirs(runtime_state)
+shutil.copy2(os.path.join(TOOLS, "herdr"), os.path.join(root_real, "bin", "herdr"))
+source = os.path.join(os.path.dirname(binary), "..", "..")
+staged = os.path.join(root_real, "source")
+shutil.copytree(os.path.join(source, "scripts"), os.path.join(staged, "scripts"))
+shutil.copy2(os.path.join(source, "runtime.json"), os.path.join(staged, "runtime.json"))
+os.makedirs(os.path.join(staged, "bin"))
+shutil.copy2(binary, os.path.join(staged, "bin", "namedrop"))
+for label in ("runtime-first", "runtime-live"):
+    if label == "runtime-live":
+        # A second executable identity with the same contract makes a live update.
+        if sys.platform == "darwin":
+            subprocess.run(["/usr/bin/codesign", "--force", "--sign", "-", "--identifier", "namedrop-differential-live",
+                            os.path.join(staged, "bin", "namedrop")], check=True, capture_output=True)
+        else:
+            with open(os.path.join(staged, "bin", "namedrop"), "ab") as signed:
+                signed.write(b"\nnamedrop-differential-live\n")
+    full = dict(BASE, HOME=runtime_home, XDG_CONFIG_HOME=os.path.join(runtime_home, ".config"))
+    full.update(plugin("p1"), HERDR_PLUGIN_STATE_DIR=runtime_state)
+    proc = subprocess.run(["/bin/sh", os.path.join(staged, "scripts", "run.sh"), "activate", "--input-json",
+                           '{"confirmed":true}'], env=full, cwd=checkout, capture_output=True, text=True, timeout=60)
+    if proc.returncode:
+        STEP_FAILURES.append((label, proc.returncode))
+    report.append(f"## {label}\nexit={proc.returncode}\n--stdout\n{norm(proc.stdout)}\n--stderr\n{norm(proc.stderr)}")
+    time.sleep(2)
+runtime_live = []
+for line in subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True).stdout.splitlines():
+    pid, _, command = line.strip().partition(" ")
+    if command.startswith(root_real):
+        runtime_live.append(command)
+        subprocess.run(["kill", pid], stderr=subprocess.DEVNULL)
 calls, _ = calls_since(0)
 spawns = open(os.path.join(root_real, "spawns")).read().splitlines() if os.path.exists(os.path.join(root_real, "spawns")) else []
 
@@ -256,7 +293,7 @@ def canon(lines):
 
 def files():
     rows = []
-    for base in (BASE["HOME"], state):
+    for base in (BASE["HOME"], state, runtime_home, runtime_state):
         for folder, dirs, names in os.walk(base):
             links = [name for name in dirs if os.path.islink(os.path.join(folder, name))]
             for name in sorted(names + links):
@@ -284,6 +321,7 @@ with open(os.path.join(out, "report"), "w") as f:
     f.write("\n## herdr calls (set)\n" + "\n".join(canon(calls)))
     f.write("\n## spawns (set)\n" + "\n".join(canon(spawns)) + "\n")
     f.write("## live at the end (set)\n" + "\n".join(canon(live)) + "\n")
+    f.write("## live after the runtime publishes (set)\n" + "\n".join(canon(runtime_live)) + "\n")
     f.write("## files (set)\n" + "\n".join(files()) + "\n")
 _listener.close()
 os.unlink(LINK)

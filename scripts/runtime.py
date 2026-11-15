@@ -18,7 +18,7 @@ import sys
 import tempfile
 import time
 
-from update import require, session_panes, preflight, ready, is_codex, built_executable
+from update import require, session_panes, preflight, ready, rex_notices, is_codex, built_executable
 
 LAUNCHER = '''#!/bin/sh
 # Managed by Namedrop: runtime launcher v1.
@@ -820,6 +820,8 @@ def activate(root, args):
         if previous is not None:
             if not live or contract(runtime / previous)['state_schema'] != incoming['state_schema']:
                 state_before, agents = preflight(live=True) if live else preflight()
+                for notice in rex_notices(state_before):
+                    print(notice, file=sys.stderr)
                 require(ready(state_before, agents),
                         'Some sessions still use pre-launcher tools or incomplete setup. Open Update Namedrop for the specific blockers; nothing was stopped.' if live else
                         'This update needs a session refresh. Open Update Namedrop to install when current work is finished; nothing was stopped.')
@@ -863,6 +865,8 @@ def activate(root, args):
             switch(runtime, target)
         payload = None
         try:
+            with lock(runtime, 'packages.lock'):
+                write_owned(runtime / 'owner', 'herdr\n', 0o600)
             result = subprocess.run([str(launcher), *args], capture_output=True, text=True)
             if result.returncode == 0:
                 payload = json.loads(result.stdout)
@@ -924,7 +928,20 @@ def activate(root, args):
 
 if __name__ == '__main__':
     try:
-        sys.exit(activate(Path(sys.argv[1]).resolve(), sys.argv[2:]))
+        # No argparse: macOS's system Python caches each newly imported module
+        # under HOME, and Herdr's activation writes nothing new there.
+        root, *arguments = sys.argv[1:]
+        if arguments[:1] == ['--state-dir']:
+            require(len(arguments) > 3 and arguments[1] and arguments[2] == '--verify',
+                    'Usage: runtime.py ROOT [--state-dir DIR --verify activate] [ARGUMENT...]')
+            require(arguments[3] == 'activate', f'Unsupported runtime verification: {arguments[3]}')
+            os.environ['HERDR_PLUGIN_STATE_DIR'] = arguments[1]
+            arguments = arguments[4:]
+        # Without them this is run.sh's `ROOT ARGUMENT...`, read as
+        # `--state-dir "$HERDR_PLUGIN_STATE_DIR" --verify activate`. run.sh
+        # keeps that shape because a released updater calls an update live
+        # only when the new run.sh is byte for byte the installed one.
+        sys.exit(activate(Path(root).resolve(), arguments))
     except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError, subprocess.SubprocessError) as error:
         print(f'Namedrop runtime activation stopped: {error}', file=sys.stderr)
         sys.exit(2)

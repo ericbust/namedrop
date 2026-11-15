@@ -45,7 +45,9 @@ def out(value):
 
 
 key = " ".join(args[:2])
-if key == "status server":
+if key == "session list":
+    print(json.dumps({"sessions": []}))
+elif key == "status server":
     print("running: yes\nsocket: " + os.environ.get("SOCK", "/run/h.sock"))
 elif key == "worktree list":
     second = "--workspace" in args and args[args.index("--workspace") + 1] == "w2"
