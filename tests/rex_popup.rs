@@ -225,6 +225,56 @@ fn refusals_before_a_screen_starts_wait_for_a_key_only_in_rex() {
     }
 }
 
+/// Only `ui run` is a screen a person closes. On a Rex home, `ui launch` and
+/// every other command refused before they start exit 69 at once.
+#[test]
+fn refusals_before_any_other_rex_command_exit_69_without_a_key_wait() {
+    let cases: [(&str, Break, &str); 2] = [
+        (
+            "gate",
+            |runtime| fs::write(runtime.join("migration.json"), "{}").unwrap(),
+            "Namedrop activation was interrupted",
+        ),
+        (
+            "runtime",
+            |runtime| fs::write(runtime.join("namedrop"), "not executable").unwrap(),
+            "Could not run the selected Namedrop runtime",
+        ),
+    ];
+    for (case, break_runtime, refusal) in cases {
+        for command in [&["ui", "launch", "name"][..], &["address", "list"]] {
+            let f = Fixture::new();
+            let state = f.0.join("state");
+            fs::create_dir_all(state.join("runtime")).unwrap();
+            break_runtime(&state.join("runtime"));
+            let mut child = untargeted(&f)
+                .env("NAMEDROP_STATE_DIR", &state)
+                .args(["--endpoint", "rex:/tmp/nd-rex-popup-does-not-exist.sock"])
+                .args(command)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            // A key is ready, so a command that waited would close on it
+            // with 0. One that exited first has closed the pipe.
+            let _ = child.stdin.take().unwrap().write_all(b"x");
+            let output = child.wait_with_output().unwrap();
+            let error = String::from_utf8_lossy(&output.stderr);
+            assert_eq!(
+                output.status.code(),
+                Some(69),
+                "{case} {command:?}: {error}"
+            );
+            assert!(error.contains(refusal), "{case} {command:?}: {error}");
+            assert!(
+                !error.contains("Press any key"),
+                "{case} {command:?}: {error}"
+            );
+        }
+    }
+}
+
 /// Herdr closes its own popups, so a Herdr screen's error keeps today's exit
 /// code and never waits for the Rex key.
 #[test]
