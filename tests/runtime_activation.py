@@ -107,6 +107,15 @@ def rex_agent(path, endpoint, pane, *, alias, runtime, status):
                    (endpoint, pane + '-observation', address, session, status))
 
 
+def confirm(answer):
+    """update.confirm_when_ready's output, answering `answer` to its prompt."""
+    shown = io.StringIO()
+    with mock.patch.object(update, 'registration', return_value='installed'), \
+            mock.patch('builtins.input', return_value=answer), contextlib.redirect_stdout(shown):
+        update.confirm_when_ready('installed')
+    return shown.getvalue()
+
+
 def archive(ref, destination):
     repository = os.environ.get('NAMEDROP_TEST_REPOSITORY', str(REPO))
     contents = subprocess.check_output(['git', '-C', repository, 'archive', ref])
@@ -419,10 +428,82 @@ class ActivationChecks(unittest.TestCase):
                 self.assertEqual((state['session_count'], agents), (0, []))
                 self.assertEqual(state['stopped_rex_servers'], sorted(['rex:' + refused, 'rex:' + missing]))
                 self.assertTrue(update.ready(state, agents))
+                notices = ''.join(f'  Not counted: the Rex server at rex:{endpoint} is not running, so its sessions '
+                                  'have ended.\n' for endpoint in sorted([refused, missing]))
+                # The updater names them whether or not they decided the outcome.
+                self.assertIn('\n' + notices + '\n  Ready to install.\n', confirm('n'))
                 rex_agent(path, 'rex:' + listening, 'block', alias='alpha', runtime='claude-code', status='idle')
                 state, agents = update.preflight()
                 self.assertEqual([p['_socket'] for p in agents], ['rex:' + listening])
                 self.assertFalse(update.ready(state, agents))
+                waiting = confirm('2')
+                self.assertIn(notices, waiting)
+                self.assertNotIn('Ready to install.', waiting)
+
+    def test_runtime_preflight_names_rex_servers_it_left_out(self):
+        with tempfile.TemporaryDirectory(prefix='namedrop-u4-') as directory, rex_server() as listening:
+            base = Path(directory)
+            env = environment(base)
+            root = base / 'checkout'
+            shutil.copytree(REPO / 'scripts', root / 'scripts')
+            fixture_release(root)
+            self.assertEqual(invoke(root, env, explicit=False).returncode, 0)
+            path = base / 'state/namedrop.sqlite3'
+            path.unlink()
+            schema(path)
+            missing = str(Path(listening).with_name('missing.sock'))
+            rex_agent(path, 'rex:' + missing, 'block', alias='alpha', runtime='claude-code', status='idle')
+            fixture_release(root, number=2, state_schema=9)  # a session refresh, which runs the preflight
+            result = invoke(root, env, explicit=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(f'Not counted: the Rex server at rex:{missing} is not running, so its sessions have ended.\n',
+                          result.stderr)
+
+    def test_rex_preflight_counts_servers_it_cannot_check(self):
+        # Only a refused or missing socket shows a stopped server. A denied
+        # one, a timeout or a path that is not a Unix socket may hide a live
+        # server, so its sessions count, and the updater says why.
+        with tempfile.TemporaryDirectory(prefix='namedrop-u4-') as directory, rex_server() as listening:
+            base = Path(directory)
+            env = environment(base)
+            path = base / 'state/namedrop.sqlite3'
+            schema(path)
+            locked = Path(listening).with_name('locked')
+            locked.mkdir()
+            denied = str(locked / 'rex.sock')
+            long = str(Path(listening).with_name('x' * 110 + '.sock'))
+            with contextlib.ExitStack() as stack:
+                held = stack.enter_context(contextlib.closing(socketlib.socket(socketlib.AF_UNIX, socketlib.SOCK_STREAM)))
+                held.bind(denied)
+                held.listen(16)
+                locked.chmod(0)
+                stack.callback(locked.chmod, 0o700)
+                expected = [('rex:' + long, None), ('rex:relative/rex.sock', 'not a Unix socket path')]
+                if os.geteuid() != 0:  # root enters a mode-000 directory
+                    expected.append(('rex:' + denied, 'Permission denied'))
+                for number, (endpoint, _) in enumerate(expected):
+                    rex_agent(path, endpoint, f'block{number}', alias=f'alpha{number}', runtime='claude-code', status='idle')
+                with mock.patch.dict(os.environ, env, clear=True):
+                    state, agents = update.preflight()
+                    self.assertEqual(state['stopped_rex_servers'], [])
+                    unchecked = dict(state['unchecked_rex_servers'])
+                    self.assertEqual(sorted(unchecked), sorted(endpoint for endpoint, _ in expected))
+                    for endpoint, why in expected:
+                        if why is not None:
+                            self.assertEqual(unchecked[endpoint], why)
+                    self.assertEqual(sorted(p['_socket'] for p in agents), sorted(unchecked))
+                    self.assertEqual(state['session_count'], len(expected))
+                    self.assertFalse(update.ready(state, agents))
+                    waiting = confirm('2')
+                    for endpoint, why in unchecked.items():
+                        self.assertIn(f'  Counted: could not check the Rex server at {endpoint} ({why}), so its '
+                                      'sessions count as open.\n', waiting)
+                    self.assertNotIn('Not counted', waiting)
+                    # A connect that times out, as a server that has stopped
+                    # accepting does on Linux.
+                    with mock.patch.object(socketlib.socket, 'connect', side_effect=socketlib.timeout('timed out')):
+                        self.assertEqual(update.rex_server_check('rex:' + listening), 'timed out')
+                    self.assertIsNone(update.rex_server_check('rex:' + listening))
 
     def test_unknown_store_schema_keeps_its_message(self):
         with tempfile.TemporaryDirectory(prefix='namedrop-u4-') as directory:

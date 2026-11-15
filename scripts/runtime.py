@@ -18,7 +18,7 @@ import sys
 import tempfile
 import time
 
-from update import require, session_panes, preflight, ready, is_codex, built_executable
+from update import require, session_panes, preflight, ready, rex_notices, is_codex, built_executable
 
 LAUNCHER = '''#!/bin/sh
 # Managed by Namedrop: runtime launcher v1.
@@ -820,6 +820,8 @@ def activate(root, args):
         if previous is not None:
             if not live or contract(runtime / previous)['state_schema'] != incoming['state_schema']:
                 state_before, agents = preflight(live=True) if live else preflight()
+                for notice in rex_notices(state_before):
+                    print(notice, file=sys.stderr)
                 require(ready(state_before, agents),
                         'Some sessions still use pre-launcher tools or incomplete setup. Open Update Namedrop for the specific blockers; nothing was stopped.' if live else
                         'This update needs a session refresh. Open Update Namedrop to install when current work is finished; nothing was stopped.')

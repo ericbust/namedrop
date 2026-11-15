@@ -308,33 +308,40 @@ def session_panes():
     return panes, unverified
 
 
-def rex_server_listens(endpoint):
+def rex_server_check(endpoint):
+    """None when the Rex server at `endpoint` accepts a connection, 'stopped'
+    when its socket refuses one or is missing, and otherwise why the server
+    could not be checked. Only a refused or missing socket shows that the
+    server has stopped: a denied socket or a timeout may hide a live one."""
     # Imported here: macOS's system Python caches a newly imported module
     # under HOME, and an update with no Rex session writes nothing new there.
     import socket
     path = endpoint.removeprefix('rex:')
     if not os.path.isabs(path):
-        return False
+        return 'not a Unix socket path'
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
         probe.settimeout(2)
         try:
             probe.connect(path)
-        except OSError:
-            return False
-    return True
+        except (ConnectionRefusedError, FileNotFoundError):
+            return 'stopped'
+        except OSError as error:
+            return error.strerror or str(error) or type(error).__name__
+    return None
 
 
 def rex_session_panes():
     """The Rex-bound agent sessions in the store, which Herdr's survey cannot
-    see, and the stopped Rex servers whose sessions were left out. Only a
-    running server can record that a session ended, so a stopped server's
-    last sessions would otherwise be counted for ever."""
+    see; the stopped Rex servers whose sessions were left out; and the Rex
+    servers that could not be checked, with why, whose sessions are counted.
+    Only a running server can record that a session ended, so a stopped
+    server's last sessions would otherwise be counted for ever."""
     path = Path(os.environ['HERDR_PLUGIN_STATE_DIR']) / 'namedrop.sqlite3'
     if not path.is_file():
-        return [], []  # durable_state refuses a missing store with its own message
+        return [], [], []  # durable_state refuses a missing store with its own message
     with contextlib.closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=2)) as db:
         if db.execute('PRAGMA user_version').fetchone()[0] not in SCHEMAS:
-            return [], []  # and an unknown schema, a store with no tables included
+            return [], [], []  # and an unknown schema, a store with no tables included
         # The latest observation since the binding, as src/store.rs reads it.
         latest = """FROM agent_session_observations o
                  WHERE o.session_socket_id=b.session_socket_id AND o.worktree_id=b.worktree_id
@@ -355,13 +362,14 @@ def rex_session_panes():
                 WHERE b.active=1 AND a.retired=0 AND b.session_socket_id LIKE 'rex:%')
             WHERE session != ''
             ORDER BY endpoint, space, pane""").fetchall()
-    listening = {endpoint: rex_server_listens(endpoint) for endpoint in sorted({row[0] for row in rows})}
+    checked = {endpoint: rex_server_check(endpoint) for endpoint in sorted({row[0] for row in rows})}
     # Herdr's names for the agent kinds the integration registers.
     agents = {'claude-code': 'claude', 'codex': 'codex'}
     panes = [dict(_socket=endpoint, workspace_id=space, pane_id=pane, tab_id=tab, label=alias,
                   agent=agents.get(runtime, runtime), agent_session={'value': session}, agent_status=status)
-             for endpoint, space, pane, tab, session, status, alias, runtime in rows if listening[endpoint]]
-    return panes, [endpoint for endpoint, up in listening.items() if not up]
+             for endpoint, space, pane, tab, session, status, alias, runtime in rows if checked[endpoint] != 'stopped']
+    return (panes, [endpoint for endpoint, check in checked.items() if check == 'stopped'],
+            [(endpoint, check) for endpoint, check in checked.items() if check not in (None, 'stopped')])
 
 
 def preflight(live=False):
@@ -371,11 +379,12 @@ def preflight(live=False):
                 and p.get("workspace_id") == os.environ["HERDR_WORKSPACE_ID"]
                 and p['_socket'] == current_socket for p in panes),
             "The source pane/workspace is not present on this server.")
-    rex_panes, stopped = rex_session_panes()
+    rex_panes, stopped, unchecked = rex_session_panes()
     panes.extend(rex_panes)
     state = durable_state(panes, bool(unverified))
     state['other_servers'] = unverified
     state['stopped_rex_servers'] = stopped
+    state['unchecked_rex_servers'] = unchecked
     agents = [p for p in panes if p.get("agent") or p.get("agent_session")
               or (p['_socket'], p.get('terminal_id')) in state['terminals']]
     state['live_update'] = live
@@ -442,6 +451,14 @@ def show_agents(panes, metadata):
         print(safe(line))
 
 
+def rex_notices(state):
+    """What the preflight did with each Rex server that accepted no connection."""
+    return ([f"Not counted: the Rex server at {safe(server)} is not running, so its sessions have ended."
+             for server in state['stopped_rex_servers']] +
+            [f"Counted: could not check the Rex server at {safe(server)} ({safe(why)}), so its sessions count as open."
+             for server, why in state['unchecked_rex_servers']])
+
+
 def ready(state, agents):
     return not (agents or state['other_servers'] or
                 not state.get('live_update') and (state['unfinished'] or state['joins']))
@@ -455,6 +472,11 @@ def confirm_when_ready(before, live=False):
         require(registration() == before, "Installed source/ref changed. Reopen Update Namedrop to review it.")
         state, agents = preflight(live)
         if ready(state, agents):
+            notices = rex_notices(state)
+            if notices:
+                print()
+            for notice in notices:
+                print("  " + notice)
             print("\n  Ready to install.")
             if live:
                 print(f"  {state['session_count']} open sessions can keep working. Pending handoffs stay in place.")
@@ -475,7 +497,7 @@ def confirm_when_ready(before, live=False):
         current = ([{k: pane.get(k) for k in ('_socket', 'pane_id', 'workspace_id', 'tab_id',
                     'agent', 'agent_session', 'agent_status', 'label', 'title', 'terminal_title_stripped')}
                     for pane in agents], state['details'], state['joins'], state['other_servers'],
-                   state['stopped_rex_servers'])
+                   state['stopped_rex_servers'], state['unchecked_rex_servers'])
         changed = current != previous
         if changed:
             metadata = labels(agents)
@@ -490,8 +512,8 @@ def confirm_when_ready(before, live=False):
                 print("  Held or uncertain handoffs need review in handoff status/inbox.")
             for server in state['other_servers']:
                 print("  Could not check another Herdr session: " + safe(server))
-            for server in state['stopped_rex_servers']:
-                print("  Not counted: the Rex server at " + safe(server) + " is not running, so its sessions have ended.")
+            for notice in rex_notices(state):
+                print("  " + notice)
             if live:
                 if state.get('activation_pending'):
                     print("\n  Complete Activate Namedrop before starting fresh sessions; initial setup has not finished.")
