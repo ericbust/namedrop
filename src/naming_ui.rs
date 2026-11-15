@@ -105,15 +105,21 @@ pub(super) fn launch_in_runtime(
 }
 
 fn target_pane(runtime: &Runtime<'_>) -> Result<DiscoveredPane, String> {
-    let workspace = runtime
-        .workspace_id
-        .ok_or("This popup is missing its invoking space")?;
+    let kind = runtime.mux.endpoint().kind;
+    let workspace = runtime.workspace_id.ok_or(kind.text(
+        "This popup is missing its invoking space",
+        "This screen is missing its invoking session",
+    ))?;
     discover_worktree_for_workspace(runtime.mux, workspace)?
         .panes
         .into_iter()
         .find(|p| Some(p.pane_id.as_str()) == runtime.current_pane_id)
         .ok_or_else(|| {
-            "The invoking pane has closed. Open the popup again from your pane.".to_owned()
+            kind.text(
+                "The invoking pane has closed. Open the popup again from your pane.",
+                "The invoking pane has closed. Open the screen again from your pane.",
+            )
+            .to_owned()
         })
 }
 
@@ -122,6 +128,7 @@ fn target_terminal(runtime: &Runtime<'_>) -> Result<String, String> {
 }
 
 pub(super) fn run(options: &RuntimeOptions, inherited: &dyn Inherited, mode: UiMode) -> ExitCode {
+    super::popup_input::host_for(options, inherited);
     if mode == UiMode::Status {
         let observing = observing_pane(options, inherited);
         return crate::agent_status_ui::run(options, inherited, observing.as_deref());
@@ -165,12 +172,25 @@ fn run_prompt(
     inherited: &dyn Inherited,
     mode: UiMode,
 ) -> Result<(), String> {
-    let workspace = env::var("NAMEDROP_TARGET_WORKSPACE")
-        .map_err(|_| "This popup is missing its invoking space")?;
-    let pane =
-        env::var("NAMEDROP_TARGET_PANE").map_err(|_| "This popup is missing its invoking pane")?;
-    let terminal = env::var("NAMEDROP_TARGET_TERMINAL")
-        .map_err(|_| "This popup is missing its invoking terminal")?;
+    let kind = super::popup_input::host();
+    let workspace = env::var("NAMEDROP_TARGET_WORKSPACE").map_err(|_| {
+        kind.text(
+            "This popup is missing its invoking space",
+            "This screen is missing its invoking session",
+        )
+    })?;
+    let pane = env::var("NAMEDROP_TARGET_PANE").map_err(|_| {
+        kind.text(
+            "This popup is missing its invoking pane",
+            "This screen is missing its invoking pane",
+        )
+    })?;
+    let terminal = env::var("NAMEDROP_TARGET_TERMINAL").map_err(|_| {
+        kind.text(
+            "This popup is missing its invoking terminal",
+            "This screen is missing its invoking terminal",
+        )
+    })?;
     // Empty when the pane held no agent session as the popup opened.
     let session = env::var("NAMEDROP_TARGET_SESSION").unwrap_or_default();
     with_runtime_options(options, inherited, |runtime| {
@@ -180,9 +200,12 @@ fn run_prompt(
             ..*runtime
         };
         if target_terminal(&targeted)? != terminal {
-            return Err(
-                "The invoking pane changed. Close this popup and open it again.".to_owned(),
-            );
+            return Err(kind
+                .text(
+                    "The invoking pane changed. Close this popup and open it again.",
+                    "The invoking pane changed. Close this screen and open it again.",
+                )
+                .to_owned());
         }
         match mode {
             UiMode::Name => name_prompt(&targeted, &terminal).map(drop),
@@ -273,23 +296,9 @@ fn doctor_prompt(runtime: &Runtime<'_>, terminal: &str, session: &str) -> Result
                         );
                     }
                     match namedrop::request_doctor_assistance(runtime, session) {
-                        // The pane's agent may be unnamed, so name the pane
-                        // rather than echoing a mention that may not exist.
-                        Ok(_) => {
+                        Ok(accepted) => {
                             clear_screen();
-                            say(
-                                Tone::Plain,
-                                runtime.mux.endpoint().kind.text(
-                                    "Herdr accepted the prompt. That is not the agent acting,\n\
-                                 and no issue is fixed yet.\n\n\
-                                 Go back to the pane you opened Doctor from for the agent's\n\
-                                 report and any steps it needs from you.\n",
-                                    "Rex accepted the prompt. That is not the agent acting,\n\
-                                  and no issue is fixed yet.\n\n\
-                                  Go back to the pane you opened Doctor from for the agent's\n\
-                                  report and any steps it needs from you.\n",
-                                ),
-                            );
+                            say(Tone::Plain, accepted);
                             say(Tone::Keys, "Enter or Esc closes");
                             io::stdout().flush().map_err(|e| e.to_string())?;
                             let mut key = [0];
@@ -320,7 +329,7 @@ fn name_prompt(runtime: &Runtime<'_>, terminal: &str) -> Result<Option<String>, 
     if runtime.mux.endpoint().kind == namedrop::mux::MuxKind::Rex {
         let workspace = runtime
             .workspace_id
-            .ok_or("This popup is missing its invoking space")?;
+            .ok_or("This screen is missing its invoking session")?;
         let active = match namedrop::StateStore::open_read_only(runtime.state_directory)
             .map_err(|e| e.to_string())?
         {

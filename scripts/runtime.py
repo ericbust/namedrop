@@ -166,12 +166,22 @@ def gate_holders(path):
     return sorted(holders)
 
 
+def standalone_owner(runtime):
+    """Whether `runtime` belongs to a standalone (Rex) install, whose
+    Namedrop screens are Rex screens, not Herdr popups."""
+    try:
+        return (runtime / 'owner').read_text().strip() == 'standalone'
+    except (OSError, ValueError):
+        return False
+
+
 def busy_gate_message(path):
     """Each holder is (PID, Namedrop subcommand, whether its release holds the
     gate only per job: True, False before 1.7.0, None when not a release)."""
+    screen = 'screen' if standalone_owner(path.parent) else 'popup'
     holders = gate_holders(path)
     if not holders:
-        return ('Namedrop commands are still finishing. Close any open Namedrop popup, such as the tour, '
+        return (f'Namedrop commands are still finishing. Close any open Namedrop {screen}, such as the tour, '
                 'and retry the update; agent sessions can stay open.')
     named = ' '.join(f'PID {pid} ({what}) holds the command lock.' for pid, what, _ in holders)
     popups = [pid for pid, what, _ in holders if ' ui ' in f' {what} ']
@@ -183,7 +193,7 @@ def busy_gate_message(path):
     working = [pid for pid, _, _ in holders if pid not in popups + old_workers]
     steps = []
     if popups:
-        steps.append('close the open Namedrop popup, such as the tour')
+        steps.append(f'close the open Namedrop {screen}, such as the tour')
     if old_workers:
         steps.append("stop the status worker from the earlier version with `kill "
                      + ' '.join(map(str, old_workers)) + '`, which loses nothing because its events stay queued')
@@ -1197,7 +1207,6 @@ if __name__ == '__main__':
         # No argparse: macOS's system Python caches each newly imported module
         # under HOME, and Herdr's activation writes nothing new there.
         root, *arguments = sys.argv[1:]
-        verify = 'activate'
         if arguments[:1] == ['--state-dir']:
             require(len(arguments) > 3 and arguments[1] and arguments[2] == '--verify',
                     'Usage: runtime.py ROOT [--state-dir DIR --verify activate] [ARGUMENT...]')

@@ -81,42 +81,95 @@ impl RuntimeOptions {
     }
 }
 
+/// Each help line that names Herdr or its popups and plugin, and the line a
+/// Rex home shows in its place. Clap drops a doc comment's final period, so
+/// neither column has one.
+const REX_HELP: [(&str, &str); 9] = [
+    (
+        "Name and @mention AI agents and terminal panes to collaborate inside Herdr",
+        "Name and @mention AI agents and terminal panes to collaborate inside Rex",
+    ),
+    (
+        "Activate Namedrop for this Herdr space after confirmation",
+        "Activate Namedrop for this Rex session after confirmation",
+    ),
+    (
+        "Deactivate Namedrop for this Herdr space while preserving its data",
+        "Deactivate Namedrop for this Rex session while preserving its data",
+    ),
+    (
+        "Create and manage agent names in this Herdr space",
+        "Create and manage agent names in this Rex session",
+    ),
+    (
+        "Pause or resume all collaboration in this Herdr space",
+        "Pause or resume all collaboration in this Rex session",
+    ),
+    (
+        "Bind a name to a live Herdr pane",
+        "Bind a name to a live Rex pane",
+    ),
+    (
+        "Open a naming, name-management, Doctor, agent status, or tour popup",
+        "Open a naming, name-management, Doctor, agent status, or tour screen",
+    ),
+    (
+        "Recover after a plugin restart; ambiguous in-flight delivery attempts are held",
+        "Recover after a restart; ambiguous in-flight delivery attempts are held",
+    ),
+    (
+        "Plugin-owned state directory for this installed hook",
+        "Namedrop's state directory for this installed hook",
+    ),
+];
+
+/// The commands a Rex home hides, because only Herdr runs them, and the line
+/// each shows when asked for its help.
+const REX_HIDDEN: [(&str, &str); 2] = [
+    (
+        "Handle one Herdr lifecycle event",
+        "Handle one lifecycle event; Rex sends none",
+    ),
+    (
+        "Add Namedrop's popup shortcuts without replacing any existing binding",
+        "Unused on Rex, whose shortcuts come from namedrop.lua",
+    ),
+];
+
 impl Cli {
     pub fn command_for(kind: crate::mux::MuxKind) -> clap::Command {
         fn rex(command: clap::Command) -> clap::Command {
-            let about = match command.get_about().map(|text| text.to_string()).as_deref() {
-                Some(
-                    "Name and @mention AI agents and terminal panes to collaborate inside Herdr",
-                ) => {
-                    Some("Name and @mention AI agents and terminal panes to collaborate inside Rex")
-                }
-                Some("Activate Namedrop for this Herdr space after confirmation") => {
-                    Some("Activate Namedrop for this Rex space after confirmation.")
-                }
-                Some("Deactivate Namedrop for this Herdr space while preserving its data") => {
-                    Some("Deactivate Namedrop for this Rex space while preserving its data.")
-                }
-                Some("Create and manage agent names in this Herdr space") => {
-                    Some("Create and manage agent names in this Rex space.")
-                }
-                Some("Pause or resume all collaboration in this Herdr space") => {
-                    Some("Pause or resume all collaboration in this Rex space.")
-                }
-                Some("Handle one Herdr lifecycle event") => Some("Handle one Rex lifecycle event."),
-                Some("Bind a name to a live Herdr pane") => Some("Bind a name to a live Rex pane."),
-                _ => None,
+            let about = command.get_about().map(|text| text.to_string());
+            let command = match REX_HELP
+                .iter()
+                .find(|(herdr, _)| about.as_deref() == Some(*herdr))
+            {
+                Some((_, rex)) => command.about(*rex),
+                None => command,
             };
-            let command = if let Some(about) = about {
-                command.about(about)
-            } else {
-                command
+            let command = match REX_HIDDEN
+                .iter()
+                .find(|(herdr, _)| about.as_deref() == Some(*herdr))
+            {
+                Some((_, rex)) => command.about(*rex).hide(true),
+                None => command,
             };
             command
-                .mut_args(|arg| match arg.get_id().as_str() {
-                    "endpoint" => arg.visible_alias(None).alias("herdr-socket"),
-                    "space" => arg.visible_alias(None).alias("herdr-workspace"),
-                    "pane" => arg.visible_alias(None).alias("herdr-pane"),
-                    _ => arg,
+                .mut_args(|arg| {
+                    let help = arg.get_help().map(|text| text.to_string());
+                    let arg = match REX_HELP
+                        .iter()
+                        .find(|(herdr, _)| help.as_deref() == Some(*herdr))
+                    {
+                        Some((_, rex)) => arg.help(*rex),
+                        None => arg,
+                    };
+                    match arg.get_id().as_str() {
+                        "endpoint" => arg.visible_alias(None).alias("herdr-socket"),
+                        "space" => arg.visible_alias(None).alias("herdr-workspace"),
+                        "pane" => arg.visible_alias(None).alias("herdr-pane"),
+                        _ => arg,
+                    }
                 })
                 .mut_subcommands(rex)
         }

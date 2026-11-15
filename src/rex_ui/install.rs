@@ -229,7 +229,7 @@ pub fn install(
         return Err(format!("Namedrop's module is not confirmed: {report}"));
     }
     Ok(
-        json!({"state_directory":state,"module":module,"config":config,"line":line.word(),"config_line":CONFIG_LINE,"manual_config":matches!(line,Line::Printed|Line::Removed),"instruction":format!("Put {CONFIG_LINE} on its own line in {}.", config.display()),"reason":reason,"keys":report["keys"],"confirmed":report["confirmed"],"integration_packages":package_report(home),"shell_command":shell,"agent_integration_hook_activation":crate::user_hook_activation_guidance(Some(home),directories.agent_config()),"targets":listed(targets(home,directories.agent_config(),&config,&module))}),
+        json!({"state_directory":state,"module":module,"config":config,"line":line.word(),"config_line":CONFIG_LINE,"manual_config":matches!(line,Line::Printed|Line::Removed),"instruction":format!("Put {CONFIG_LINE} on its own line in {}.", config.display()),"reason":reason,"keys":report["keys"],"confirmed":report["confirmed"],"integration_packages":package_report(home),"shell_command":shell,"agent_integration_hook_activation":crate::user_hook_activation_guidance(Some(home),directories.agent_config(),crate::mux::MuxKind::Rex),"targets":listed(targets(home,directories.agent_config(),&config,&module))}),
     )
 }
 

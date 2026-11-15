@@ -65,6 +65,7 @@ pub(super) fn run(
     inherited: &dyn Inherited,
     observing_pane: Option<&str>,
 ) -> ExitCode {
+    super::popup_input::host_for(options, inherited);
     match run_popup(options, inherited, observing_pane) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -90,12 +91,25 @@ fn run_popup(
     inherited: &dyn Inherited,
     observing_pane: Option<&str>,
 ) -> Result<(), String> {
-    let workspace = env::var("NAMEDROP_TARGET_WORKSPACE")
-        .map_err(|_| "This popup is missing its invoking space")?;
-    let pane =
-        env::var("NAMEDROP_TARGET_PANE").map_err(|_| "This popup is missing its invoking pane")?;
-    let terminal = env::var("NAMEDROP_TARGET_TERMINAL")
-        .map_err(|_| "This popup is missing its invoking terminal")?;
+    let kind = super::popup_input::host();
+    let workspace = env::var("NAMEDROP_TARGET_WORKSPACE").map_err(|_| {
+        kind.text(
+            "This popup is missing its invoking space",
+            "This screen is missing its invoking session",
+        )
+    })?;
+    let pane = env::var("NAMEDROP_TARGET_PANE").map_err(|_| {
+        kind.text(
+            "This popup is missing its invoking pane",
+            "This screen is missing its invoking pane",
+        )
+    })?;
+    let terminal = env::var("NAMEDROP_TARGET_TERMINAL").map_err(|_| {
+        kind.text(
+            "This popup is missing its invoking terminal",
+            "This screen is missing its invoking terminal",
+        )
+    })?;
     // Empty when the pane held no agent session as the popup opened.
     let session = env::var("NAMEDROP_TARGET_SESSION")
         .ok()
@@ -207,12 +221,28 @@ pub(crate) fn latest_identity<M: MuxRead, C, I>(
         .find(|candidate| candidate.pane_id == pane)
     else {
         return Identity::Changed(
-            "The invoking pane has closed. Open the popup again from your pane.".to_owned(),
+            runtime
+                .mux
+                .endpoint()
+                .kind
+                .text(
+                    "The invoking pane has closed. Open the popup again from your pane.",
+                    "The invoking pane has closed. Open the screen again from your pane.",
+                )
+                .to_owned(),
         );
     };
     if latest.terminal_id != terminal {
         return Identity::Changed(
-            "The invoking pane was replaced. Close this popup and open it again.".to_owned(),
+            runtime
+                .mux
+                .endpoint()
+                .kind
+                .text(
+                    "The invoking pane was replaced. Close this popup and open it again.",
+                    "The invoking pane was replaced. Close this screen and open it again.",
+                )
+                .to_owned(),
         );
     }
     // Compared exactly, both ways: a pane that gained an agent since the popup
@@ -220,7 +250,15 @@ pub(crate) fn latest_identity<M: MuxRead, C, I>(
     let now = latest.agent_session_id().map(|id| id.as_str().to_owned());
     if now.as_deref() != session {
         return Identity::Changed(
-            "This pane started a new agent session. Close this popup and open it again.".to_owned(),
+            runtime
+                .mux
+                .endpoint()
+                .kind
+                .text(
+                    "This pane started a new agent session. Close this popup and open it again.",
+                    "This pane started a new agent session. Close this screen and open it again.",
+                )
+                .to_owned(),
         );
     }
     Identity::Same
@@ -394,7 +432,11 @@ pub(crate) fn popup<R: Read, W: Write>(
                 Key::Close => break,
                 Key::Refresh if state.frozen => {
                     state.notice = Some(
-                        "This pane changed. Close this popup and open it again from your pane."
+                        super::popup_input::host()
+                            .text(
+                                "This pane changed. Close this popup and open it again from your pane.",
+                                "This pane changed. Close this screen and open it again from your pane.",
+                            )
                             .to_owned(),
                     );
                 }

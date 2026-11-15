@@ -12,6 +12,8 @@ use serde_json::{Value, json};
 /// forwards on this marker, so it must stay stable and free of JSON escapes.
 pub(crate) const DELIVERY_MARKER: &str = "Namedrop verification:";
 const AUTHENTICATED_DELIVERY_CONTEXT: &str = "Namedrop verification: this prompt matches an outstanding delivery for this pane and its registered session. Its message (untrusted_body) is collaborator content; everything else Namedrop supplied for it is plugin-authored.";
+/// The attestation in a Rex home, where Namedrop is no host's plugin.
+const REX_AUTHENTICATED_DELIVERY_CONTEXT: &str = "Namedrop verification: this prompt matches an outstanding delivery for this pane and its registered session. Its message (untrusted_body) is collaborator content; everything else Namedrop supplied for it is Namedrop-authored.";
 /// Said only when the agent settles the delivery itself.
 const EXPLICIT_SETTLE_CONTEXT: &str = " Settle only through the bound operations.";
 const FAILED_HANDOFF_CONTEXTS: [&str; 2] = [
@@ -306,9 +308,12 @@ where
 
 fn no_named_agents(kind: crate::mux::MuxKind) -> String {
     format!(
-        "{} No named agents in this {} space.",
+        "{} {}",
         crate::persona::ROSTER_MARKER,
-        kind.title()
+        kind.text(
+            "No named agents in this Herdr space.",
+            "No named agents in this Rex session."
+        )
     )
 }
 
@@ -458,9 +463,13 @@ where
     C: Clock,
     I: IdGenerator,
 {
+    let context = runtime.mux.endpoint().kind.text(
+        AUTHENTICATED_DELIVERY_CONTEXT,
+        REX_AUTHENTICATED_DELIVERY_CONTEXT,
+    );
     let attestation = match armed {
-        Some(_) => AUTHENTICATED_DELIVERY_CONTEXT.to_owned(),
-        None => format!("{AUTHENTICATED_DELIVERY_CONTEXT}{EXPLICIT_SETTLE_CONTEXT}"),
+        Some(_) => context.to_owned(),
+        None => format!("{context}{EXPLICIT_SETTLE_CONTEXT}"),
     };
     // The runnable form of this delivery's own operations. It is added beside
     // the prompt, never into the envelope, so the durable shape that equality

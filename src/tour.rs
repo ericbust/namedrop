@@ -248,27 +248,50 @@ pub fn all_for(kind: crate::mux::MuxKind) -> Result<Vec<Presentation>, String> {
     let mut presentations = all()?;
     if kind == crate::mux::MuxKind::Rex {
         let palette = |name: &str| {
-            let title = crate::rex_ui::ACTIONS
+            crate::rex_ui::ACTIONS
                 .iter()
                 .find(|action| action.name == name)
                 .expect("the tour names a palette action")
-                .title;
-            format!("Run {title} from Rex's palette")
+                .title
         };
-        let keys = [
-            ("Press Prefix, then Shift-S", palette("status")),
-            ("Press Prefix, then Shift-H", palette("doctor")),
-            ("Press Prefix, then Shift-M", palette("manage")),
-            ("Press Prefix, then Shift-O", palette("tour")),
+        // Each Herdr phrase and its Rex words. Every one must be found, so a
+        // reworded Herdr page cannot leave its Herdr keys on a Rex tour.
+        let phrases = [
+            ("this Herdr workspace", "this Rex session".to_owned()),
+            (
+                "Press Prefix, then Shift-S to see",
+                format!("Run {} from Rex's palette to see", palette("status")),
+            ),
+            (
+                "Press Prefix, then Shift-H to open Namedrop Doctor.",
+                format!("Run {} from Rex's palette.", palette("doctor")),
+            ),
+            (
+                "Press Prefix, then Shift-M to manage names:",
+                format!("Run {} from Rex's palette to", palette("manage")),
+            ),
+            (
+                "Press Prefix, then Shift-O to open this tour again.",
+                format!(
+                    "Run {} from Rex's palette to read these pages again.",
+                    palette("tour")
+                ),
+            ),
         ];
-        for presentation in &mut presentations {
-            for page in &mut presentation.pages {
-                for line in &mut page.body {
-                    *line = line.replace("this Herdr workspace", "this Rex session");
-                    for (herdr, rex) in &keys {
-                        *line = line.replace(herdr, rex);
+        for (phrase, rex) in &phrases {
+            let mut found = false;
+            for presentation in &mut presentations {
+                for page in &mut presentation.pages {
+                    for line in &mut page.body {
+                        if line.contains(phrase) {
+                            found = true;
+                            *line = line.replace(phrase, rex);
+                        }
                     }
                 }
+            }
+            if !found {
+                return Err(format!("the tour has no {phrase:?} to give its Rex words"));
             }
         }
     }
@@ -424,8 +447,11 @@ where
     crate::open_popup(runtime, PopupScreen::Tour, target.facts()).map_err(|error| match error {
         MuxError::Protocol(error) => {
             format!(
-                "{} returned an unreadable popup result: {error}",
-                runtime.mux.endpoint().kind.title()
+                "{}: {error}",
+                runtime.mux.endpoint().kind.text(
+                    "Herdr returned an unreadable popup result",
+                    "Rex returned an unreadable screen result"
+                )
             )
         }
         error => error.to_string(),
@@ -502,8 +528,11 @@ where
         .map_err(|error| match error {
             MuxError::Protocol(error) => {
                 format!(
-                    "{} returned an unreadable popup result: {error}",
-                    runtime.mux.endpoint().kind.title()
+                    "{}: {error}",
+                    runtime.mux.endpoint().kind.text(
+                        "Herdr returned an unreadable popup result",
+                        "Rex returned an unreadable screen result"
+                    )
                 )
             }
             error => error.to_string(),

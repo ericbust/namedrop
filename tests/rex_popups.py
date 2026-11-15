@@ -246,7 +246,7 @@ def main():
             failer = root / "refuse"
             failer.write_text('#!/bin/sh\nsleep ' + str(delay) + '\nexec "' + str(launcher) + '" --endpoint "' + endpoint + '" ui run name\n')
             failer.chmod(0o700)
-            refused_until_key(open_layer([str(failer)]), "This popup is missing its invoking space",
+            refused_until_key(open_layer([str(failer)]), "This screen is missing its invoking session",
                               "refusal after " + str(delay) + "s")
             evidence["checks"].append("refusal after " + str(delay) + "s waits for one key")
         missing = root / "removed-launcher"

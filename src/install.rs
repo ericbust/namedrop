@@ -259,6 +259,7 @@ pub(crate) fn package_targets(
 pub(crate) fn user_hook_activation_guidance(
     home_directory: Option<&Path>,
     config: AgentConfigDirectories<'_>,
+    kind: crate::mux::MuxKind,
 ) -> Value {
     let mut codex_cache_current = false;
     let mut codex_migration_ready = false;
@@ -304,7 +305,7 @@ pub(crate) fn user_hook_activation_guidance(
             "steps": ["Start a new Claude Code session or run /reload-plugins. Verify a request and reply; doctor alone cannot verify hooks."]
         }
     });
-    if let Some(advice) = crate::codex_app_server::observe(home_directory, config).advice() {
+    if let Some(advice) = crate::codex_app_server::observe(home_directory, config).advice(kind) {
         guidance["codex"]["app_server"] = advice;
     }
     guidance
@@ -314,7 +315,6 @@ pub(crate) fn native_session_setup(runtime: AgentRuntime, kind: crate::mux::MuxK
     if kind == crate::mux::MuxKind::Rex {
         return json!({
             "status": "session_identity_missing",
-            "command": ["namedrop", "activate"],
             "explanation": "Namedrop has no session identity for this Rex pane. Submit the first prompt, then check registration. If identity is still missing after a turn, run Activate Namedrop again and restart the agent so it loads the Namedrop hooks."
         });
     }
@@ -963,8 +963,9 @@ impl IntegrationPackageInstallation {
         &self,
         home_directory: Option<&Path>,
         config: AgentConfigDirectories<'_>,
+        kind: crate::mux::MuxKind,
     ) -> Value {
-        let mut guidance = user_hook_activation_guidance(home_directory, config);
+        let mut guidance = user_hook_activation_guidance(home_directory, config, kind);
         for (runtime, outcome) in &self.outcomes {
             if let Err(error) = outcome {
                 guidance[runtime.as_str()] = json!({

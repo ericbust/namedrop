@@ -3,6 +3,7 @@
 //! here only reads: config.toml, the server's pid file and the process table.
 
 use crate::integration::pane_agent_runtime;
+use crate::mux::MuxKind;
 use crate::{AgentConfigDirectories, AgentRuntime, DiscoveredPane, LifecycleRuntime};
 use serde_json::{Value, json};
 use std::{
@@ -38,22 +39,31 @@ pub(crate) const STEPS: [&str; 7] = [
     ENABLE,
 ];
 
-/// The advice every structured consumer carries.
-pub(crate) fn advice(lingering: bool) -> Value {
+/// The advice every structured consumer carries, in the words of the home
+/// whose panes or blocks it is about.
+pub(crate) fn advice(lingering: bool, kind: MuxKind) -> Value {
     json!({
         "status": "codex_shared_app_server",
-        "summary": SUMMARY,
-        "explanation": explanation(lingering),
-        "fix": FIX,
-        "steps": STEPS,
+        "summary": summary(kind),
+        "explanation": explanation(lingering, kind),
+        "fix": kind.text(FIX, REX_FIX),
+        "steps": match kind {
+            MuxKind::Herdr => STEPS,
+            MuxKind::Rex => REX_STEPS,
+        },
     })
 }
 
-pub(crate) fn explanation(lingering: bool) -> String {
+pub(crate) fn summary(kind: MuxKind) -> &'static str {
+    kind.text(SUMMARY, REX_SUMMARY)
+}
+
+pub(crate) fn explanation(lingering: bool, kind: MuxKind) -> String {
+    let explanation = kind.text(EXPLANATION, REX_EXPLANATION);
     if lingering {
-        format!("{EXPLANATION} {LINGERING}")
+        format!("{explanation} {LINGERING}")
     } else {
-        EXPLANATION.to_owned()
+        explanation.to_owned()
     }
 }
 
@@ -144,11 +154,11 @@ pub(crate) struct RunningServer {
 }
 
 impl CodexAppServer {
-    pub(crate) fn advice(&self) -> Option<Value> {
+    pub(crate) fn advice(&self, kind: MuxKind) -> Option<Value> {
         match self {
             Self::InProcess => None,
-            Self::StartsOnNextSession => Some(advice(false)),
-            Self::Running(server) => Some(advice(!server.auto_start)),
+            Self::StartsOnNextSession => Some(advice(false, kind)),
+            Self::Running(server) => Some(advice(!server.auto_start, kind)),
         }
     }
 }
@@ -213,8 +223,8 @@ impl ServedPanes {
         &self.pane_ids
     }
 
-    pub(crate) fn advice(&self) -> Value {
-        advice(!self.server.auto_start)
+    pub(crate) fn advice(&self, kind: MuxKind) -> Value {
+        advice(!self.server.auto_start, kind)
     }
 }
 
@@ -485,7 +495,7 @@ mod tests {
         root.write("app-server-daemon/daemon.pid", &pid_record(server.pid()));
         let observed = root.observe();
         assert_eq!(observed, running(&root, server.pid(), false));
-        let advice = observed.advice().unwrap();
+        let advice = observed.advice(MuxKind::Herdr).unwrap();
         assert_eq!(
             advice["explanation"],
             format!("{EXPLANATION} {LINGERING}"),
@@ -796,7 +806,12 @@ mod tests {
 
     #[test]
     fn the_advice_carries_exactly_the_shared_text() {
-        let value = advice(false);
+        let rex = advice(true, MuxKind::Rex);
+        assert_eq!(rex["summary"], REX_SUMMARY);
+        assert_eq!(rex["explanation"], format!("{REX_EXPLANATION} {LINGERING}"));
+        assert_eq!(rex["fix"], REX_FIX);
+        assert_eq!(rex["steps"], json!(REX_STEPS));
+        let value = advice(false, MuxKind::Herdr);
         let keys = value.as_object().unwrap().keys().collect::<Vec<_>>();
         assert_eq!(keys, ["explanation", "fix", "status", "steps", "summary"]);
         assert_eq!(value["status"], "codex_shared_app_server");
@@ -814,7 +829,11 @@ mod tests {
     #[test]
     fn activation_carries_the_advice_beside_its_steps_never_in_them() {
         let guidance = |root: &Root| {
-            crate::user_hook_activation_guidance(Some(&root.0), AgentConfigDirectories::default())
+            crate::user_hook_activation_guidance(
+                Some(&root.0),
+                AgentConfigDirectories::default(),
+                MuxKind::Herdr,
+            )
         };
         let in_process = Root::new();
         let starts = Root::new();
@@ -826,8 +845,14 @@ mod tests {
 
         let quiet = guidance(&in_process);
         assert!(quiet["codex"].get("app_server").is_none(), "{quiet}");
-        assert_eq!(guidance(&starts)["codex"]["app_server"], advice(false));
-        assert_eq!(guidance(&running)["codex"]["app_server"], advice(true));
+        assert_eq!(
+            guidance(&starts)["codex"]["app_server"],
+            advice(false, MuxKind::Herdr)
+        );
+        assert_eq!(
+            guidance(&running)["codex"]["app_server"],
+            advice(true, MuxKind::Herdr)
+        );
         for root in [&in_process, &starts, &running] {
             let with_server_state = guidance(root);
             for directory in ["app-server-daemon", "packages"] {

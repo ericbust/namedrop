@@ -519,11 +519,11 @@ fn require_live_recipient(
         .ok_or_else(|| StoreError::invalid_input("tracked recipient has no current binding"))?;
     let discovered = live.of(&ns.space_id).ok_or_else(|| {
         StoreError::invalid_input(format!(
-            "Namedrop could not read the panes of @{}'s workspace from {}; retry the send",
+            "Namedrop could not read the panes of @{}'s {}; retry the send",
             address.alias,
             crate::mux::Endpoint::parse(&ns.session_socket_id)
                 .kind
-                .title()
+                .text("workspace from Herdr", "session from Rex")
         ))
     })?;
     let current = crate::context::registered_current_address(tx, ns, &binding.pane_id, discovered)?;
