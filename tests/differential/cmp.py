@@ -22,6 +22,9 @@ def load(path, drop):
         if "--allow-package-lock" in sys.argv and section == "## files (set)":
             if cleaned == json.dumps({"path": "<ROOT>/home/.config/namedrop/packages.lock", "text": ""}, sort_keys=True):
                 continue
+        if "--allow-runtime-owner" in sys.argv and section == "## files (set)":
+            if cleaned == json.dumps({"path": "<STATE>-runtime/runtime/owner", "text": "herdr\n"}, sort_keys=True):
+                continue
         if section == "## herdr calls (set)" and cleaned.startswith('{"args"'):
             call = json.loads(cleaned)
             args = call["args"]

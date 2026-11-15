@@ -9,3 +9,5 @@ The runner executes each binary three times in separate profiles. It compares ev
 The script host handles the differential only. It does not replace either real-agent testbed lane. The run needs `/bin/ps` and `sandbox-exec`; a sandbox that blocks either cannot produce acceptance evidence.
 
 U3 also runs deactivate, activate again, and name in a second inactive space. Pass `--allow-package-lock` to the runner only for U3. It permits the added empty HOME `.config/namedrop/packages.lock` file and preserves every other comparison.
+
+U4 adds, after the base flow and in a profile of its own (`home-runtime`, `state-runtime`), a first publish through `scripts/run.sh activate` and `runtime.py`, from the `scripts/` and `runtime.json` two levels above each binary, then a live update of a re-signed copy. Pass `--allow-runtime-owner` only for a base from before U4. It permits the added `<STATE>-runtime/runtime/owner` file with the text `herdr` and preserves every other comparison, the `herdr` call logs included.

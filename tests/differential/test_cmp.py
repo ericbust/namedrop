@@ -50,5 +50,15 @@ class Comparison(unittest.TestCase):
         self.assertNotEqual(self.compare(prefix,prefix+row("<ROOT>/home/.config/namedrop/other", ""),["--allow-package-lock"]),0)
         self.assertNotEqual(self.compare(prefix,prefix+row("<ROOT>/home/.config/namedrop/packages.lock", "unexpected"),["--allow-package-lock"]),0)
 
+    def test_runtime_owner_pin_is_explicit_and_exact(self):
+        prefix='## files (set)\n'
+        def row(path,text):
+            return json.dumps({"path":path,"text":text},sort_keys=True)+'\n'
+        pin=row("<STATE>-runtime/runtime/owner", "herdr\n")
+        self.assertNotEqual(self.compare(prefix,prefix+pin),0)
+        self.assertEqual(self.compare(prefix,prefix+pin,["--allow-runtime-owner"]),0)
+        self.assertNotEqual(self.compare(prefix,prefix+row("<STATE>-runtime/runtime/owner", "standalone\n"),["--allow-runtime-owner"]),0)
+        self.assertNotEqual(self.compare(prefix,prefix+row("<STATE>/runtime/owner", "herdr\n"),["--allow-runtime-owner"]),0)
+
 if __name__ == '__main__':
     unittest.main()
