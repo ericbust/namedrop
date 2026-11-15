@@ -53,12 +53,13 @@ Namedrop reports this as ND-SESSION-003 in `namedrop doctor`, when you name a Co
 
 Rex support is on the `experimental` branch only, and no release includes it. On Rex, Namedrop does not need Herdr. See [Run Namedrop on Rex](rex.md).
 
-Namedrop speaks Rex's control protocol, `rex.control.v1`, at API revisions 12 and 13. It offers revisions 12 to 13, and the server answers with the highest revision that both support. Namedrop refuses any other answer with `the server's welcome is not one for rex.control.v1 revisions 12 to 13`. `rex version` prints a server's revision and the range it supports.
+Namedrop speaks Rex's control protocol, `rex.control.v1`, at API revisions 12, 13 and 14. It offers revisions 12 to 14, and the server answers with the highest revision that both support. Namedrop refuses any other answer with `the server's welcome is not one for rex.control.v1 revisions 12 to 14`. `rex version` prints a server's revision and the range it supports.
 
 | Rex | API revision | Status |
 |---|---|---|
 | `0.1.0-preview.14`, commit `7e460d0` | 12, supports 0 to 12 | Supported, at revision 12. The spike and the adapter's design probes ran on it |
 | `0.1.0-preview.18`, commit `baf79e0` | 13, supports 0 to 13 | Works at revision 13. Tested without agents and without the relay |
+| `0.1.0-preview.19`, commit `ad5a836` | 14, supports 0 to 14 | Works at revision 14. Tested without agents and without the relay, and with Herdr inside Rex |
 
 Rex has been tested only on macOS on Apple silicon. The testbed's Rex lanes use the `rex` that the testbed finds, and their logs do not record its version.
 
@@ -69,6 +70,7 @@ Rex has been tested only on macOS on Apple silicon. The testbed's Rex lanes use 
 - **The relay**, with two scratch Rex servers on one Mac standing in for two machines. Claude Code on Haiku 5.5 on A mentioned Codex `--no-daemon` on B, and a four-message conversation went back and forth. A retried send was accepted once. With B's bridge stopped, A kept the message until the bridge started again. A refused to type into B's blocks through a forwarded socket. Later checks without a model, up to commit `7c89d9a`, covered `relay/allow-terminals`, the Automatic Reply Limit pausing a relayed thread and holding its replies until `thread continue`, and B and A on different relay builds.
 - **Rex preview.14 and preview.18, 2026-11-14**, Namedrop at commit `329c278b`, which offers only revision 12, in scratch Rex servers, without agents. Both servers answered with revision 12. On both, Doctor reported `ND-SETUP-001`, `activate` succeeded, and a terminal block was named.
 - **Rex preview.14 and preview.18, 2026-11-14**, Namedrop at commit `a08c40b6`, which offers revisions 12 to 13, in scratch Rex servers, without agents. Rex preview.14 answered with revision 12, and preview.18 answered with revision 13. On both, the four live tests that need no fixture passed, Doctor reported only `ND-SETUP-001`, `activate` succeeded, and a terminal block was named.
+- **Rex preview.14, preview.18 and preview.19, 2026-11-14**, Namedrop at commit `02fa5127`, which offers revisions 12 to 14, in scratch Rex servers. The servers answered with revisions 12, 13 and 14. On each, the four live tests passed, Doctor reported only `ND-SETUP-001`, `activate` succeeded, a terminal block was named, and a root status set and cleared after attachment reached the bridge. The testbed's Herdr-inside-Rex lane passed with preview.19. On every build, Rex sometimes sends no startup events for a new session's first block; activation reads the block itself, so nothing is lost. See [Control API revisions](../experimental/rex/ADAPTER.md#control-api-revisions).
 
 Not recorded on Rex: the relay and agents on preview.18. The testbed's Rex lanes do not log their Rex version, so their runs do not show which preview they used. Not tested on Rex: TLS to a real remote Rex server, Linux, two real machines, the Rex app's command palette, and a restart of the Rex app as opposed to the server.
 
