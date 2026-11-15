@@ -566,15 +566,20 @@ impl RelayStore {
             )));
         }
         let path = state.join(FILE);
+        // A set-aside renames the file only under the exclusive lock, so the
+        // file an open checks under the shared one is the file it keeps, and
+        // one of this schema's layout is never set aside.
+        let lock = super::open_lock(state)?;
+        lock.lock_shared()?;
         let connection = connect(&path)?;
         let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if version == VERSION && layout(&connection)? == *current_layout() {
             return Ok(Self { connection });
         }
         drop(connection);
+        lock.unlock()?;
         // Opens that race to make, migrate, or set aside the database take
         // turns, and each looks again at what the path holds then.
-        let lock = super::open_lock(state)?;
         lock.lock()?;
         let mut connection = connect(&path)?;
         if upgrade(&mut connection, &path)? {
