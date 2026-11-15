@@ -824,9 +824,6 @@ pub(crate) fn release(
         if paused.contains(&thread) {
             continue;
         }
-        let Ok(_placing) = super::placing(state) else {
-            return labels;
-        };
         match take(state, gate, held) {
             Ok(Taken::Inserted(message_id)) => {
                 if collected(&store, held, &message_id)
