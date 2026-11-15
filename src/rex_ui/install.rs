@@ -482,6 +482,19 @@ fn removal_marker(state: &Path) -> Result<(), String> {
     }
 }
 
+/// What a standalone removal returns once its `removed` marker is gone or
+/// replaced, or `None` while the marker stands.
+fn stopped(state: &Path) -> Option<Result<Value, String>> {
+    match installed_runtime::retirement(state) {
+        Err(error) => Some(Err(error)),
+        Ok(None) => Some(Ok(
+            json!({"removed":false,"message":"Namedrop was installed again. Removal stopped."}),
+        )),
+        Ok(Some(installed_runtime::Retirement::Removed { .. })) => None,
+        Ok(Some(marker)) => Some(Err(marker.message())),
+    }
+}
+
 pub fn remove(
     state: &Path,
     directories: &InheritedDirectories,
@@ -491,6 +504,10 @@ pub fn remove(
         .home()
         .ok_or("Namedrop removal needs an absolute HOME")?;
     let standalone = installed_runtime::standalone(state)?;
+    // A removal that a reinstall already stopped asks Rex nothing.
+    if standalone && let Some(stopped) = stopped(state) {
+        return stopped;
+    }
     // Rex's verdict on the file before the edit, so an error that was already
     // there is not taken for one the edit made. Read with no lease held.
     let failed_before = registration(home).ok().flatten().and_then(|record| {
@@ -504,20 +521,8 @@ pub fn remove(
         crate::mux::rex::config_errors(&reload).then_some(reload)
     });
     let lease = installed_runtime::package_guard(Some(home), state, Writer::Removal)?;
-    if standalone {
-        match installed_runtime::retirement(state)? {
-            None => {
-                return Ok(
-                    json!({"removed":false,"message":"Namedrop was installed again. Removal stopped."}),
-                );
-            }
-            Some(installed_runtime::Retirement::HerdrHandoff { successor, at }) => {
-                return Err(
-                    installed_runtime::Retirement::HerdrHandoff { successor, at }.message(),
-                );
-            }
-            Some(installed_runtime::Retirement::Removed { .. }) => {}
-        }
+    if standalone && let Some(stopped) = stopped(state) {
+        return stopped;
     }
     let record_owner = crate::locator::read_install_record(&crate::locator::install_record(home));
     let remove_packages = standalone
@@ -565,20 +570,8 @@ pub fn remove(
         edit.keep_only_its_backup();
     }
     let lease = installed_runtime::package_guard(Some(home), state, Writer::Removal)?;
-    if standalone {
-        match installed_runtime::retirement(state)? {
-            None => {
-                return Ok(
-                    json!({"removed":false,"message":"Namedrop was installed again. Removal stopped."}),
-                );
-            }
-            Some(installed_runtime::Retirement::HerdrHandoff { successor, at }) => {
-                return Err(
-                    installed_runtime::Retirement::HerdrHandoff { successor, at }.message(),
-                );
-            }
-            Some(installed_runtime::Retirement::Removed { .. }) => {}
-        }
+    if standalone && let Some(stopped) = stopped(state) {
+        return stopped;
     }
     let owner = crate::locator::read_install_record(&crate::locator::install_record(home));
     let remove_packages = remove_packages
