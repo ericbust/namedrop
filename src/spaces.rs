@@ -108,6 +108,7 @@ impl<'a, E: crate::mux::MuxRead> HerdrWorkspaces<'a, E> {
 #[derive(Clone, Debug)]
 pub(crate) struct SpaceDirectory {
     entries: Vec<SpaceEntry>,
+    kind: crate::mux::MuxKind,
 }
 
 #[derive(Clone, Debug)]
@@ -170,7 +171,11 @@ impl SpaceDirectory {
                     })
             });
         if !looks_elsewhere {
-            return Ok(Self::new(here_entry(None, None), Vec::new()));
+            return Ok(Self::new(
+                workspaces.herdr.endpoint().kind,
+                here_entry(None, None),
+                Vec::new(),
+            ));
         }
         let listed = workspaces.list()?;
         let entry = |workspace: &crate::lifecycle::ListedWorkspace| {
@@ -197,6 +202,7 @@ impl SpaceDirectory {
             .map(entry)
             .collect();
         Ok(Self::new(
+            workspaces.herdr.endpoint().kind,
             here_entry(
                 here_listed.map(|workspace| workspace.label.as_str()),
                 here_listed.and_then(|workspace| workspace.repo.as_deref()),
@@ -205,10 +211,14 @@ impl SpaceDirectory {
         ))
     }
 
-    pub(crate) fn new(here: SpaceEntry, others: Vec<SpaceEntry>) -> Self {
+    pub(crate) fn new(
+        kind: crate::mux::MuxKind,
+        here: SpaceEntry,
+        others: Vec<SpaceEntry>,
+    ) -> Self {
         let mut entries = vec![here];
         entries.extend(others);
-        Self { entries }
+        Self { entries, kind }
     }
 
     fn here(&self) -> &SpaceEntry {
@@ -260,6 +270,7 @@ impl SpaceDirectory {
             [entry] => Some(*entry),
             many => {
                 return Err(RouteRefusal::DuplicateLabel {
+                    kind: self.kind,
                     label: label.clone(),
                     workspaces: many
                         .iter()
@@ -736,6 +747,7 @@ pub(crate) enum RouteRefusal {
         known: Vec<WorkspaceLabel>,
     },
     DuplicateLabel {
+        kind: crate::mux::MuxKind,
         label: WorkspaceLabel,
         workspaces: Vec<(String, WorkspaceLabel)>,
     },
@@ -917,10 +929,14 @@ impl fmt::Display for RouteRefusal {
                 "no workspace is labelled {label}; activated workspaces: {}",
                 joined(known, ", ")
             ),
-            Self::DuplicateLabel { label, workspaces } => write!(
+            Self::DuplicateLabel {
+                kind,
+                label,
+                workspaces,
+            } => write!(
                 formatter,
                 "{label} matches more than one workspace ({}); use the token shown, or rename one in \
-                 Herdr",
+                 {}",
                 workspaces
                     .iter()
                     .map(|(display, id)| format!(
@@ -928,7 +944,8 @@ impl fmt::Display for RouteRefusal {
                         serde_json::Value::String(display.clone())
                     ))
                     .collect::<Vec<_>>()
-                    .join(" and ")
+                    .join(" and "),
+                kind.title()
             ),
             Self::NotActivated { label } => write!(
                 formatter,
@@ -1232,6 +1249,7 @@ mod tests {
 
     fn directory() -> SpaceDirectory {
         SpaceDirectory::new(
+            crate::mux::MuxKind::Herdr,
             SpaceEntry {
                 retired: BTreeSet::from(["old".to_owned()]),
                 ..entry("w1", "ws1", &["lead"])
@@ -1398,6 +1416,7 @@ mod tests {
     /// `tools` is a repository whose main checkout is activated.
     fn repositories() -> SpaceDirectory {
         SpaceDirectory::new(
+            crate::mux::MuxKind::Herdr,
             entry("w1", "ws1", &["lead"]),
             vec![
                 SpaceEntry {
@@ -1511,6 +1530,7 @@ mod tests {
     #[test]
     fn a_repository_name_alone_reaches_its_one_worktree() {
         let directory = SpaceDirectory::new(
+            crate::mux::MuxKind::Herdr,
             entry("w1", "ws1", &["lead"]),
             vec![
                 worktree("w2", "catchup-again", "namestack", &["claude"]),
@@ -1529,6 +1549,7 @@ mod tests {
     #[test]
     fn a_duplicate_label_refuses_before_its_repository_is_consulted() {
         let directory = SpaceDirectory::new(
+            crate::mux::MuxKind::Herdr,
             entry("w1", "ws1", &[]),
             vec![
                 worktree("w2", "namestack", "namestack", &[]),
@@ -1639,6 +1660,7 @@ mod tests {
     #[test]
     fn duplicate_folded_labels_name_both_workspaces() {
         let directory = SpaceDirectory::new(
+            crate::mux::MuxKind::Herdr,
             entry("w1", "ws1", &[]),
             vec![
                 entry("w2", "Dash Board", &["lead"]),
@@ -1660,6 +1682,7 @@ mod tests {
     #[test]
     fn a_workspace_is_always_reachable_by_its_id() {
         let directory = SpaceDirectory::new(
+            crate::mux::MuxKind::Herdr,
             entry("w1", "ws1", &[]),
             vec![entry("w2", "All", &["lead"]), entry("w3", "", &["lead"])],
         );

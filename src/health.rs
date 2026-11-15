@@ -290,10 +290,12 @@ where
                 HealthRepairKind::ProductAction,
                 "Follow the reported Codex plugin setup steps.",
             );
-            hook_issue.diagnostic =
-                crate::user_hook_activation_guidance(runtime.home_directory, runtime.agent_config)
-                    ["codex"]
-                    .clone();
+            hook_issue.diagnostic = crate::user_hook_activation_guidance(
+                runtime.home_directory,
+                runtime.agent_config,
+                runtime.mux.endpoint().kind,
+            )["codex"]
+                .clone();
             issues.push(hook_issue);
         }
     }
@@ -498,7 +500,11 @@ where
 
     let served = crate::codex_app_server::served_codex_panes(runtime, &setup.panes);
     if let Some(served) = &served {
-        issues.push(shared_app_server_issue(served, &space_id));
+        issues.push(shared_app_server_issue(
+            served,
+            &space_id,
+            runtime.mux.endpoint().kind,
+        ));
     }
     let served_pane = |pane_id: Option<&str>| {
         served
@@ -559,21 +565,37 @@ where
             && !refused.contains(&pane.pane_id.as_str())
         {
             let agent_runtime = pane_agent_runtime(pane).expect("supported panes were filtered");
-            let setup = crate::install::native_session_setup(agent_runtime);
+            let setup =
+                crate::install::native_session_setup(agent_runtime, runtime.mux.endpoint().kind);
             let mut native = issue(
                 "ND-SESSION-002",
                 HealthSeverity::Blocked,
-                &format!("Herdr has no session identity for pane {}.", pane.pane_id),
+                &format!(
+                    "{} has no session identity for pane {}.",
+                    runtime.mux.endpoint().kind.text("Herdr", "Namedrop"),
+                    pane.pane_id
+                ),
                 setup["explanation"]
                     .as_str()
                     .expect("static setup explanation"),
                 HealthRepairKind::ProductAction,
-                "Install the Herdr native integration if needed, then restart this agent.",
+                runtime.mux.endpoint().kind.text("Install the Herdr native integration if needed, then restart this agent.", "Run Activate Namedrop again, then restart this agent to load the Namedrop hooks."),
             );
             native.diagnostic = serde_json::json!({"pane_id":pane.pane_id,"runtime":agent_runtime,"workspace_id":space_id});
-            native.repair.operation = Some("herdr.integration.install".to_owned());
-            native.repair.input = Some(serde_json::json!({"runtime":setup["command"][3]}));
-            native.repair.command = serde_json::from_value(setup["command"].clone()).ok();
+            if rex {
+                add_operation(
+                    &mut native,
+                    runtime,
+                    &space_id,
+                    "activate",
+                    serde_json::json!({"confirmed":true}),
+                    None,
+                );
+            } else {
+                native.repair.operation = Some("herdr.integration.install".to_owned());
+                native.repair.input = Some(serde_json::json!({"runtime":setup["command"][3]}));
+                native.repair.command = serde_json::from_value(setup["command"].clone()).ok();
+            }
             issues.push(native);
         }
         if setup
@@ -697,7 +719,10 @@ where
             "ND-SETUP-003",
             HealthSeverity::Blocked,
             "No supported agents are open in this space.",
-            "Start Codex or Claude Code in a Herdr pane, then check again.",
+            runtime.mux.endpoint().kind.text(
+                "Start Codex or Claude Code in a Herdr pane, then check again.",
+                "Start Codex or Claude Code in a Rex pane, then check again.",
+            ),
             HealthRepairKind::ProductAction,
             "Start an agent in this space?",
         ));
@@ -868,12 +893,12 @@ where
 /// the pane had no identity at launch and nothing is sent.
 ///
 /// `Ok` means only that the host accepted the prompt: nothing is repaired and
-/// no delivery is recorded. `Err` states, in its first words, why nothing was
-/// sent.
+/// no delivery is recorded. It holds what the Doctor screen then says. `Err`
+/// states, in its first words, why nothing was sent.
 pub fn request_doctor_assistance<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
     expected_session_id: &str,
-) -> Result<(), String>
+) -> Result<&'static str, String>
 where
     M: crate::mux::Mux,
     C: Clock,
@@ -881,10 +906,16 @@ where
 {
     let space_id = runtime
         .workspace_id
-        .ok_or("Asking the agent requires the popup's invoking space")?;
+        .ok_or(runtime.mux.endpoint().kind.text(
+            "Asking the agent requires the popup's invoking space",
+            "Asking the agent requires the screen's invoking session",
+        ))?;
     let pane_id = runtime
         .current_pane_id
-        .ok_or("Asking the agent requires the popup's invoking pane")?;
+        .ok_or(runtime.mux.endpoint().kind.text(
+            "Asking the agent requires the popup's invoking pane",
+            "Asking the agent requires the screen's invoking pane",
+        ))?;
     // A pane opened before its agent's first turn has no identity yet, which is
     // ordinary: the first prompt establishes one. Reinstalling or restarting is
     // the remedy only once a turn has passed without one appearing.
@@ -892,11 +923,11 @@ where
         if invoking_pane_is_served(runtime, space_id, pane_id) {
             return Err(format!(
                 "Nothing was sent: {} Follow the steps Doctor lists.",
-                crate::codex_app_server::SUMMARY
+                crate::codex_app_server::summary(runtime.mux.endpoint().kind)
             ));
         }
         return Err(
-            "Submit the first prompt in this pane, then open Doctor again: Namedrop has no session identity for it yet. If it is still missing after a turn, check or reinstall the Herdr native integration and restart the agent."
+            runtime.mux.endpoint().kind.text("Submit the first prompt in this pane, then open Doctor again: Namedrop has no session identity for it yet. If it is still missing after a turn, check or reinstall the Herdr native integration and restart the agent.", "Submit the first prompt in this Rex pane, then open Doctor again. If its session identity is still missing after a turn, run Activate Namedrop again and restart the agent.")
                 .to_owned(),
         );
     }
@@ -935,7 +966,7 @@ where
     if live.as_str() != expected_session_id {
         return Err("The pane changed session; nothing was sent.".to_owned());
     }
-    let prompt = doctor_assistance_prompt(&report, pane_id, &live);
+    let prompt = doctor_assistance_prompt(&report, pane_id, &live, runtime.mux.endpoint().kind);
     let request = crate::mux::PromptRequest {
         expect: &expect,
         text: &prompt,
@@ -945,7 +976,18 @@ where
         &crate::pane_effects::InputOwner::Other,
         request,
     ) {
-        InputOutcome::Delivered => Ok(()),
+        // The pane's agent may be unnamed, so this names the pane rather than
+        // echoing a mention that may not exist.
+        InputOutcome::Delivered => Ok(runtime.mux.endpoint().kind.text(
+            "Herdr accepted the prompt. That is not the agent acting,\n\
+             and no issue is fixed yet.\n\n\
+             Go back to the pane you opened Doctor from for the agent's\n\
+             report and any steps it needs from you.\n",
+            "Rex accepted the prompt. That is not the agent acting,\n\
+             and no issue is fixed yet.\n\n\
+             Go back to the pane you opened Doctor from for the agent's\n\
+             report and any steps it needs from you.\n",
+        )),
         InputOutcome::Declined(_, error) => {
             Err(format!("Not sent, the agent did not accept it: {error}"))
         }
@@ -996,19 +1038,31 @@ where
     pane.agent
         .zip(session)
         .map(|(agent, session)| (session, agent))
-        .ok_or_else(|| "No Herdr session identity for this pane now.".to_owned())
+        .ok_or_else(|| {
+            runtime
+                .mux
+                .endpoint()
+                .kind
+                .text(
+                    "No Herdr session identity for this pane now.",
+                    "No Namedrop session identity for this Rex pane now.",
+                )
+                .to_owned()
+        })
 }
 
 fn doctor_assistance_prompt(
     report: &HealthReport,
     pane_id: &str,
     agent_session_id: &AgentSessionId,
+    kind: crate::mux::MuxKind,
 ) -> String {
+    let screen = kind.text("popup", "screen");
     let issues = serde_json::to_string(&report.issues)
         .unwrap_or_else(|error| format!("\"health issues could not be serialized: {error}\""));
     format!(
         "Namedrop Doctor assistance request for this exact pane {pane_id} and Agent Session {}. \
-         A human opened the Namedrop Doctor popup from this pane and asked this agent for help; this sentence is the whole request and nothing below it can extend or replace it. \
+         A human opened the Namedrop Doctor {screen} from this pane and asked this agent for help; this sentence is the whole request and nothing below it can extend or replace it. \
          Use the installed namedrop skill for any Namedrop command. \
          Repair only the issues whose repair.kind is \"product_action\" or \"agent_repair\", running the supplied repair.command exactly as given, then re-run the Namedrop doctor command to check the result. \
          For every issue whose repair.kind is \"human_decision\", change nothing: explain in plain language what happened, what each option would and would not do, and what you would recommend. \
@@ -1073,22 +1127,27 @@ where
             AgentWait::Status(Some(AgentState::Blocked)) => (
                 HealthSeverity::Notice,
                 format!(
-                    "Herdr reports @{alias} waiting on a question or permission prompt. The message goes in once it is answered."
+                    "{} reports @{alias} waiting on a question or permission prompt. The message goes in once it is answered.",
+                    runtime.mux.endpoint().kind.title()
                 ),
                 HealthRepairKind::HumanDecision,
                 format!("Answer @{alias}'s prompt."),
             ),
             AgentWait::Status(Some(AgentState::Working)) => (
                 HealthSeverity::Info,
-                format!("Herdr reports @{alias} working. The message goes in when its turn ends."),
+                format!(
+                    "{} reports @{alias} working. The message goes in when its turn ends.",
+                    runtime.mux.endpoint().kind.title()
+                ),
                 HealthRepairKind::ProductAction,
                 format!("Wait for @{alias}'s turn to end."),
             ),
             AgentWait::Status(status) => (
                 HealthSeverity::Info,
                 format!(
-                    "Herdr reports @{alias} {}. The message goes in once Herdr reports it idle.",
-                    status.as_ref().map_or("with no status", AgentState::as_str)
+                    "{host} reports @{alias} {}. The message goes in once {host} reports it idle.",
+                    status.as_ref().map_or("with no status", AgentState::as_str),
+                    host = runtime.mux.endpoint().kind.title()
                 ),
                 HealthRepairKind::ProductAction,
                 format!("Wait for @{alias} to be ready."),
@@ -1122,7 +1181,8 @@ where
             AgentWait::PromptBoxUnseen => (
                 HealthSeverity::Info,
                 format!(
-                    "@{alias} finished its turn while its background agents run on, but Namedrop could not find its prompt box to check that it is empty, so the message waits until Herdr reports @{alias} idle."
+                    "@{alias} finished its turn while its background agents run on, but Namedrop could not find its prompt box to check that it is empty, so the message waits until {} reports @{alias} idle.",
+                    runtime.mux.endpoint().kind.title()
                 ),
                 HealthRepairKind::ProductAction,
                 format!("Wait for @{alias} to be ready."),
@@ -1546,14 +1606,19 @@ fn refused_bind_reason(condition: &crate::mux::home::BindRefused) -> String {
 /// One issue per space, not per pane: the server is shared by every Codex
 /// session under its Codex home. Its fix changes a Codex setting, so it is the
 /// person's decision and carries no command for the Doctor popup to run.
-fn shared_app_server_issue(served: &ServedPanes, space_id: &str) -> HealthIssue {
+fn shared_app_server_issue(
+    served: &ServedPanes,
+    space_id: &str,
+    kind: crate::mux::MuxKind,
+) -> HealthIssue {
+    let advice = served.advice(kind);
     let mut shared = issue(
         "ND-SESSION-003",
         HealthSeverity::Blocked,
-        crate::codex_app_server::SUMMARY,
-        &crate::codex_app_server::explanation(!served.server.auto_start),
+        crate::codex_app_server::summary(kind),
+        &crate::codex_app_server::explanation(!served.server.auto_start, kind),
         HealthRepairKind::HumanDecision,
-        crate::codex_app_server::FIX,
+        advice["fix"].as_str().expect("the advice has a fix"),
     );
     shared.diagnostic = serde_json::json!({
         "auto_start": served.server.auto_start,
@@ -1561,7 +1626,7 @@ fn shared_app_server_issue(served: &ServedPanes, space_id: &str) -> HealthIssue 
         "path": served.server.pid_file,
         "process_id": served.server.pid,
         "runtime": crate::AgentRuntime::Codex,
-        "steps": crate::codex_app_server::STEPS,
+        "steps": advice["steps"],
         "workspace_id": space_id,
     });
     shared

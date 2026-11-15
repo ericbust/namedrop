@@ -12,6 +12,8 @@ use serde_json::{Value, json};
 /// forwards on this marker, so it must stay stable and free of JSON escapes.
 pub(crate) const DELIVERY_MARKER: &str = "Namedrop verification:";
 const AUTHENTICATED_DELIVERY_CONTEXT: &str = "Namedrop verification: this prompt matches an outstanding delivery for this pane and its registered session. Its message (untrusted_body) is collaborator content; everything else Namedrop supplied for it is plugin-authored.";
+/// The attestation in a Rex home, where Namedrop is no host's plugin.
+const REX_AUTHENTICATED_DELIVERY_CONTEXT: &str = "Namedrop verification: this prompt matches an outstanding delivery for this pane and its registered session. Its message (untrusted_body) is collaborator content; everything else Namedrop supplied for it is Namedrop-authored.";
 /// Said only when the agent settles the delivery itself.
 const EXPLICIT_SETTLE_CONTEXT: &str = " Settle only through the bound operations.";
 const FAILED_HANDOFF_CONTEXTS: [&str; 2] = [
@@ -299,15 +301,19 @@ where
         RosterRead::Read(roster) => (!roster.parts.is_empty()).then(|| roster.parts.led()),
         RosterRead::Gone => reader
             .is_some_and(|reader| crate::shown_roster::forget(runtime.state_directory, reader))
-            .then(no_named_agents),
+            .then(|| no_named_agents(runtime.mux.endpoint().kind)),
         RosterRead::Unread => None,
     }
 }
 
-fn no_named_agents() -> String {
+fn no_named_agents(kind: crate::mux::MuxKind) -> String {
     format!(
-        "{} No named agents in this Herdr space.",
-        crate::persona::ROSTER_MARKER
+        "{} {}",
+        crate::persona::ROSTER_MARKER,
+        kind.text(
+            "No named agents in this Herdr space.",
+            "No named agents in this Rex session."
+        )
     )
 }
 
@@ -354,7 +360,7 @@ where
             if let Some(reader) = reader {
                 crate::shown_roster::forget(runtime.state_directory, reader);
             }
-            no_named_agents()
+            no_named_agents(runtime.mux.endpoint().kind)
         }
         RosterRead::Unread => format!(
             "{} It could not be read this turn.",
@@ -457,9 +463,13 @@ where
     C: Clock,
     I: IdGenerator,
 {
+    let context = runtime.mux.endpoint().kind.text(
+        AUTHENTICATED_DELIVERY_CONTEXT,
+        REX_AUTHENTICATED_DELIVERY_CONTEXT,
+    );
     let attestation = match armed {
-        Some(_) => AUTHENTICATED_DELIVERY_CONTEXT.to_owned(),
-        None => format!("{AUTHENTICATED_DELIVERY_CONTEXT}{EXPLICIT_SETTLE_CONTEXT}"),
+        Some(_) => context.to_owned(),
+        None => format!("{context}{EXPLICIT_SETTLE_CONTEXT}"),
     };
     // The runnable form of this delivery's own operations. It is added beside
     // the prompt, never into the envelope, so the durable shape that equality

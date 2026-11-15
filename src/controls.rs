@@ -157,7 +157,10 @@ where
             let invoker = runtime
                 .current_pane_id
                 .and_then(|id| discovered.panes.iter().find(|pane| pane.pane_id == id))
-                .ok_or("allow-remote must run from a Herdr pane in this workspace")?;
+                .ok_or(runtime.mux.endpoint().kind.text(
+                    "allow-remote must run from a Herdr pane in this workspace",
+                    "allow-remote must run from a Rex pane in this workspace",
+                ))?;
             let record = store
                 .transaction(|transaction| {
                     transaction.allow_remote_commands(

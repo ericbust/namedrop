@@ -273,9 +273,17 @@ where
                 .to_owned();
             validate_alias(&alias)?;
             let persona = input.persona.as_deref().map(normalize_persona);
-            let pane_id = runtime
-                .current_pane_id
-                .ok_or_else(|| "name must run from the Herdr pane being named".to_owned())?;
+            let pane_id = runtime.current_pane_id.ok_or_else(|| {
+                runtime
+                    .mux
+                    .endpoint()
+                    .kind
+                    .text(
+                        "name must run from the Herdr pane being named",
+                        "name must run from the Rex pane being named",
+                    )
+                    .to_owned()
+            })?;
             let pane = discovered
                 .panes
                 .iter()
@@ -477,8 +485,8 @@ where
                 "type_override": "name <alias> --type terminal|agent",
                 "pane_id": pane_id,
                 "agent_session_id": agent_session_id,
-                "native_session_setup": agent_runtime.filter(|_| agent_session_id.is_none() && served.is_none()).map(crate::install::native_session_setup),
-                "codex_app_server": served.as_ref().map(crate::codex_app_server::ServedPanes::advice),
+                "native_session_setup": agent_runtime.filter(|_| agent_session_id.is_none() && served.is_none()).map(|agent| crate::install::native_session_setup(agent, runtime.mux.endpoint().kind)),
+                "codex_app_server": served.as_ref().map(|served| served.advice(runtime.mux.endpoint().kind)),
                 "runtime": agent_runtime,
                 "activated": true,
                 "activation_was_needed": !was_activated,
@@ -492,7 +500,7 @@ where
                 "integration_packages": reconciliation.installation.report(runtime.home_directory, runtime.state_directory, runtime.agent_config),
                 "tab_label": tab_label,
                 "drain": reconciliation.drain,
-                "hook_activation": reconciliation.installation.hook_activation(runtime.home_directory, runtime.agent_config),
+                "hook_activation": reconciliation.installation.hook_activation(runtime.home_directory, runtime.agent_config, runtime.mux.endpoint().kind),
             }))
         }
         "activate" => {
@@ -501,6 +509,7 @@ where
                 let hook_activation = crate::user_hook_activation_guidance(
                     runtime.home_directory,
                     runtime.agent_config,
+                    runtime.mux.endpoint().kind,
                 );
                 return Err(format!(
                     "activation requires confirmation: Space={}, state_directory={}, shared_agent_integration_packages={{{}}} created or refreshed on activation and shared by every space on this machine, agent_integration_hook_activation={}, safe_defaults={{settled_delay_ms:500, ordinary_panes_auto_registered:false, routing_scope:space}}",
@@ -585,11 +594,14 @@ where
                 "integration_packages": reconciliation.installation.report(runtime.home_directory, runtime.state_directory, runtime.agent_config),
                 "settled_delay_ms": 500,
                 "agent_integration_hook_activation":
-                    reconciliation.installation.hook_activation(runtime.home_directory, runtime.agent_config),
+                    reconciliation.installation.hook_activation(runtime.home_directory, runtime.agent_config, runtime.mux.endpoint().kind),
                 "reconciliation_epoch": reconciliation.epoch,
                 "drain": reconciliation.drain,
                 "tour": tour
             });
+            if runtime.mux.endpoint().kind == crate::mux::MuxKind::Rex {
+                report["host"] = json!("rex");
+            }
             if !handoff.is_empty() {
                 report["handoff"] = json!(handoff);
             }
@@ -673,7 +685,17 @@ where
                 .pane_id
                 .clone()
                 .or_else(|| runtime.current_pane_id.map(str::to_owned))
-                .ok_or_else(|| "pane_id is required outside a Herdr pane action".to_owned())?;
+                .ok_or_else(|| {
+                    runtime
+                        .mux
+                        .endpoint()
+                        .kind
+                        .text(
+                            "pane_id is required outside a Herdr pane action",
+                            "pane_id is required outside a Rex pane action",
+                        )
+                        .to_owned()
+                })?;
             let pane = discovered
                 .panes
                 .iter()

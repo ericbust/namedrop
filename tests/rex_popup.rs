@@ -173,7 +173,7 @@ fn rex_screen_refusals_wait_for_any_key_even_after_one_second() {
         waits_for_one_key(
             untargeted(&f),
             mode,
-            "This popup is missing its invoking space",
+            "This screen is missing its invoking session",
             None,
         );
         assert!(!f.0.join("home/.config").exists());

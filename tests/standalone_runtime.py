@@ -557,7 +557,7 @@ class StandaloneChecks(unittest.TestCase):
             fixture(self.root, number=2, state_schema=9)
             with mock.patch.dict(os.environ, self.env, clear=True):
                 started = time.monotonic()
-                with self.assertRaisesRegex(RuntimeError, '[Cc]lose .*Namedrop popup.*tour'):
+                with self.assertRaisesRegex(RuntimeError, '[Cc]lose .*Namedrop screen.*tour'):
                     runtime.activate(self.root, [], verify='install')
                 self.assertGreaterEqual(time.monotonic() - started, 20)
             self.assertEqual(os.readlink(selected / 'current'), before)

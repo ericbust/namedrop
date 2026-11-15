@@ -158,7 +158,11 @@ pub fn render_command_result_to_text_within(
                 &data["agent_integration_hook_activation"]["codex"]["app_server"],
                 &mut lines,
             );
-            lines.push("  Check native hooks: herdr integration status\n  If setup is needed, choose your runtime:\n    herdr integration install codex\n    herdr integration install claude".into());
+            if data["host"] == "rex" {
+                lines.push("  Check Namedrop hooks with namedrop doctor. If setup is needed, run Activate Namedrop again.".into());
+            } else {
+                lines.push("  Check native hooks: herdr integration status\n  If setup is needed, choose your runtime:\n    herdr integration install codex\n    herdr integration install claude".into());
+            }
             lines.push("  Start fresh agent sessions and confirm a request and reply to verify their hooks.".into());
             field("Shell", &data["shell_command"]["next_step"], 1, &mut lines);
             field(
@@ -706,7 +710,7 @@ mod tests {
 
     #[test]
     fn naming_a_served_codex_pane_shows_the_shared_app_server_advice_whatever_its_readiness() {
-        let advice = crate::codex_app_server::advice(false);
+        let advice = crate::codex_app_server::advice(false, crate::mux::MuxKind::Herdr);
         for ready in [true, false] {
             let result = CommandResult::success(
                 "name",
@@ -749,7 +753,7 @@ mod tests {
         };
         let rendered = activated(
             json!({"steps":["codex plugin add namedrop@namedrop --json"],
-                                        "app_server":crate::codex_app_server::advice(false)}),
+                                        "app_server":crate::codex_app_server::advice(false, crate::mux::MuxKind::Herdr)}),
         );
         assert!(
             rendered.contains(crate::codex_app_server::SUMMARY),

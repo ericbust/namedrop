@@ -439,7 +439,10 @@ pub fn try_defer(
             Endpoint::parse(&target.socket).kind,
             |name| inherited.var(name),
         )
-        .ok_or("plugin state is required for deferred commands")?;
+        .ok_or(Endpoint::parse(&target.socket).kind.text(
+            "plugin state is required for deferred commands",
+            "a state directory is required for deferred commands",
+        ))?;
         let workspace = target
             .space
             .ok_or("workspace is required for deferred commands")?;

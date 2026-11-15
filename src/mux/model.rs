@@ -33,6 +33,17 @@ pub enum MuxKind {
 pub const REX_SCHEME: &str = "rex:";
 
 impl MuxKind {
+    pub fn text<'a>(self, herdr: &'a str, rex: &'a str) -> &'a str {
+        match self {
+            Self::Herdr => herdr,
+            Self::Rex => rex,
+        }
+    }
+
+    pub fn title(self) -> &'static str {
+        self.text("Herdr", "Rex")
+    }
+
     /// The multiplexer's name, as Namedrop records it for the changes its
     /// events make.
     pub fn word(self) -> &'static str {

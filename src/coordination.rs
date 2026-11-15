@@ -109,7 +109,10 @@ pub(crate) fn execute<M: crate::mux::Mux, C: crate::Clock, I: crate::IdGenerator
     let ns = discovered.namespace(runtime.session_socket_id);
     let pane = runtime
         .current_pane_id
-        .ok_or("the current Herdr pane is required")?;
+        .ok_or(runtime.mux.endpoint().kind.text(
+            "the current Herdr pane is required",
+            "the current Rex pane is required",
+        ))?;
     let mut store = StateStore::open(runtime.state_directory).map_err(|e| e.to_string())?;
     let response = store
         .transaction(|tx| {
@@ -516,8 +519,11 @@ fn require_live_recipient(
         .ok_or_else(|| StoreError::invalid_input("tracked recipient has no current binding"))?;
     let discovered = live.of(&ns.space_id).ok_or_else(|| {
         StoreError::invalid_input(format!(
-            "Namedrop could not read the panes of @{}'s workspace from Herdr; retry the send",
-            address.alias
+            "Namedrop could not read the panes of @{}'s {}; retry the send",
+            address.alias,
+            crate::mux::Endpoint::parse(&ns.session_socket_id)
+                .kind
+                .text("workspace from Herdr", "session from Rex")
         ))
     })?;
     let current = crate::context::registered_current_address(tx, ns, &binding.pane_id, discovered)?;

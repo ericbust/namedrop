@@ -105,7 +105,10 @@ where
     let namespace = discovered.namespace(runtime.session_socket_id);
     let pane = runtime
         .current_pane_id
-        .ok_or("the current Herdr pane is required")?;
+        .ok_or(runtime.mux.endpoint().kind.text(
+            "the current Herdr pane is required",
+            "the current Rex pane is required",
+        ))?;
     let mut store = StateStore::open_read_only(runtime.state_directory)
         .map_err(|e| e.to_string())?
         .ok_or("Namedrop has no saved state")?;
@@ -229,7 +232,10 @@ where
     let namespace = discovered.namespace(runtime.session_socket_id);
     let pane = runtime
         .current_pane_id
-        .ok_or("the current Herdr pane is required")?;
+        .ok_or(runtime.mux.endpoint().kind.text(
+            "the current Herdr pane is required",
+            "the current Rex pane is required",
+        ))?;
     let mut store = StateStore::open_read_only(runtime.state_directory)
         .map_err(|e| e.to_string())?
         .ok_or("Namedrop has no saved state")?;
@@ -275,7 +281,10 @@ where
     let namespace = discovered.namespace(runtime.session_socket_id);
     let pane = runtime
         .current_pane_id
-        .ok_or("the current Herdr pane is required")?;
+        .ok_or(runtime.mux.endpoint().kind.text(
+            "the current Herdr pane is required",
+            "the current Rex pane is required",
+        ))?;
     let operator = crate::dashboard::current_operator_session(runtime.state_directory);
     let now = runtime.clock.now_unix_ms();
     let mut store = StateStore::open(runtime.state_directory).map_err(|e| e.to_string())?;
