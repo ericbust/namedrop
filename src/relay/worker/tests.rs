@@ -665,6 +665,33 @@ fn start_workers_starts_none_while_a_worker_holds_the_lock() {
     assert_eq!(start(), ["devbox"]);
 }
 
+/// The bridge's look every 10 s runs no `rex hosts list` while each
+/// label's worker runs, and one once a worker stopped.
+#[test]
+fn start_workers_reads_no_host_list_while_the_worker_runs() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    sent(&space, &rex);
+    let endpoint = Endpoint::parse(REX);
+    let held = crate::relay::worker_lock(&space.state, &endpoint, "devbox").unwrap();
+    held.try_lock().unwrap();
+    let looks = || {
+        let before = rex.calls().len();
+        rex.run(|| {
+            for _ in 0..3 {
+                crate::relay::start_workers(&space.state, &endpoint, &|_| {});
+            }
+        });
+        rex.calls()[before..]
+            .iter()
+            .filter(|call| call.contains("hosts list"))
+            .count()
+    };
+    assert_eq!(looks(), 0);
+    drop(held);
+    assert_eq!(looks(), 3);
+}
+
 /// A label `rex hosts list` no longer lists gets no worker however long
 /// its thread stays open, and one listed again gets one.
 #[test]

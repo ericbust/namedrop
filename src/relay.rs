@@ -361,7 +361,8 @@ fn worker_command(
 /// list` still lists, with an item queued or a thread open whose worker
 /// does not run, as the bridge does when it
 /// connects and every so often after, so a conversation goes on collecting
-/// after a restart or a killed worker. `reap` reaps each one.
+/// after a restart or a killed worker. `reap` reaps each one. It reads the
+/// host list only for a label whose worker does not run.
 pub(crate) fn start_workers(
     state: &Path,
     endpoint: &crate::mux::Endpoint,
@@ -370,19 +371,26 @@ pub(crate) fn start_workers(
     if !state.join("relay.sqlite3").is_file() {
         return;
     }
-    if let Ok(store) = RelayStore::read(state)
-        && let Ok(labels) = store.active_labels(&endpoint.key, now_ms())
-        && !labels.is_empty()
-        && let Ok(hosts) = Hosts::read()
-    {
-        drop(store);
-        for label in labels {
-            if hosts.labels.contains(&label)
-                && !worker_runs(state, endpoint, &label)
-                && let Some(worker) = spawn_worker(state, endpoint, &label)
-            {
-                reap(worker);
-            }
+    let Ok(labels) =
+        RelayStore::read(state).and_then(|store| store.active_labels(&endpoint.key, now_ms()))
+    else {
+        return;
+    };
+    let stopped: Vec<String> = labels
+        .into_iter()
+        .filter(|label| !worker_runs(state, endpoint, label))
+        .collect();
+    if stopped.is_empty() {
+        return;
+    }
+    let Ok(hosts) = Hosts::read() else {
+        return;
+    };
+    for label in stopped {
+        if hosts.labels.contains(&label)
+            && let Some(worker) = spawn_worker(state, endpoint, &label)
+        {
+            reap(worker);
         }
     }
 }
