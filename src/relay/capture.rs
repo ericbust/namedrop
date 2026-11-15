@@ -20,7 +20,9 @@ use std::path::Path;
 /// stops before a message it could not capture, so the next capture tries
 /// that message again, and it passes each message in one transaction with
 /// the count of the replies of it that B could not keep, so a retry never
-/// counts one twice.
+/// counts one twice. Once every message is captured, the cursor moves past
+/// the endpoint's last message, so the next capture reads only those made
+/// since.
 pub(crate) fn capture(
     state: &Path,
     endpoint: &Endpoint,
@@ -32,7 +34,7 @@ pub(crate) fn capture(
     let cursor = relay
         .capture_cursor(&endpoint.key)
         .map_err(|error| error.to_string())?;
-    let rows = main
+    let (rows, last) = main
         .transaction(|transaction| transaction.relay_recipient_messages(&endpoint.key, cursor))
         .map_err(|error| error.to_string())?;
     let mut labels: Vec<String> = Vec::new();
@@ -54,6 +56,12 @@ pub(crate) fn capture(
                 break;
             }
         }
+    }
+    if failure.is_none()
+        && let Some(last) = last
+        && let Err(error) = relay.capture_through(&endpoint.key, last)
+    {
+        failure = Some(error.to_string());
     }
     for label in &labels {
         start(label);

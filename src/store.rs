@@ -113,6 +113,8 @@ mod relay_author;
 pub(crate) use coordination::WakeReadiness;
 pub(crate) use coordination_bridge::TrackedMessage;
 pub(crate) use coordination_ownership::CoordinationRole;
+#[cfg(test)]
+pub(crate) use relay_author::TO_RELAY_AUTHORS;
 pub(crate) use relay_author::{RelayAuthor, RelayOrigin, RelayRecipient, Relayed, ToRelayAuthor};
 mod groups;
 mod handoff;

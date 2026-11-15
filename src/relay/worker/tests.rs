@@ -1072,6 +1072,53 @@ fn a_new_relay_database_captures_no_message_from_before_it() {
     }
 }
 
+/// A capture reads its endpoint's messages as a range of rowids after its
+/// cursor, and moves the cursor past every message it read, so a drain
+/// after local messages reads none of them again, and a later message to a
+/// relay author is still captured.
+#[test]
+fn a_capture_reads_only_the_messages_made_since_its_last() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    let message = sent(&space, &rex);
+    let main = Connection::open(space.state.join("namedrop.sqlite3")).unwrap();
+    let plan: Vec<String> = main
+        .prepare(&format!(
+            "EXPLAIN QUERY PLAN {}",
+            crate::store::TO_RELAY_AUTHORS
+        ))
+        .unwrap()
+        .query_map(rusqlite::params![REX, 0], |row| row.get::<_, String>(3))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        plan[0], "SEARCH m USING INTEGER PRIMARY KEY (rowid>?)",
+        "{plan:?}"
+    );
+    let cursor = || relay_rows(&space, "SELECT rowid FROM capture")[0][0].clone();
+    let last = || {
+        main.query_row("SELECT MAX(rowid) FROM collaboration_messages", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap()
+    };
+    for n in 0..5 {
+        agent_reply(&space, &format!("local-{n}"), &message);
+    }
+    capture(&space);
+    assert_eq!(cursor(), json!(last()), "past the local messages");
+    rex.run(|| space.reply("reply-1", &message, "@bob@devbox after"))
+        .unwrap();
+    agent_reply(&space, "local-after", &message);
+    capture(&space);
+    assert_eq!(
+        queued_for(&space, "after"),
+        [["devbox", "bob", "alice", "-"].map(str::to_owned)]
+    );
+    assert_eq!(cursor(), json!(last()));
+}
+
 /// A message capture fails to queue stops the cursor before it, so it and
 /// every later message are captured once capture can queue it.
 #[test]

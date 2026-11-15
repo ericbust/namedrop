@@ -6,6 +6,19 @@ pub(super) const ADDRESS_PREFIX: &str = "relay:";
 pub(super) const ROLE_PREFIX: &str = "role-relay:";
 const DESCRIPTION: &str = "Paneless relay author.";
 
+/// The messages of `?1` after rowid `?2` that a relay author receives, read
+/// as a range of rowids, so a capture reads only the messages made since
+/// its last.
+pub(crate) const TO_RELAY_AUTHORS: &str =
+    "SELECT m.rowid, m.worktree_id, m.message_id, m.thread_id, m.in_reply_to,
+        m.author_alias_snapshot, m.author_address_id, m.body
+     FROM collaboration_messages m
+     WHERE m.rowid > ?2 AND +m.session_socket_id = ?1 AND EXISTS (
+        SELECT 1 FROM message_recipients r WHERE r.session_socket_id = m.session_socket_id
+          AND r.worktree_id = m.worktree_id AND r.message_id = m.message_id
+          AND r.address_id LIKE 'relay:%')
+     ORDER BY m.rowid";
+
 /// Where a remote agent is, as one machine knows it: on the recipient's
 /// machine by the `host_id` the sender's server reported, and on the
 /// sender's machine by the `rex hosts` label it sends to, because its first
@@ -199,22 +212,21 @@ impl StateTransaction<'_> {
     }
 
     /// The messages of `session_socket_id` after `rowid` that a relay author
-    /// receives, oldest first, each with every relay author it addresses.
+    /// receives, oldest first, each with every relay author it addresses,
+    /// and the rowid of the last message of `session_socket_id` after
+    /// `rowid`, of any kind, when there is one.
     pub(crate) fn relay_recipient_messages(
         &self,
         session_socket_id: &str,
         after: i64,
-    ) -> Result<Vec<ToRelayAuthor>, StoreError> {
-        let mut statement = self.transaction.prepare(
-            "SELECT m.rowid, m.worktree_id, m.message_id, m.thread_id, m.in_reply_to,
-                m.author_alias_snapshot, m.author_address_id, m.body
-             FROM collaboration_messages m
-             WHERE m.session_socket_id = ?1 AND m.rowid > ?2 AND EXISTS (
-                SELECT 1 FROM message_recipients r WHERE r.session_socket_id = m.session_socket_id
-                  AND r.worktree_id = m.worktree_id AND r.message_id = m.message_id
-                  AND r.address_id LIKE 'relay:%')
-             ORDER BY m.rowid",
+    ) -> Result<(Vec<ToRelayAuthor>, Option<i64>), StoreError> {
+        let last = self.transaction.query_row(
+            "SELECT MAX(rowid) FROM collaboration_messages
+             WHERE rowid > ?2 AND +session_socket_id = ?1",
+            params![session_socket_id, after],
+            |row| row.get(0),
         )?;
+        let mut statement = self.transaction.prepare(TO_RELAY_AUTHORS)?;
         let mut rows = statement
             .query_map(params![session_socket_id, after], |row| {
                 Ok(ToRelayAuthor {
@@ -249,7 +261,7 @@ impl StateTransaction<'_> {
                 )?
                 .collect::<Result<_, _>>()?;
         }
-        Ok(rows)
+        Ok((rows, last))
     }
 
     /// What a message to `author` in `thread`, before `rowid`, answers of

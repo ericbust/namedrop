@@ -803,6 +803,17 @@ impl RelayStore {
         )?)
     }
 
+    /// Moves `endpoint`'s capture cursor to the main-database message
+    /// `rowid`, once capture read every message before it.
+    pub(crate) fn capture_through(&self, endpoint: &str, rowid: i64) -> Result<(), StoreError> {
+        self.connection.execute(
+            "INSERT INTO capture (endpoint, rowid) VALUES (?1, ?2)
+             ON CONFLICT (endpoint) DO UPDATE SET rowid = MAX(rowid, excluded.rowid)",
+            params![endpoint, rowid],
+        )?;
+        Ok(())
+    }
+
     /// Commits a message's relay writes, loss counts, and capture cursor together.
     pub(crate) fn captured(
         &self,
