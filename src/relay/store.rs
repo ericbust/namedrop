@@ -956,7 +956,9 @@ impl RelayStore {
 
     /// Records what the server `host_id` said it let go of in its outbox
     /// epoch `epoch`, as `label`'s worker read it. A count only grows, and
-    /// a new loss is dated `now_ms`.
+    /// a new loss is dated `now_ms`. It reads `outbound` before it writes,
+    /// so it takes the write lock at its start, and one that meets another
+    /// relay writer waits its turn.
     pub(crate) fn note_lost(
         &self,
         endpoint: &str,
@@ -966,7 +968,8 @@ impl RelayStore {
         lost: &[Lost],
         now_ms: i64,
     ) -> Result<(), StoreError> {
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction =
+            rusqlite::Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
         let labels = [label.to_owned()];
         for lost in lost.iter().take(LOST_LIMIT as usize) {
             if !super::valid_name(&lost.from)

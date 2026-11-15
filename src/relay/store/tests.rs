@@ -1189,6 +1189,38 @@ fn lost_reports_validate_authority_fields_and_bound_the_page() {
     );
 }
 
+/// A worker that notes a loss while another relay writer holds the write
+/// lock waits for it, as a capture does, rather than failing the page.
+#[test]
+fn a_loss_noted_while_another_relay_writer_writes_waits_for_it() {
+    let state = State::new();
+    let store = state.open(NOW);
+    queue(&store, "message", NOW);
+    store
+        .connection
+        .execute("UPDATE outbound SET state='accepted', host_id='host-b'", [])
+        .unwrap();
+    let writer = Connection::open(state.0.join("relay.sqlite3")).unwrap();
+    writer
+        .execute_batch("BEGIN IMMEDIATE; UPDATE outbox_epoch SET epoch = epoch;")
+        .unwrap();
+    let committed = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        writer.execute_batch("COMMIT").unwrap();
+    });
+    let noted = store.note_lost(
+        "rex:/tmp/a.sock",
+        "devbox",
+        "host-b",
+        "epoch",
+        &[loss("message", "bob", 1)],
+        NOW,
+    );
+    committed.join().unwrap();
+    assert_eq!(noted.map_err(|error| error.to_string()), Ok(()));
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM lost"), 1);
+}
+
 #[test]
 fn lost_reports_roll_back_the_whole_page_on_write_failure() {
     let state = State::new();
