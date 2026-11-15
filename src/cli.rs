@@ -250,6 +250,15 @@ impl Cli {
         )
     }
 
+    pub fn is_rex_sessions(&self) -> bool {
+        matches!(
+            self.command,
+            Command::Rex {
+                command: RexCommand::Sessions
+            }
+        )
+    }
+
     pub fn rex_action(&self) -> Option<&str> {
         match &self.command {
             Command::Rex {
@@ -563,6 +572,8 @@ enum RelayCommand {
 
 #[derive(Debug, Subcommand)]
 enum RexCommand {
+    /// Survey every block's agent and session without activating or changing state.
+    Sessions,
     /// Turn one Rex server's events, named by `--endpoint`, into lifecycle work.
     Bridge,
     /// Run a Namedrop palette action in this process.
@@ -624,6 +635,9 @@ impl Command {
             Self::Rex {
                 command: RexCommand::Bridge,
             } => "rex.bridge",
+            Self::Rex {
+                command: RexCommand::Sessions,
+            } => "rex.sessions",
             Self::Rex {
                 command: RexCommand::Action { .. },
             } => "rex.action",

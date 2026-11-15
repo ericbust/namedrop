@@ -205,6 +205,26 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
+    fn an_unfinished_migration_is_refused_in_the_owner_s_words() {
+        let root = std::env::temp_dir().join(format!("nd-u8-interrupted-{}", std::process::id()));
+        fs::create_dir_all(root.join("runtime")).unwrap();
+        fs::write(root.join("runtime/migration.json"), "{}").unwrap();
+        for (owner, words) in [
+            (
+                "standalone\n",
+                "Namedrop installation was interrupted. Run sh scripts/install.sh again to finish; this command made no changes.",
+            ),
+            (
+                "herdr\n",
+                "Namedrop activation was interrupted. Reopen Update Namedrop to finish; this command made no changes.",
+            ),
+        ] {
+            fs::write(root.join("runtime/owner"), owner).unwrap();
+            assert_eq!(super::super::command_guard(&root, None).unwrap_err(), words);
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn an_exclusive_drain_waits_without_mutating_the_state_and_times_out() {
         let root = std::env::temp_dir().join(format!("nd-u7-drain-{}", std::process::id()));
         fs::create_dir_all(root.join("runtime")).unwrap();

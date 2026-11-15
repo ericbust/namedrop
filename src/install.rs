@@ -220,6 +220,40 @@ pub fn disclosed_user_package_targets(
     )
 }
 
+/// What a package install writes outside its state directory, as
+/// (what, where) pairs, from the paths its writers use. `namedrop install`
+/// lists these before it writes and reports them after.
+pub(crate) fn package_targets(
+    home: &Path,
+    config: AgentConfigDirectories<'_>,
+) -> Vec<(&'static str, PathBuf)> {
+    let mut targets = vec![("Shell command", home.join(".local/bin/namedrop"))];
+    for file in command::shell_startup_files(home) {
+        targets.push(("PATH lines", file));
+    }
+    for (runtime, directory) in user_package_directories(home) {
+        targets.push((
+            match runtime {
+                AgentRuntime::Codex => "Codex package",
+                AgentRuntime::ClaudeCode => "Claude Code package",
+            },
+            directory,
+        ));
+    }
+    if let Ok(settings) = claude_permissions::settings_path(&config.claude(home)) {
+        targets.push(("Claude Code permissions", settings));
+    }
+    targets.push(("Codex rules, sandbox root and plugin", config.codex(home)));
+    targets.push((
+        "Install records",
+        crate::locator::install_record(home)
+            .parent()
+            .expect("the install record has a directory")
+            .to_owned(),
+    ));
+    targets
+}
+
 /// Read-only repair guidance. The Herdr activation runner applies supported
 /// Codex install steps automatically; hook trust remains a human action.
 pub(crate) fn user_hook_activation_guidance(

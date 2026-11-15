@@ -3,8 +3,10 @@ and the palette's error lines.
 
 Usage: python3 -I tests/rex_install_live.py BINARY REX_BINARY OUT [SECTION...]
 
-Sections, all by default: shapes handoff drain palette helpers tour doctor
-step6 races fallback. Each fixture is a folder of OUT with its own HOME, its
+Sections, all by default: shapes lines handoff drain palette helpers tour
+doctor step6 races fallback. The optional runtime section needs
+NAMEDROP_TEST_STANDALONE_BASELINE and NAMEDROP_TEST_ARCHIVE from
+build_standalone_upgrade.py. Each fixture is a folder of OUT with its own HOME, its
 own Rex server on a socket under /tmp, and `--autostart=false -S unix://...`
 on every Rex call. Herdr is the Herdr differential's script `herdr`. Agents
 are Python stand-ins whose real SessionStart hook binds them in Rex blocks.
@@ -27,12 +29,13 @@ import signal
 import socket
 import subprocess
 import sys
+import tarfile
 import threading
 import time
 
 binary, rex, out = (Path(p).resolve() for p in sys.argv[1:4])
-SECTIONS = ['shapes', 'handoff', 'drain', 'palette', 'helpers', 'tour', 'doctor', 'step6', 'races', 'fallback']
-chosen = sys.argv[4:] or SECTIONS
+SECTIONS = ['shapes', 'lines', 'handoff', 'drain', 'palette', 'helpers', 'tour', 'doctor', 'step6', 'races', 'fallback', 'runtime']
+chosen = sys.argv[4:] or [section for section in SECTIONS if section != 'runtime']
 assert set(chosen) <= set(SECTIONS), chosen
 repo = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('runtime_cleanup', repo / 'scripts/runtime.py')
@@ -374,6 +377,15 @@ while not os.path.exists(ended):time.sleep(.05)
 '''
 
 
+# Claude Code and Codex report their kind through OSC 7501 with no
+# integration installed, so Rex sees an agent that no Namedrop hook bound.
+UNHOOKED = '''import os,sys,time
+sys.stdout.write("\\x1b]7501;state=idle:app=" + sys.argv[1] + "\\x1b\\\\")
+sys.stdout.flush()
+while not os.path.exists(sys.argv[2]):time.sleep(.05)
+'''
+
+
 def bind_agents(f, count=2, first=0):
     script = f.root / 'standin.py'
     script.write_text(AGENT)
@@ -446,6 +458,85 @@ def section_shapes():
     say('U7 real Rex install/config/readback/remove/cached-hook checks passed')
 
 
+def rex_module(f, session, block):
+    report = json.loads(f.in_block(session, block, 'doctor', ok=None).stdout)['data']
+    return next(i for i in report['issues'] if i['code'] == 'ND-REX-001')
+
+
+def section_lines():
+    """The U7 review's F1, F2, F5 and F6, and the backups, on a real server."""
+    # F1: an unreadable moment is no removal, and the line put back clears it.
+    f = Fixture('lines-read', b'-- mine\n')
+    try:
+        f.install()
+        session, block = f.session('lines')
+        f.config.chmod(0)
+        try:
+            f.in_block(session, block, 'activate', '--input-json', CONFIRMED)
+        finally:
+            f.config.chmod(0o600)
+        assert registration(f)['line'] == 'inserted', registration(f)
+        assert rex_module(f, session, block)['diagnostic']['confirmed'] is True
+        edited = f.config.read_bytes()
+        f.config.write_bytes(b'-- mine\n')
+        f.api('server.config_reload', {})
+        f.in_block(session, block, 'activate', '--input-json', CONFIRMED)
+        assert registration(f)['line'] == 'removed', registration(f)
+        issue = rex_module(f, session, block)
+        assert issue['diagnostic']['confirmed'] is False and 'was removed' in issue['explanation'], issue
+        f.config.write_bytes(edited)
+        f.api('server.config_reload', {})
+        # Doctor reads the file itself, with no refresh in between.
+        issue = rex_module(f, session, block)
+        assert issue['diagnostic']['confirmed'] is True, issue
+        f.in_block(session, block, 'activate', '--input-json', CONFIRMED)
+        assert registration(f)['line'] == 'inserted', registration(f)
+        f.install('--remove')
+        assert f.config.read_bytes() == b'-- mine\n', f.config.read_bytes()
+        say('lines: an unreadable init.lua is no removal; the line put back is confirmed, and --remove deletes it')
+    finally:
+        f.config.chmod(0o600)
+        f.close()
+    # F2: a file Rex reads that is not UTF-8 is edited, and comes back byte
+    # for byte, with only the newest backup kept.
+    body = b'-- caf\xe9 config\nlocal x = 1\n'
+    f = Fixture('lines-latin1', body)
+    try:
+        f.install()
+        assert f.config.read_bytes() == LINE.encode() + b'\n' + body, f.config.read_bytes()
+        assert about(f)['launcher'] == str(f.launcher)
+        f.install('--remove')
+        assert f.config.read_bytes() == body, f.config.read_bytes()
+        backups = sorted(f.config.parent.glob('init.lua.namedrop-*.bak'))
+        assert [b.read_bytes() for b in backups] == [LINE.encode() + b'\n' + body], backups
+        say('lines: a Latin-1 init.lua is installed, confirmed and removed byte for byte, with one backup left')
+    finally:
+        f.close()
+    # F5: removal finishes over an error the person made after the install.
+    f = Fixture('lines-broken', b'-- mine\n')
+    try:
+        f.install()
+        f.config.write_bytes(f.config.read_bytes() + b'local = 1\n')
+        data = json.loads(f.install('--remove').stdout)['data']
+        assert data['removed'] is True and 'config_error' in data, data
+        assert f.config.read_bytes() == b'-- mine\nlocal = 1\n', f.config.read_bytes()
+        assert not (f.config.parent / 'namedrop.lua').exists() and not (f.home / '.config/namedrop/rex.json').exists()
+        say('lines: --remove finished over an init.lua the person broke, and named the error')
+    finally:
+        f.close()
+    # F6: the person's own line, deleted later, is inserted by the next install.
+    f = Fixture('lines-present', (LINE + '\n-- mine\n').encode())
+    try:
+        f.install()
+        assert registration(f)['line'] == 'present'
+        f.config.write_bytes(b'-- mine\n')
+        f.install()
+        assert f.config.read_bytes() == (LINE + '\n-- mine\n').encode() and registration(f)['line'] == 'inserted'
+        say('lines: a present line the person deleted is inserted by the next install')
+    finally:
+        f.close()
+
+
 def section_handoff():
     for scenario in ['takeover', 'stopped-before-marker', 'stopped-after-marker', 'writer-after-marker',
                      'partial-package-write', 'rex-half-removed', 'server-stopped', 'line-printed', 'line-removed']:
@@ -484,6 +575,9 @@ def section_handoff():
             if scenario in {'line-printed', 'line-removed'}:
                 record['line'] = scenario.removeprefix('line-')
                 (f.home / '.config/namedrop/rex.json').write_text(json.dumps(record))
+            if scenario == 'line-removed':
+                # The line state is read from init.lua, so the person removes it.
+                f.config.write_bytes(f.config.read_bytes().split(b'\n', 1)[1])
             report = json.loads(h.activate().stdout)['data']
             assert report['handoff'] and 'were not carried over' in report['handoff'][0]['notice'], report.get('handoff')
             assert (f.state / 'runtime/retired.json').exists()
@@ -604,14 +698,14 @@ def section_palette():
         f.close()
 
 
-def start_helpers(f, session, block):
+def start_helpers(f, session, block, first=0):
     """Runs Namedrop where it starts each helper of the standalone state."""
     f.in_block(session, block, 'activate', '--input-json', CONFIRMED)
     f.in_block(session, block, 'dashboard', '--no-open')
     # A bound stand-in in a second active space. The reminder clock is not
     # started: a reminder needs an agent session with a completed
     # registration, which a stand-in does not perform.
-    sessions, blocks = bind_agents(f, 1)
+    sessions, blocks = bind_agents(f, 1, first=first)
     f.in_block(sessions[0], blocks[0], 'activate', '--input-json', CONFIRMED)
     relay = subprocess.Popen([str(f.launcher), 'relay', 'worker', '--host', 'u7', '--endpoint', f.endpoint], env=f.env,
                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -955,6 +1049,166 @@ def section_fallback():
             h.close()
             f.close()
     say('U7 lock fallback matrix passed')
+
+
+def section_runtime():
+    """U8 with the fixture archives: no Herdr, real agents, tour and reinstall."""
+    f = Fixture('runtime-u8', b'-- config\n')
+    try:
+        shutil.rmtree(f.state)
+        f.state.mkdir()
+        assert shutil.which('herdr', path=f.env['PATH']) is None
+        roots = []
+        for key, label in [('NAMEDROP_TEST_STANDALONE_BASELINE', 'baseline'), ('NAMEDROP_TEST_ARCHIVE', 'incoming')]:
+            directory = f.root / label
+            with tarfile.open(os.environ[key]) as archive:
+                archive.extractall(directory, filter='data')
+            roots.append(next(directory.iterdir()))
+        old, new = roots
+
+        def publish(source, ok=True):
+            p = subprocess.run([sys.executable, str(source / 'scripts/runtime.py'), str(source), '--state-dir',
+                                str(f.state), '--verify', 'install'], env=f.env, input='', capture_output=True,
+                               text=True, timeout=90)
+            with (f.root / 'runtime-publish.jsonl').open('a') as log:
+                log.write(json.dumps(dict(source=str(source), code=p.returncode, stdout=p.stdout, stderr=p.stderr)) + '\n')
+            assert (p.returncode == 0) == ok, (p.returncode, p.stdout, p.stderr)
+            return p
+
+        def store():
+            import sqlite3
+            with contextlib.closing(sqlite3.connect(f.state / 'namedrop.sqlite3')) as db:
+                return '\n'.join(db.iterdump())
+
+        def settled():
+            # The bridge records a block's observations a moment after the
+            # block changes, so the snapshot waits for those writes to end.
+            last = store()
+            for _ in range(15):
+                time.sleep(1)
+                now = store()
+                if now == last:
+                    return now
+                last = now
+            raise AssertionError('the store kept changing before the publish')
+
+        def unchanged(before):
+            import difflib
+            after = store()
+            assert after == before, '\n'.join(difflib.unified_diff(before.splitlines(), after.splitlines(), lineterm=''))
+
+        script = f.root / 'unhooked.py'
+        script.write_text(UNHOOKED)
+        unhooked = {f.session('u8-unhooked-' + app, sys.executable, '-I', str(script), app, str(f.root / ('end-' + app)))[1]: app
+                    for app in ('claude-code', 'codex')}
+
+        def surveyed():
+            p = subprocess.run([str(old / 'bin/namedrop'), '--plugin-state', str(f.state), '--endpoint', f.endpoint, 'rex',
+                                'sessions', '--json'], env=f.env, capture_output=True, text=True, timeout=30)
+            assert p.returncode == 0, (p.stdout, p.stderr)
+            return {pane['block']: (pane['agent'], pane['session']) for pane in json.loads(p.stdout)['data']['panes']}
+        wait(surveyed, lambda found: all(found.get(block) == (app, None) for block, app in unhooked.items()),
+             'the unhooked agents reported their kinds')
+        publish(old)
+        assert (f.state / 'runtime/owner').read_text() == 'standalone\n'
+        assert json.loads((f.state / 'runtime/source.json').read_text())['kind'] == 'archive'
+        migration = f.state / 'runtime/legacy-sessions.json'
+        assert json.loads(migration.read_text())['sessions'] == [], migration.read_text()
+        selected, before = os.readlink(f.state / 'runtime/current'), settled()
+        refused = publish(new, ok=False)
+        assert all(f'in block {block} on {f.endpoint}' in refused.stderr for block in unhooked), refused.stderr
+        assert os.readlink(f.state / 'runtime/current') == selected
+        unchanged(before)
+        for app in unhooked.values():
+            (f.root / ('end-' + app)).touch()
+        wait(surveyed, lambda found: not any(found.get(block, (None,))[0] for block in unhooked), 'the unhooked agents ended')
+        say('U8 first install with unhooked Claude Code and Codex agents passed; a live update waited for them')
+        sessions, blocks = bind_agents(f, 1)
+        cutoff = json.loads(migration.read_text())
+        survey = json.loads(f.nd('rex', 'sessions', '--endpoint', f.endpoint).stdout)['data']['panes']
+        agent = next(p for p in survey if p['block'] == blocks[0])
+        # A stand-in writes no status record, so the adapter reports its bound
+        # session with no agent kind (`unreported_kind` in src/mux/rex/agent.rs).
+        assert agent['session'] and agent['reports_session'], agent
+        cutoff['sessions'].append([f.endpoint, agent['session']])
+        migration.write_text(json.dumps(cutoff))
+        selected, before = os.readlink(f.state / 'runtime/current'), settled()
+        refused = publish(new, ok=False)
+        assert 'Some Rex sessions still use pre-launcher tools' in refused.stderr
+        assert os.readlink(f.state / 'runtime/current') == selected
+        unchanged(before)
+        agent_pid = int(bindings(f)[0]['agent'].split('@')[0])
+        (f.root / 'end-0').touch()
+        wait(lambda: identity(agent_pid), lambda alive: alive is None, 'the working agent ended')
+        cutoff['sessions'] = []
+        cutoff['codex_ready'] = True
+        migration.write_text(json.dumps(cutoff))
+
+        session, block = f.session('u8-runtime-tour')
+        f.in_block(session, block, 'name', 'survivor', '--type', 'terminal')
+        before_blocks = set(f.blocks(session))
+        f.in_block(session, block, 'ui', 'launch', 'tour')
+        layer = next(iter(wait(lambda: set(f.blocks(session)) - before_blocks, bool, 'the U8 tour opened')))
+        wait(lambda: runtime.gate_holders(f.state / 'runtime/commands.lock'), bool, 'the U8 tour holds its gate')
+        selected, before = os.readlink(f.state / 'runtime/current'), settled()
+        started = time.monotonic()
+        refused = publish(new, ok=False)
+        assert time.monotonic() - started >= 20
+        assert 'close' in refused.stderr and 'tour' in refused.stderr
+        assert os.readlink(f.state / 'runtime/current') == selected
+        unchanged(before)
+        assert layer in f.blocks(session)
+
+        same = f.root / 'same-schema'
+        shutil.copytree(repo / 'scripts', same / 'scripts')
+        for filename in ('runtime.json', 'herdr-plugin.toml'):
+            shutil.copy2(repo / filename, same / filename)
+        (same / 'bin').mkdir()
+        shutil.copy2(binary, same / 'bin/namedrop')
+        publish(same)
+        assert os.readlink(f.state / 'runtime/current') != selected
+        old_runtime = os.path.realpath(f.state / 'runtime' / selected / 'namedrop')
+        assert any(os.path.realpath(row[1]) == old_runtime and 'ui' in row[2] and 'run' in row[2]
+                   for row in processes_under(f.root)), ('tour changed runtimes', processes_under(f.root))
+        assert layer in f.blocks(session)
+        f.rx('send-key', '-s', session, '-b', layer, 'escape')
+        wait(lambda: f.blocks(session), lambda b: layer not in b, 'the U8 tour closed')
+        publish(new)
+        assert 'survivor' in store()
+
+        cache = f.root / 'u8-cached-codex'
+        shutil.copytree(f.home / '.agents/skills/namedrop', cache)
+        f.install('--remove')
+        cached_hooks_are_quiet(f, cache)
+        publish(new)
+        assert not (f.state / 'runtime/retired.json').exists()
+        script = f.root / 'cached-agent.py'
+        script.write_text(AGENT.replace('[launcher,"hook","session-start","--state-directory",state]',
+                                        '["/bin/sh",launcher]'))
+        before_bindings = set((f.state / 'rex/sessions').glob('*.json'))
+        f.session('u8-cached-agent', sys.executable, '-I', str(script), str(cache / 'scripts/session-start'),
+                  str(f.state), str(f.root / 'end-cached'))
+        wait(lambda: set((f.state / 'rex/sessions').glob('*.json')) - before_bindings, bool,
+             'the cached hook binds again after reinstall')
+
+        if sys.platform == 'darwin':
+            stable = f.launcher
+            f.launcher = (f.state / 'runtime/current/namedrop').resolve()
+            try:
+                removal, hold = paused(f, '/runtime/commands.lock', 'SH', 'install', '--remove', '--input-json', CONFIRMED)
+            finally:
+                f.launcher = stable
+            publish(new)
+            running = start_helpers(f, session, block, first=len(list((f.state / 'rex/sessions').glob('*.json'))))
+            files, module = shared(f), (f.config.parent / 'namedrop.lua').read_bytes()
+            hold.unlink()
+            stdout, stderr = removal.communicate(timeout=60)
+            assert removal.returncode == 0 and 'Namedrop was installed again. Removal stopped.' in stdout, (stdout, stderr)
+            assert {pid: identity(pid) for pid in running} == {pid: before for pid, (_, before) in running.items()}
+            assert shared(f) == files and (f.config.parent / 'namedrop.lua').read_bytes() == module
+        say('U8 real Rex runtime preflight, tour, upgrade, cached-hook reinstall and removal race passed')
+    finally:
+        f.close()
 
 
 for section in chosen:

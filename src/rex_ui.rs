@@ -6,8 +6,10 @@ use std::{fs, path::Path};
 
 mod handoff;
 mod install;
+mod sessions;
 pub(crate) use handoff::{handoff, predecessor_warnings};
-pub use install::{confirm_remove, install, remove};
+pub use install::{confirm_remove, install, install_preview, remove};
+pub use sessions::sessions;
 
 pub const CONFIG_LINE: &str = "pcall(require, \"namedrop\");";
 pub const MANAGED_LINE: &str =
@@ -206,7 +208,7 @@ pub(crate) fn refresh(
     }
     let text = module_text(launcher, state)?;
     crate::install::replace_if_changed(lease, &module, &text, Some(0o600))?;
-    mark_removed_line(&mut record);
+    reinspect_line(&mut record);
     record["launcher"] = json!(launcher);
     record["state"] = json!(state);
     crate::install::replace_if_changed(
@@ -217,36 +219,87 @@ pub(crate) fn refresh(
     )
 }
 
-fn mark_removed_line(record: &mut Value) {
-    if record["line"] == "inserted"
-        && let Some(config) = record["config"].as_str()
-        && !fs::read(config).is_ok_and(|bytes| install::has_line(&bytes))
-    {
-        record["line"] = json!("removed");
+/// The state of a line this install inserted, read from the file each time:
+/// `inserted` while the file holds the line, and `removed` once a read finds
+/// it gone or finds no file. A read that fails leaves the recorded state, so
+/// an unreadable file is never taken for a removal, and a line the person
+/// adds back makes the state `inserted` again.
+fn reinspect_line(record: &mut Value) {
+    if !matches!(record["line"].as_str(), Some("inserted" | "removed")) {
+        return;
     }
+    let Some(config) = record["config"].as_str() else {
+        return;
+    };
+    let present = match fs::read(config) {
+        Ok(bytes) => install::has_line(&bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => return,
+    };
+    record["line"] = json!(if present { "inserted" } else { "removed" });
 }
 
 pub(crate) fn inspect(home: Option<&Path>, endpoint: &Endpoint) -> Option<Result<Value, String>> {
+    inspect_with(home, |record| crate::mux::rex::ui_report(endpoint, record))
+}
+
+/// `inspect`, with the server's report of `record` from `report`.
+fn inspect_with(
+    home: Option<&Path>,
+    report: impl FnOnce(&Value) -> Result<Value, String>,
+) -> Option<Result<Value, String>> {
     let mut record = match registration(home?) {
         Ok(Some(r)) if r["module"].as_str().is_some_and(|s| !s.is_empty()) => r,
         Ok(_) => return None,
         Err(e) => return Some(Err(e)),
     };
-    mark_removed_line(&mut record);
-    Some(
-        crate::mux::rex::ui_report(endpoint, &record).map(|mut report| {
-            if record["line"] == "removed" {
-                report["confirmed"] = json!(false);
-            }
-            report
-        }),
-    )
+    reinspect_line(&mut record);
+    Some(report(&record).map(|mut report| {
+        if record["line"] == "removed" {
+            report["confirmed"] = json!(false);
+        } else if report["confirmed"] != true && stale(&record, &report) {
+            report["stale"] = json!(true);
+        }
+        report
+    }))
 }
 
+/// Whether the server runs an older text of the registered module, so a
+/// reload is all it needs: About names the registered file, the eleven
+/// actions loaded, and the file now holds the text for the recorded
+/// launcher and state, as after a refresh rewrote it (the U6 review's F7).
+fn stale(record: &Value, report: &Value) -> bool {
+    let (Some(module), Some(launcher), Some(state)) = (
+        record["module"].as_str(),
+        record["launcher"].as_str(),
+        record["state"].as_str(),
+    ) else {
+        return false;
+    };
+    report["actions_complete"] == true
+        && report["about"]["module"]
+            .as_str()
+            .map(|loaded| loaded.strip_prefix('@').unwrap_or(loaded))
+            == Some(module)
+        && module_text(Path::new(launcher), Path::new(state))
+            .is_ok_and(|text| fs::read_to_string(module).is_ok_and(|written| written == text))
+}
+
+/// The repair for a module the server loaded before a refresh rewrote it.
+pub const RELOAD_REPAIR: &str = "Reload Rex's configuration with rex config reload.";
+
 pub(crate) fn shortcuts(home: Option<&Path>, endpoint: &Endpoint) -> Value {
-    match inspect(home, endpoint) {
+    shortcut_report(inspect(home, endpoint))
+}
+
+/// Activation's shortcut report: the keys only for a confirmed module.
+fn shortcut_report(inspected: Option<Result<Value, String>>) -> Value {
+    match inspected {
         Some(Ok(report)) if report["confirmed"] == true => {
             json!({"status":"rex_module", "path":report["module"], "keys":report["keys"]})
+        }
+        Some(Ok(report)) if report["stale"] == true => {
+            json!({"status":"stale_module", "path":report["module"], "repair":RELOAD_REPAIR})
         }
         _ => json!({"status":"no_module", "repair":"Run sh scripts/install.sh."}),
     }
@@ -266,12 +319,22 @@ pub fn error_line(error: &str) -> String {
 mod tests;
 
 /// A config start is accepted only when its socket peer is its parent.
-/// Refusal performs no protocol request or state lookup.
+/// Refusal performs no protocol request or state lookup. An accepted start
+/// is keyed by the endpoint the server names itself by, which `prove` reads,
+/// as each action's `endpoint()` is, however `REX_SERVER` spells the socket.
 pub fn server_start_endpoint(
     inherited: &dyn crate::mux::home::Inherited,
     parent: u32,
+    prove: impl FnOnce(&Path) -> Option<Endpoint>,
 ) -> Option<Endpoint> {
     let socket = crate::mux::home::rex_socket(inherited)?;
     let peer = inherited.peer(&socket).ok()?;
-    (peer == parent && parent > 1).then(|| Endpoint::parse(&format!("rex:{}", socket.display())))
+    (peer == parent && parent > 1)
+        .then(|| prove(&socket))
+        .flatten()
+}
+
+/// The endpoint the local Rex server at `socket` names itself by.
+pub fn local_endpoint(socket: &Path) -> Option<Endpoint> {
+    crate::mux::rex::local_endpoint(socket).ok()
 }
