@@ -374,6 +374,57 @@ fn setup_uses_herdr_actions_preserves_context_and_never_relinks_on_check() {
 }
 
 #[test]
+fn setup_shows_what_a_handoff_from_rex_did() {
+    let fixture = Fixture::new();
+    fixture.host();
+    let mut report: serde_json::Value = serde_json::from_str(&activation_output(true)).unwrap();
+    report["data"]["handoff"] = serde_json::json!([{
+        "state": "/rex/state",
+        "notice": "The names made on Rex stay in /rex/state and were not carried over.",
+        "invalid_bindings": ["/rex/state/rex/sessions/broken.json"],
+        "module": {"status": "not_confirmed", "error": "Rex did not answer", "sealed": false}
+    }]);
+    let output = success(
+        fixture
+            .command("setup.sh")
+            .arg("activate")
+            .env("HERDR_SOCKET_PATH", "/isolated socket")
+            .env("HERDR_WORKSPACE_ID", "space-1")
+            .env("HERDR_PANE_ID", "pane-1")
+            .env(
+                "NAMEDROP_TEST_LOG_RESPONSE",
+                action_response("activate", 0, &report.to_string()),
+            )
+            .output()
+            .unwrap(),
+    );
+    let shown = output.split_whitespace().collect::<Vec<_>>().join(" ");
+    for line in [
+        "Namedrop on Rex",
+        "The names made on Rex stay in /rex/state and were not carried over.",
+        "The Rex module is not confirmed: Rex did not answer",
+        "Could not read the Rex session binding /rex/state/rex/sessions/broken.json",
+    ] {
+        assert!(shown.contains(line), "{line:?} missing from {output}");
+    }
+    let plain = success(
+        fixture
+            .command("setup.sh")
+            .arg("activate")
+            .env("HERDR_SOCKET_PATH", "/isolated socket")
+            .env("HERDR_WORKSPACE_ID", "space-1")
+            .env("HERDR_PANE_ID", "pane-1")
+            .env(
+                "NAMEDROP_TEST_LOG_RESPONSE",
+                action_response("activate", 0, &activation_output(true)),
+            )
+            .output()
+            .unwrap(),
+    );
+    assert!(!plain.contains("Rex"), "{plain}");
+}
+
+#[test]
 fn setup_binds_action_to_origin_and_refuses_a_missing_pane() {
     let fixture = Fixture::new();
     fixture.host();
