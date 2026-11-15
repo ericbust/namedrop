@@ -263,6 +263,11 @@ trait Host {
     /// How often a connected bridge starts the relay's workers again, so a
     /// worker that stopped while a thread is open collects again.
     fn relay_every(&self) -> Duration;
+    /// Starts a standalone install's update check, which runs at most once a
+    /// day. Nothing else starts it on Rex.
+    fn start_update_check(&mut self);
+    /// How often a connected bridge starts the update check again.
+    fn update_every(&self) -> Duration;
 }
 
 struct Processes<'a> {
@@ -295,6 +300,19 @@ impl Host for Processes<'_> {
 
     fn relay_every(&self) -> Duration {
         RELAY_EVERY
+    }
+
+    fn start_update_check(&mut self) {
+        use crate::Clock;
+        if let Some(check) =
+            crate::update_check::start_standalone(self.state, crate::SystemClock.now_unix_ms())
+        {
+            self.workers.reap(check);
+        }
+    }
+
+    fn update_every(&self) -> Duration {
+        UPDATE_EVERY
     }
 }
 
@@ -353,6 +371,10 @@ const IDLE: Duration = Duration::from_secs(60);
 /// How often a connected bridge looks for a relay worker to start again.
 /// A worker collects every 30 s, so a killed one misses at most one.
 const RELAY_EVERY: Duration = Duration::from_secs(10);
+/// How often a connected bridge starts the update check again. The check's
+/// daily throttle decides whether it runs, so a check follows within an hour
+/// of the last one's day.
+const UPDATE_EVERY: Duration = Duration::from_secs(3600);
 
 /// The bridge's loop. Each connection queues a `Resync` for every activated
 /// space of the endpoint, unless the server's `host_id` changed, then
@@ -362,7 +384,9 @@ const RELAY_EVERY: Duration = Duration::from_secs(10);
 /// returns at once, because the state it would write to is gone, so the
 /// lock is checked again after each wait and before each write. Each call
 /// of the relay goes to `relay`, which answers it once its accept exits,
-/// and every accept is reaped before the bridge returns.
+/// and every accept is reaped before the bridge returns. Each connection
+/// starts the relay's workers and the update check, and starts each again on
+/// its own cadence.
 #[allow(clippy::too_many_arguments)]
 fn bridge(
     state: &Path,
@@ -404,7 +428,9 @@ fn serve(
                 reached = true;
                 let opened = Instant::now();
                 host.start_relay_workers();
+                host.start_update_check();
                 let mut relay_due = Instant::now() + host.relay_every();
+                let mut update_due = Instant::now() + host.update_every();
                 let mut pending = Pending::default();
                 let known = same_server(state, endpoint, stream.host_id());
                 if known {
@@ -429,10 +455,15 @@ fn serve(
                         host.start_relay_workers();
                         relay_due = Instant::now() + host.relay_every();
                     }
+                    if update_due <= now {
+                        host.start_update_check();
+                        update_due = Instant::now() + host.update_every();
+                    }
                     let within = pending
                         .due()
                         .map_or(IDLE, |due| due.saturating_duration_since(now))
                         .min(relay_due.saturating_duration_since(now))
+                        .min(update_due.saturating_duration_since(now))
                         .min(if relay.busy() { receive::TICK } else { IDLE });
                     match stream.next(within) {
                         Next::Event(event) => pending.note(event, Instant::now()),

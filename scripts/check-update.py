@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -14,6 +15,11 @@ import urllib.request
 
 DAY_MS = 86_400_000
 LIMIT = 65_536
+# The first release that ships scripts/install.sh. No release does yet, so
+# this stays above every release until the one that first ships it sets it
+# to its own version (docs/releasing.md). A standalone install is offered no
+# older tag, because an older tag has no installer.
+INSTALLER_FLOOR = '2.0.0'
 
 
 def version(value):
@@ -87,6 +93,90 @@ def registration():
         [os.environ.get('HERDR_BIN_PATH', 'herdr'), 'plugin', 'list', '--plugin', 'namedrop', '--json'],
         timeout=5)
     return json.loads(output.stdout)
+
+
+def standalone(state):
+    """Whether `runtime/owner` names a standalone install, as
+    `installed_runtime::packages::owner` reads it. Any other owner, or none,
+    is checked as Herdr's, as every state was before owners existed."""
+    try:
+        return (state / 'runtime/owner').read_text().strip() == 'standalone'
+    except (OSError, ValueError):
+        return False
+
+
+def standalone_source(state):
+    source = read_json(state / 'runtime/source.json')
+    if not version(source['version']):
+        raise ValueError('Invalid installed version')
+    if source['kind'] == 'archive':
+        owner, repo = 'ericbust', 'namedrop'
+    elif source['kind'] == 'checkout':
+        origin = source['origin']
+        if not isinstance(origin, str):
+            raise ValueError('Invalid checkout origin')
+        match = re.fullmatch(
+            r'(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)'
+            r'([A-Za-z0-9_][A-Za-z0-9_.-]{0,99})/([A-Za-z0-9_][A-Za-z0-9_.-]{0,99}?)(?:\.git)?/?', origin)
+        if not match:
+            return None
+        owner, repo = match.groups()
+    else:
+        raise ValueError('Invalid standalone source kind')
+    return dict(owner=owner, repo=repo, kind=source['kind'],
+                installed_version=source['version'], subdir='')
+
+
+def version_key(value):
+    core, separator, serial = value.partition('-exp.')
+    return (*map(int, core.split('.')), not separator, int(serial) if separator else 0)
+
+
+def offered(release, installed):
+    """Whether a standalone install of `installed` may be offered `release`:
+    one at or above the installer floor, newer than it, and on its channel.
+    A stable install takes only stable releases. A pre-release takes the
+    later pre-releases of its own version and newer stable releases."""
+    if version_key(release) < version_key(INSTALLER_FLOOR) or version_key(release) <= version_key(installed):
+        return False
+    core, pre_release, _ = release.partition('-exp.')
+    return not pre_release or installed.startswith(core + '-exp.')
+
+
+def latest_tag(source):
+    """The commit and version of the newest release `source` is offered, or
+    `(None, None)` when the repository has none for it."""
+    output = run(
+        ['git', '-c', 'credential.helper=', '-c', 'core.hooksPath=/dev/null',
+         'ls-remote', '--tags', f'https://github.com/{source["owner"]}/{source["repo"]}.git', 'v*'],
+        text=True, timeout=8, env=dict(os.environ, GIT_TERMINAL_PROMPT='0'))
+    tags = {}
+    for line in output.stdout.splitlines():
+        commit, name = line.split('\t')
+        if not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', commit):
+            raise ValueError('Invalid remote commit')
+        match = re.fullmatch(r'refs/tags/v(.+?)(\^\{\})?', name)
+        if match and version(match[1]):
+            release = match[1]
+            if release not in tags or match[2]:
+                tags[release] = commit
+    if not tags:
+        raise ValueError('No release tags were found')
+    candidates = [release for release in tags if offered(release, source['installed_version'])]
+    if not candidates:
+        return None, None
+    newest = max(candidates, key=version_key)
+    return tags[newest], newest
+
+
+def developer_tools_missing():
+    if sys.platform != 'darwin' or shutil.which('git') != '/usr/bin/git':
+        return False
+    try:
+        run(['xcode-select', '-p'], timeout=5)
+        return False
+    except (OSError, subprocess.SubprocessError):
+        return True
 
 
 def remote_commit(source):
@@ -186,21 +276,29 @@ def check(state, settings, now=None, lookup_registration=registration,
         cache = dict(schema_version=1, checked_at=now, source=None,
                      remote_commit=None, remote_version=None, last_success_at=None, last_error=None)
         try:
-            source = source_from_registration(lookup_registration())
+            owned = standalone(state)
+            source = standalone_source(state) if owned else source_from_registration(lookup_registration())
             cache['source'] = source
             if source is not None:
+                if owned and developer_tools_missing():
+                    cache.update(status='skipped', reason='developer_tools_missing')
+                    atomic_write(path, cache)
+                    return
                 if (previous.get('source') == source and version(previous.get('remote_version'))
                         and isinstance(previous.get('remote_commit'), str)
                         and re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', previous['remote_commit'])
                         and type(previous.get('last_success_at')) is int):
                     for key in ('remote_commit', 'remote_version', 'last_success_at'):
                         cache[key] = previous.get(key)
-                commit = lookup_commit(source)
-                available = cache['remote_version']
-                if commit != cache['remote_commit'] or not version(available):
-                    available = lookup_version(source, commit)
-                if not version(available):
-                    raise ValueError('Invalid remote version')
+                if owned:
+                    commit, available = latest_tag(source)
+                else:
+                    commit = lookup_commit(source)
+                    available = cache['remote_version']
+                    if commit != cache['remote_commit'] or not version(available):
+                        available = lookup_version(source, commit)
+                    if not version(available):
+                        raise ValueError('Invalid remote version')
                 cache.update(remote_commit=commit, remote_version=available, last_success_at=now)
         except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError) as error:
             # Keep diagnostics bounded and printable; failures never reach a hook.

@@ -244,6 +244,9 @@ struct FakeHost {
     /// When the bridge started the relay's workers, and how often it does.
     relay_starts: Vec<Instant>,
     relay_every: Option<Duration>,
+    /// When the bridge started the update check, and how often it does.
+    update_starts: Vec<Instant>,
+    update_every: Option<Duration>,
 }
 
 /// Requests a stop when dropped, so a helper thread that panics still ends
@@ -284,6 +287,14 @@ impl Host for FakeHost {
 
     fn relay_every(&self) -> Duration {
         self.relay_every.unwrap_or(IDLE)
+    }
+
+    fn start_update_check(&mut self) {
+        self.update_starts.push(Instant::now());
+    }
+
+    fn update_every(&self) -> Duration {
+        self.update_every.unwrap_or(IDLE)
     }
 }
 
@@ -373,6 +384,52 @@ fn a_connected_bridge_starts_the_relay_workers_again_on_its_cadence() {
         bridged_with(&state, &script, &stop, &NO_WAIT, &mut host);
     });
     let starts = &host.relay_starts;
+    assert!(starts.len() >= 2, "{} starts", starts.len());
+    for pair in starts.windows(2) {
+        assert!(
+            pair[1] - pair[0] >= Duration::from_millis(50),
+            "{:?}",
+            pair[1] - pair[0]
+        );
+    }
+}
+
+/// Each connection starts the update check at once, and while it stays
+/// connected the bridge starts it again each `update_every`, so a bridge
+/// that runs for days checks each day. A standalone install runs no
+/// `reconcile` and no lifecycle event, so nothing else starts it on Rex.
+#[test]
+fn each_connection_starts_the_update_check_and_again_on_its_cadence() {
+    let state = State::new();
+    let stop = Wake::new().unwrap();
+    let script = Script::new(vec![
+        (Some("host-a"), Vec::new(), None),
+        (Some("host-a"), Vec::new(), None),
+    ]);
+    let mut host = FakeHost::default();
+    bridged_with(&state, &script, &stop, &NO_WAIT, &mut host);
+    assert_eq!(
+        host.update_starts.len(),
+        2,
+        "each connection starts the check"
+    );
+    let script = Script::new(vec![(
+        Some("host-a"),
+        Vec::new(),
+        Some(resync("session:s")),
+    )]);
+    let mut host = FakeHost {
+        update_every: Some(Duration::from_millis(50)),
+        ..FakeHost::default()
+    };
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let _stop = StopOnDrop(&stop);
+            std::thread::sleep(Duration::from_millis(400));
+        });
+        bridged_with(&state, &script, &stop, &NO_WAIT, &mut host);
+    });
+    let starts = &host.update_starts;
     assert!(starts.len() >= 2, "{} starts", starts.len());
     for pair in starts.windows(2) {
         assert!(
