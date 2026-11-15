@@ -301,7 +301,7 @@ With exactly one profile, every command picks it without `--profile`.
 | `list` | Lists every profile with its server state, Namedrop version and source |
 | `report` | Prints one line for Namedrop's [compatibility page](https://github.com/ericbust/namedrop/blob/main/docs/compatibility.md) |
 | `shell` | Opens a Bash shell with only the profile's environment |
-| `rex up`, `rex down` | Installs the build with its archive's `install.sh`, with no Herdr, and runs Claude Code and Codex in blocks of a scratch Rex server, in a `rex-` profile. See [The Rex lane](#the-rex-lane) |
+| `rex up`, `rex down` | Installs the build with its archive's `install.sh`, with no Herdr, and runs Claude Code and Codex in blocks of a scratch Rex server, in a `rex-` profile. See [The Rex lane](#the-rex-lane), and [Step 6's live check](#step-6s-live-check) for the palette check |
 | `rex-remote up`, `check`, `down` | Runs the relay between a scratch Rex server here and a Linux Rex server in Docker, over `ssh://`. See [The remote-host lab](#the-remote-host-lab) |
 
 Options for `up`:
@@ -388,6 +388,32 @@ and Namedrop records no hook run for them. `up` then prints the `rex` lines
 that start more of the profile's agents, with Claude Code's wrapper named in
 full. `rex down` kills every session, stops the server and
 any Codex app server, and keeps the profile. No Herdr runs on this lane.
+
+### Step 6's live check
+
+```sh
+./testbed rex up --link /path/to/namedrop --profile rex-step6 --fresh --yes
+python3 -I testbed/rex-step6-live.py --profile rex-step6 --out /tmp/step6
+./testbed rex down --profile rex-step6
+```
+
+[rex-step6-live.py](rex-step6-live.py) runs UI.md's U14 on a lane that
+`rex up --fresh` just installed, before anything names a block. It checks that
+the server lists the module's eleven actions and that About Namedrop names the
+module, launcher and state the install wrote. It then runs
+`rex do namedrop_activate --origin palette` in the Claude Code block, and
+checks that exactly one floating layer opens, that the session is activated,
+and that Esc closes the layer. It runs `rex do namedrop_name --origin palette`
+in the Claude Code block and in the Codex block, types `claude` and `codex`
+into each name screen, presses Enter on the pane type and persona screens, and
+checks each block's label and its agent's binding in the store. Last, a mention
+typed into Claude Code reaches Codex and the reply comes back, and then the same
+from Codex to Claude Code. No Namedrop command runs during that exchange: the
+driver types into the agents, reads their screens, and reads the store
+read-only. Each check prints one line. Every command is logged in
+`OUT/commands.log`, and `OUT/evidence.json` holds the screens, the store rows
+and the timings. The driver leaves the lane up. To run another Rex build, put
+its `rex` first on `PATH` for `rex up`, as [The Rex lane](#the-rex-lane) says.
 
 ### The remote-host lab
 
