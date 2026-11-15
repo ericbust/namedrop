@@ -10,9 +10,10 @@ pub(super) fn report(wire: &impl Wire, socket: &Path, record: &Value) -> Result<
         .request("client.keymap", Some(json!({})))
         .map_err(fault)?
         .payload;
+    // The reply wraps the action's return value: {"client_actions": [], "result": …}.
     let about = control
         .request("client.action", Some(json!({"action":"namedrop_about"})))
-        .map(|reply| reply.payload);
+        .map(|reply| reply.payload["result"].clone());
     Ok(readback(record, &keymap, about))
 }
 
@@ -127,7 +128,7 @@ mod tests {
             }
             "client.action" => {
                 assert_eq!(request.payload, json!({"action":"namedrop_about"}));
-                Ok(about())
+                Ok(json!({"client_actions":[], "result":about()}))
             }
             other => panic!("unexpected {other}"),
         });
