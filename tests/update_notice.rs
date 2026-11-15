@@ -356,6 +356,55 @@ fn standalone_owner_selects_its_home_settings_and_download_notice() {
     );
 }
 
+/// The U10 review's F5: only `standalone` picks the standalone settings and
+/// text. Any other owner, an invalid or unreadable one included, keeps
+/// Herdr's settings file and notice, as every state did before owners.
+#[test]
+fn an_owner_other_than_standalone_keeps_herdrs_settings_and_notice() {
+    let f = Fixture::new();
+    if update_profile::isolate(&f.root, &f.home) {
+        return;
+    }
+    f.seed("9.10.0");
+    let owner = f.state.join("runtime/owner");
+    fs::create_dir_all(owner.parent().unwrap()).unwrap();
+    let standalone = f.home.join(".config/namedrop/settings.json");
+    fs::create_dir_all(standalone.parent().unwrap()).unwrap();
+    fs::write(&standalone, "{\"check_for_updates\":false}").unwrap();
+    let herdr = format!(
+        "Namedrop 9.10.0 is available (you have {}). Update: herdr plugin action invoke update --plugin namedrop",
+        env!("CARGO_PKG_VERSION")
+    );
+    let mut now = 1000;
+    for (label, contents) in [
+        ("Herdr", Some(&b"Herdr\n"[..])),
+        ("empty", Some(&b""[..])),
+        ("standalone-ish", Some(&b"standalone-ish\n"[..])),
+        ("not UTF-8", Some(&b"\xffstandalone"[..])),
+        ("a directory", None),
+        ("herdr", Some(&b"herdr\n"[..])),
+    ] {
+        let _ = fs::remove_file(&owner);
+        let _ = fs::remove_dir(&owner);
+        match contents {
+            Some(contents) => fs::write(&owner, contents).unwrap(),
+            None => fs::create_dir(&owner).unwrap(),
+        }
+        let _ = fs::remove_file(f.state.join("update-notice.json"));
+        f.settings("{\"check_for_updates\":true}");
+        now += DAY_MS;
+        assert_eq!(
+            f.notice(now).map(|notice| notice["systemMessage"].clone()),
+            Some(Value::from(herdr.clone())),
+            "{label}"
+        );
+        let _ = fs::remove_file(f.state.join("update-notice.json"));
+        f.settings("{\"check_for_updates\":false}");
+        now += DAY_MS;
+        assert_eq!(f.notice(now), None, "{label}: Herdr's opt-out was not read");
+    }
+}
+
 #[test]
 fn standalone_tag_check_reaches_the_real_session_hook() {
     let f = Fixture::new();
@@ -510,6 +559,28 @@ fn only_background_triggers_launch_the_worker_and_events_do_not_wait_for_it() {
     assert!(!marker.exists(), "opt-out launched a worker");
 }
 
+/// The U10 review's F1: nothing on Rex runs `reconcile` or a lifecycle
+/// event, so a standalone install's bridge starts the check when it connects
+/// to its server. A bridge on a Herdr-owned, unowned, or invalidly owned
+/// state never does, nor one whose settings opt out or whose check ran today.
+#[test]
+fn only_a_standalone_states_rex_bridge_starts_the_update_check() {
+    let output = crate::binary::command("python3")
+        .args([
+            "-I",
+            concat!(env!("CARGO_MANIFEST_DIR"), "/tests/update_bridge.py"),
+            crate::binary::namedrop_path(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 fn both_wrappers_forward_only_composed_notices_and_reject_hostile_versions() {
     let f = Fixture::new();
@@ -643,8 +714,23 @@ fn both_wrappers_forward_only_the_exact_standalone_notice() {
                 json!({"systemMessage":message,"unexpected":"payload"}),
                 false,
             ),
+            // The U10 review's F3: text ahead of the version in the download
+            // segment, and a key after it that ends in the expected tail.
+            (
+                json!({"systemMessage":message.strip_suffix(" and run sh scripts/install.sh").unwrap(),
+                       "x":"INJECT Namedrop 9.10.0-exp.2 and run sh scripts/install.sh"}),
+                false,
+            ),
         ];
         for changed in [
+            message.replace(
+                "download Namedrop 9.10.0-exp.2",
+                "download Namedrop rm -rf ~ ; Namedrop 9.10.0-exp.2",
+            ),
+            message.replace(
+                "download Namedrop 9.10.0-exp.2",
+                "download Namedrop 9.10.0-exp.2 is available (you have 1.7.9). Update: download Namedrop 9.10.0-exp.2",
+            ),
             message.replace(
                 "download Namedrop 9.10.0-exp.2",
                 "download Namedrop 9.10.0-exp.3",

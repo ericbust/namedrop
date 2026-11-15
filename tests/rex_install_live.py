@@ -156,6 +156,12 @@ class Fixture:
         self.home.mkdir()
         self.server_home = self.root / 'server-home' if different_home else self.home
         self.server_home.mkdir(exist_ok=True)
+        # The state is standalone, so its bridge would start the update
+        # check, which lists GitHub's tags with the `git` on the server's
+        # PATH. Only the updates lane turns it on, with a stub `git`.
+        for home in {self.home, self.server_home}:
+            (home / '.config/namedrop').mkdir(parents=True)
+            (home / '.config/namedrop/settings.json').write_text('{"check_for_updates": false}\n')
         self.config = self.root / 'custom/config.lua' if custom else self.server_home / '.config/rex/init.lua'
         self.config.parent.mkdir(parents=True)
         if contents is not None:
@@ -989,6 +995,8 @@ def section_fallback():
         f, h = handoff_fixture('fallback-herdr-' + condition, install=False, custom=True, start=False)
         try:
             config = f.home / '.config'
+            # No Rex server runs here, so no bridge needs the update opt-out.
+            shutil.rmtree(config)
             if condition == 'read-only-config':
                 config.mkdir()
                 config.chmod(0o555)
@@ -1215,14 +1223,21 @@ def section_updates():
     import sqlite3
     for mode in ('same', 'migrated', 'interrupted'):
         migrated_failure = mode == 'migrated'
-        f = Fixture('updates-' + mode, b'-- U10 config\n')
+        f = Fixture('updates-' + mode, b'-- U10 config\n', start=False)
         try:
             shutil.rmtree(f.state)
             f.state.mkdir()
             tools = f.root / 'tools'
             tools.mkdir()
             (tools / 'rex').symlink_to(rex)
-            f.env['PATH'] = str(tools) + ':/usr/bin:/bin'
+            # The bridge keeps the PATH of what started it, the server or a
+            # command in a block, so both put the stub `git` first.
+            f.env['PATH'] = f.server_env['PATH'] = str(tools) + ':/usr/bin:/bin'
+            git = tools / 'git'
+            git_calls = f.root / 'git-calls.jsonl'
+            git.write_text('#!/bin/sh\necho "git ran with no listing" >&2\nexit 1\n')
+            git.chmod(0o700)
+            f.start_server()
             roots = []
             for key, label in [('NAMEDROP_TEST_STANDALONE_BASELINE', 'baseline'), ('NAMEDROP_TEST_ARCHIVE', 'incoming')]:
                 folder = f.root / label
@@ -1261,6 +1276,32 @@ def section_updates():
                 wait(lambda: f.blocks(session), lambda rows: layer not in rows, 'Doctor closes')
 
             publish(old)
+            if mode == 'same':
+                # Nothing on Rex runs `reconcile`, so the bridge starts the
+                # check when it connects. Turn checks on and restart the
+                # server: the bridge reconnects and checks, with no command
+                # typed. The listing is the floor and the channel live: the
+                # baseline is a pre-release below the floor, so only 2.0.0 is
+                # offered.
+                installed = re.search(r'^version\s*=\s*"([^"]+)"', (old / 'herdr-plugin.toml').read_text(), re.M)[1]
+                incoming = re.search(r'^version\s*=\s*"([^"]+)"', (new / 'herdr-plugin.toml').read_text(), re.M)[1]
+                assert '-exp.' in installed and incoming.startswith(installed.partition('-exp.')[0] + '-exp.'), (installed, incoming)
+                listing = ''.join(f'{index:040x}\trefs/tags/v{release}\\n' for index, release in
+                                  enumerate([installed, incoming, '1.11.1', '2.1.0-exp.1', '2.0.0']))
+                git.write_text('#!/bin/sh\nbridge=$(ps -o ppid= -p "$PPID" | tr -d " ")\n'
+                               'printf \'{"args": "%s", "bridge": "%s"}\\n\' "$*" "$(ps -o command= -p "$bridge")" >> '
+                               + "'" + str(git_calls) + "'\nprintf '" + listing + "'\n")
+                (f.home / '.config/namedrop/settings.json').write_text('{"check_for_updates": true}\n')
+                assert not (f.state / 'update-check.json').exists(), 'a check ran while checks were off'
+                f.stop_server()
+                f.start_server()
+                cache = wait(lambda: json.loads((f.state / 'update-check.json').read_text())
+                             if (f.state / 'update-check.json').exists() else None,
+                             lambda cache: cache and cache['remote_version'], 'the bridge checks for updates', 20)
+                assert cache['remote_version'] == '2.0.0' and cache['last_error'] is None, cache
+                calls = [json.loads(line) for line in git_calls.read_text().splitlines()]
+                assert len(calls) == 1 and 'ls-remote --tags https://github.com/ericbust/namedrop.git v*' in calls[0]['args'], calls
+                assert ' rex bridge --endpoint ' + f.endpoint in calls[0]['bridge'], calls
             session, block = f.session('u10-survivor')
             f.in_block(session, block, 'name', 'survivor', '--type', 'terminal')
             before = store()
@@ -1312,16 +1353,10 @@ def section_updates():
                 refused = publish(invalid, code=2)
                 assert 'Built runtime does not match' in refused.stderr
                 assert os.readlink(f.state / 'runtime/current') == selected and store() == before
-                version = re.search(r'^version\s*=\s*"([^"]+)"', (new / 'herdr-plugin.toml').read_text(), re.M)[1]
-                git = tools / 'git'
-                git.write_text('#!/bin/sh\nprintf "%s\\n" "' + 'b' * 40 + '\trefs/tags/v' + version + '"\n')
-                git.chmod(0o700)
-                checked = subprocess.run([sys.executable, str(repo / 'scripts/check-update.py'), str(f.state),
-                                          str(f.home / '.config/namedrop/settings.json')], env=f.env,
-                                         capture_output=True, text=True, timeout=20)
-                assert checked.returncode == 0, checked.stderr
                 notice = f.in_block(session, block, 'doctor').stdout
-                assert 'ND-UPDATE-001' in notice and ('download Namedrop ' + version) in notice, notice
+                assert 'ND-UPDATE-001' in notice and 'download Namedrop 2.0.0 and run sh scripts/install.sh' in notice, notice
+                typed = [json.loads(line)['args'] for line in (f.root / 'commands.jsonl').read_text().splitlines()]
+                assert not any(word in args for args in typed for word in ('reconcile', 'event')), typed
                 publish(new)
                 assert store() == (schemas[1], before[1]), store()
                 before = store()
@@ -1346,11 +1381,12 @@ def section_updates():
             after = os.readlink(f.state / 'runtime/current')
             if migrated_failure:
                 assert after != selected
-                assert 'Activation failed after a possible state migration. The new runtime remains selected;' in failed.stderr
+                warning = failed.stderr.find('Activation failed after a possible state migration. The new runtime remains selected;')
+                assert -1 < warning < failed.stderr.find('Installation did not complete. Inspect setup before starting sessions.'), failed.stderr
                 assert store() == (schemas[1], before[1]), store()
             else:
                 assert after == selected
-                assert 'The previous runtime remains selected; existing sessions can continue.' in failed.stderr
+                assert 'Installation did not complete. The previous runtime remains selected; existing sessions can continue.' in failed.stderr
                 assert store() == before
             doctor_runs_selected(session, block)
             say('U10 migrated failure' if migrated_failure else 'U10 detection, migration and same-schema rollback', 'passed')
