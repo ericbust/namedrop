@@ -72,14 +72,20 @@ class UpdateCheck(unittest.TestCase):
                        + 'd' * 40 + '\trefs/tags/v9.10.0^{}" "'
                        + 'e' * 40 + '\trefs/tags/v99.0.0-beta"\n')
         git.chmod(0o700)
-        with patch.dict(os.environ, PATH=str(self.root) + os.pathsep + os.environ['PATH']):
+        with patch.dict(os.environ, PATH=str(self.root) + os.pathsep + os.environ['PATH']), \
+                patch.object(worker, 'run', wraps=worker.run) as run:
             self.check()
         self.assertEqual(self.calls, [])
         self.assertEqual(self.cache()['remote_version'], '9.10.0')
         self.assertEqual(self.cache()['remote_commit'], 'd' * 40)
         self.assertIsNone(self.cache()['last_error'])
-        args = log.read_text().splitlines()
-        self.assertEqual(args[-4:], ['ls-remote', '--tags', 'https://github.com/ericbust/namedrop.git', 'v*'])
+        command = ['git', '-c', 'credential.helper=', '-c', 'core.hooksPath=/dev/null',
+                   'ls-remote', '--tags', 'https://github.com/ericbust/namedrop.git', 'v*']
+        self.assertEqual(log.read_text().splitlines(), command[1:])
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args, (command,))
+        with patch.dict(os.environ, PATH=str(self.root) + os.pathsep + os.environ['PATH']):
+            self.assertEqual(run.call_args.kwargs, dict(text=True, timeout=8, env=dict(os.environ, GIT_TERMINAL_PROMPT='0')))
         self.assertEqual(self.cache()['source']['installed_version'], '1.7.9')
 
     def test_checkout_uses_only_its_github_origin(self):
@@ -122,6 +128,44 @@ class UpdateCheck(unittest.TestCase):
             self.assertEqual(self.cache()['reason'], 'developer_tools_missing')
             self.assertIsNone(self.cache()['remote_version'])
             self.assertNotIn('git', self.calls)
+
+    def test_a_missing_or_tampered_source_runs_no_git_and_records_a_bounded_error(self):
+        self.standalone()
+        metadata = self.state / 'runtime/source.json'
+        archive = dict(kind='archive', origin='/tmp/archive', version='1.7.9')
+        for label, contents in [
+                ('missing', None),
+                ('not JSON', b'{'),
+                ('a list', b'[]'),
+                ('a string', b'"archive"'),
+                # Valid JSON one byte past the limit, so only the limit refuses it.
+                ('oversized', json.dumps(dict(archive, pad='x' * (worker.LIMIT + 1 - len(json.dumps(dict(archive, pad='')))))).encode()),
+                ('no version', json.dumps(dict(kind='archive', origin='/tmp/archive')).encode()),
+                ('a short version', json.dumps(dict(archive, version='1.7')).encode()),
+                ('a numeric version', json.dumps(dict(archive, version=179)).encode()),
+                ('a list version', json.dumps(dict(archive, version=['1.7.9'])).encode()),
+                ('a version with a newline', json.dumps(dict(archive, version='1.7.9\n')).encode()),
+                ('a hostile version', json.dumps(dict(archive, version='1.7.9-exp.$(id)')).encode()),
+                ('an unknown kind', json.dumps(dict(archive, kind='tarball')).encode()),
+                ('no kind', json.dumps(dict(origin='/tmp/archive', version='1.7.9')).encode()),
+                ('a null kind', json.dumps(dict(archive, kind=None)).encode()),
+                ('a checkout with no origin', json.dumps(dict(kind='checkout', version='1.7.9')).encode()),
+                ('a checkout with a numeric origin', json.dumps(dict(kind='checkout', origin=7, version='1.7.9')).encode())]:
+            with self.subTest(label):
+                metadata.unlink(missing_ok=True)
+                if contents is not None:
+                    metadata.write_bytes(contents)
+                self.now = getattr(self, 'now', 0) + worker.DAY_MS
+                with patch.object(worker, 'run') as run:
+                    self.check(now=self.now)
+                run.assert_not_called()
+                self.assertEqual(self.calls, [], 'a standalone source fell back to Herdr')
+                cache = self.cache()
+                self.assertIsNone(cache['source'])
+                self.assertIsNone(cache['remote_version'])
+                self.assertTrue(cache['last_error'])
+                self.assertLessEqual(len(cache['last_error']), 512)
+                self.assertTrue(cache['last_error'].isprintable())
 
     def test_other_git_binaries_and_working_developer_tools_are_allowed(self):
         with patch.object(worker.sys, 'platform', 'darwin'), \
