@@ -104,7 +104,7 @@ fn a_principal_other_than_the_owner_or_the_tailnet_is_refused_and_nothing_starts
             status(&reply),
             (
                 "refused",
-                format!("the relay does not accept a {refused} caller here").as_str()
+                format!("the relay does not accept the caller kind `{refused}` here").as_str()
             )
         );
         assert_eq!(reply.0, "call-1");

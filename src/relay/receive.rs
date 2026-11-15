@@ -280,7 +280,9 @@ fn admit(state: &Path, principal: &Value) -> Result<(), String> {
         }
         Some("tailscale") => Ok(()),
         Some("anonymous") if state.join("relay/allow-anonymous").exists() => Ok(()),
-        Some(kind) => Err(format!("the relay does not accept a {kind} caller here")),
+        Some(kind) => Err(format!(
+            "the relay does not accept the caller kind `{kind}` here"
+        )),
         None => Err("the relay does not accept a caller with no principal".to_owned()),
     }
 }
