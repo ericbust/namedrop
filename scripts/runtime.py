@@ -841,6 +841,10 @@ def activate_codex_plugin(payload, refresh):
         require(verified['data'].get('agent_integration_hook_activation', {})
                 .get('codex', {}).get('cache_current') is True,
                 'Codex installation finished but its installed plugin cache could not be verified.')
+        # A handoff from a Rex install runs in the first activation only, and
+        # its report is the one place that names what it did.
+        if 'handoff' in data:
+            verified['data'].setdefault('handoff', data['handoff'])
         return verified, 0
     except (OSError, RuntimeError, ValueError, KeyError, subprocess.SubprocessError) as error:
         hook['status'] = 'setup_failed'
