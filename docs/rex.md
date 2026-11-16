@@ -136,13 +136,13 @@ You can run Herdr as the program of a Rex pane and use Namedrop in Herdr's panes
 
 Run `sh scripts/install.sh` as in [Install Namedrop for Rex](#install-namedrop-for-rex). It finds Herdr's install and prints `Namedrop Rex install: adopt` with Herdr's state directory. It installs the Rex module with Herdr's runtime, and publishes no runtime of its own. Herdr's updates then update Namedrop for both Herdr and Rex.
 
-The installer adopts Herdr's install only while Herdr lists Namedrop as an installed plugin. If you removed Namedrop from Herdr, the installer stops with this message:
+The installer adopts Herdr's install only while Herdr lists Namedrop as an installed plugin. If the plugin list it reads does not name Namedrop, the installer stops with this message:
 
 ```text
-Namedrop's install record names Herdr's Namedrop state (<dir>), but Namedrop is no longer installed in Herdr. Install it in Herdr again, or move that directory away, then run sh scripts/install.sh again.
+Namedrop's install record names Herdr's Namedrop state (<dir>), but Herdr's plugin list in <file> does not name Namedrop. If Herdr uses another config directory, run sh scripts/install.sh again with Herdr's XDG_CONFIG_HOME. Otherwise install Namedrop in Herdr again, or move that state directory away, then run sh scripts/install.sh again.
 ```
 
-After you move that directory away, the installer makes a new install of its own.
+If you run a debug Herdr, or Herdr has a different `XDG_CONFIG_HOME` from your shell, run the installer with Herdr's `XDG_CONFIG_HOME` before you move anything. If you removed Namedrop from Herdr, move that state directory away, and the installer makes a new install of its own.
 
 The installer also refuses, and changes nothing, in these cases:
 
