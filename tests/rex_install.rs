@@ -267,7 +267,8 @@ fn takeover_resumes_predecessors_and_doctor_reads_liveness_without_the_old_store
     );
     // An agent's next turn runs this state's hooks, which bind it here: it
     // runs the new hooks, so it no longer counts (the U13 review's F1). A
-    // binding of another incarnation in the other block proves nothing.
+    // binding of another incarnation of the other block's process proves
+    // nothing (round A's review, F5).
     let bind = |file: &str, block: &str, agent: &str| {
         fs::create_dir_all(successor.join("rex/sessions")).unwrap();
         fs::write(
@@ -279,7 +280,8 @@ fn takeover_resumes_predecessors_and_doctor_reads_liveness_without_the_old_store
         .unwrap();
     };
     bind("first.json", "block:first", &agents[0]);
-    bind("second.json", "block:second", "99999@1");
+    let (pid, _) = agents[1].split_once('@').unwrap();
+    bind("second.json", "block:second", &format!("{pid}@1"));
     let text = serde_json::to_string(
         &namedrop::diagnose_collaboration(&runtime)
             .issues

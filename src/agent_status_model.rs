@@ -638,13 +638,10 @@ fn deny_exec_profile(
     // A path the worker is given through a link, as macOS gives `/tmp`, is
     // looked up through the link, which the sandbox checks by the link's
     // own path, as it checks `/var`. Each link on the way to the temporary
-    // directory, `HOME` and `CODEX_HOME` as given is named, and only the
-    // link: what is behind it stays as the rules above allow.
-    let given = [
-        Some(env::temp_dir()),
-        home.clone(),
-        env::var_os("CODEX_HOME").map(PathBuf::from),
-    ];
+    // directory, `HOME` and Codex's home as given (`CODEX_HOME`, else
+    // `~/.codex`, which may itself be a link) is named, and only the link:
+    // what is behind it stays as the rules above allow.
+    let given = [Some(env::temp_dir()), home.clone(), self::codex_home().ok()];
     for path in given.into_iter().flatten() {
         for link in links_on_the_way(&path) {
             let link = sandbox_literal(&link)?.to_owned();

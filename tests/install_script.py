@@ -21,6 +21,11 @@ CONTRACT = json.loads((REPO / 'runtime.json').read_text())
 # macOS's /usr/bin/python3 caches bytecode under HOME. The python3 on the
 # stub PATH does the same, so a write that would land there is seen.
 CACHE = 'Library/Caches/com.apple.python'
+# macOS's own Python, which the script runs under on a Mac with the
+# developer tools and nothing else, and the one running these tests.
+SYSTEM_PYTHON = '/usr/bin/python3'
+PYTHONS = [sys.executable] + [SYSTEM_PYTHON] * (sys.platform == 'darwin' and subprocess.run(
+    [SYSTEM_PYTHON, '-c', 'import sys'], env={'PATH': '/usr/bin:/bin'}, capture_output=True).returncode == 0)
 # The Words test (tests/words.rs) reads what each run printed from here.
 CAPTURE = os.environ.get('NAMEDROP_WORDS_CAPTURE')
 
@@ -122,6 +127,7 @@ class Installer(unittest.TestCase):
             'PYTHONDONTWRITEBYTECODE', 'PYTHONPYCACHEPREFIX', 'STUB_MODE'}}
         self.env.update(HOME=str(self.home), PATH=str(self.tools), CALLS=str(self.root / 'calls'),
                         XDG_RUNTIME_DIR=str(self.root / 'run'))
+        self.cwd = None
         self.binary = self.root / 'namedrop'
         self.binary.write_text(STUB.format(python=sys.executable, version=VERSION,
                                           contract=json.dumps(CONTRACT), schema=CONTRACT['state_schema'],
@@ -149,7 +155,7 @@ class Installer(unittest.TestCase):
         package = package or self.checkout
         result = subprocess.run(['/bin/sh', str(package / 'scripts/install.sh'), *args],
                                 input=answer if stdin is None else None, stdin=stdin,
-                                env=self.env, capture_output=True, text=True)
+                                env=self.env, cwd=self.cwd, capture_output=True, text=True)
         capture('install.sh', result.stdout)
         capture('install.sh', result.stderr)
         return result
@@ -180,7 +186,11 @@ class Installer(unittest.TestCase):
         self.assertEqual(list(self.root.rglob('__pycache__')), [], 'Python cached bytecode beside a script')
 
     def record(self, owner='standalone', capable=True, legacy=False, state=None):
+        """A record naming a state of `owner`. Herdr lists Namedrop for a
+        state of its own, as it does until `herdr plugin uninstall`."""
         state = state or self.root / 'recorded state'
+        if owner == 'herdr' or legacy:
+            self.registry(['namedrop'])
         runtime = state / 'runtime'
         runtime.mkdir(parents=True)
         launcher = runtime / 'namedrop'
@@ -304,6 +314,72 @@ class Installer(unittest.TestCase):
         self.unchanged(before)
         return result.stderr
 
+    @staticmethod
+    def unlisted(state, registry, relative=False):
+        """The refusal for a recorded Herdr state that the list read does not name."""
+        return (f"Namedrop's install record names Herdr's Namedrop state ({state}), but Herdr's plugin list in "
+                f'{registry} does not name Namedrop.{Installer.elsewhere(relative)} Otherwise install Namedrop '
+                'in Herdr again, or move that state directory away, then run sh scripts/install.sh again.')
+
+    @staticmethod
+    def unreadable(herdr, registry, relative=False):
+        """The refusal for a Herdr plugin list it cannot read."""
+        return (f"Namedrop cannot read Herdr's plugin list in {registry}, so it cannot tell whether Namedrop is "
+                f'still installed in Herdr ({herdr}).{Installer.elsewhere(relative)} Otherwise, if Namedrop is '
+                'not installed in Herdr, move that state directory away, then run sh scripts/install.sh again.')
+
+    @staticmethod
+    def elsewhere(relative):
+        """Each list refusal's first way out: Herdr may read another list."""
+        return ((" XDG_CONFIG_HOME is relative, so Namedrop read that list from this working directory, which "
+                 "may not be Herdr's." if relative else '') +
+                " If Herdr uses another config directory, run sh scripts/install.sh again with Herdr's "
+                'XDG_CONFIG_HOME.')
+
+    def test_a_recorded_herdr_state_is_adopted_only_while_herdr_lists_namedrop(self):
+        # `herdr plugin uninstall` keeps the state and the record that names
+        # it, and nothing would update its runtime (round A's review, F1).
+        herdr = self.record('herdr')
+        self.assertIn('install: adopt', self.ok(self.run_install(answer='n\n')))
+        registry = self.home / '.config/herdr/plugins.json'
+        for label, plugins in [('another plugin', ['other']), ('no plugins', []), ('no registry', None)]:
+            with self.subTest(label):
+                if plugins is None:
+                    registry.unlink()
+                else:
+                    self.registry(plugins)
+                (self.root / 'calls').unlink(missing_ok=True)
+                self.refused(self.unlisted(herdr, registry))
+                self.assertEqual([call for call in self.calls() if 'install' in call], [])
+        registry = self.registry(b'[')
+        self.refused(self.unreadable(herdr, registry))
+        # The refusal names the list it read, and the way out for a Herdr
+        # that reads another one, before moving its state away (round C's
+        # review, F2): this shell's XDG_CONFIG_HOME is not Herdr's.
+        self.registry(['namedrop'])
+        config = self.root / 'xdg config'
+        self.env['XDG_CONFIG_HOME'] = str(config)
+        self.refused(self.unlisted(herdr, self.registry(['other'], config)))
+        # A relative one is read from this working directory, which may not
+        # be Herdr's (round C's review, F3).
+        self.cwd = self.root / 'working directory'
+        self.cwd.mkdir()
+        self.env['XDG_CONFIG_HOME'] = 'relative config'
+        listed = self.registry(['other'], self.cwd / 'relative config')
+        read = Path(os.path.realpath(self.cwd)) / 'relative config/herdr/plugins.json'
+        self.refused(self.unlisted(herdr, read, relative=True))
+        listed.unlink()
+        self.refused(self.unreadable(herdr, read, relative=True))
+        self.registry(['namedrop'], self.cwd / 'relative config')
+        self.assertIn('install: adopt', self.ok(self.run_install(answer='n\n')))
+        self.cwd = None
+        del self.env['XDG_CONFIG_HOME']
+        # Moved away, the state leaves a stale record, so the archive makes
+        # an install of its own.
+        self.registry([])
+        shutil.move(herdr, self.root / 'moved away')
+        self.assertIn('install: new', self.ok(self.run_install(answer='n\n')))
+
     def test_herdr_without_a_record_is_refused(self):
         # Herdr's Namedrop before step 6 writes no record, only its state.
         for xdg in (None, self.root / 'xdg state'):
@@ -330,22 +406,41 @@ class Installer(unittest.TestCase):
                 if plugins is not None:
                     self.registry(plugins)
                 self.assertIn('install: new', self.ok(self.run_install(answer='n\n')))
-        # Herdr's own rule for its config directory: an absolute
-        # XDG_CONFIG_HOME, else ~/.config.
+        # Herdr's own rule for its config directory (herdr's
+        # config::config_dir): XDG_CONFIG_HOME as it is whenever it is set,
+        # else ~/.config. Herdr reads an empty or relative one from its own
+        # working directory, so a list missing from this one says nothing.
         config = self.root / 'xdg config'
         self.registry(['namedrop'], config)
         self.env['XDG_CONFIG_HOME'] = str(config)
         self.refused(update)
-        self.env['XDG_CONFIG_HOME'] = 'relative config'
-        self.assertIn('install: new', self.ok(self.run_install(answer='n\n')))
+        self.registry(['namedrop'])
+        self.cwd = self.root / 'working directory'
+        self.cwd.mkdir()
+        for value, config in [('', self.cwd), ('relative config', self.cwd / 'relative config')]:
+            with self.subTest(XDG_CONFIG_HOME=value):
+                self.env['XDG_CONFIG_HOME'] = value
+                registry = self.registry(['other'], config)
+                self.assertIn('install: new', self.ok(self.run_install(answer='n\n')))
+                self.registry(['namedrop'], config)
+                self.refused(update)
+                registry.unlink()
+                # The list it looked for, by the path that names it.
+                looked = Path(os.path.realpath(self.cwd)) / registry.relative_to(self.cwd)
+                self.refused(self.unreadable(herdr, looked, relative=True))
+        self.cwd = None
         del self.env['XDG_CONFIG_HOME']
-        # A registry it cannot read names the way out.
-        for label, contents in [('not JSON', b'['), ('an object', b'{"plugin_id": "namedrop"}')]:
-            with self.subTest(label):
-                registry = self.registry(contents)
-                self.refused(f"Namedrop cannot read Herdr's plugin list in {registry}, so it cannot tell whether "
-                             f'Namedrop is still installed in Herdr ({herdr}). If it is not, move that directory '
-                             'away, then run sh scripts/install.sh again.')
+        # A registry it cannot read names the way out, under each Python the
+        # script may run with: macOS's own parses deep nesting by recursion.
+        for python in PYTHONS:
+            self.python(python)
+            for label, contents in [('not JSON', b'['), ('an object', b'{"plugin_id": "namedrop"}'),
+                                    ('nested too deep', b'[' * 100000)]:
+                with self.subTest(label, python=python):
+                    registry = self.registry(contents)
+                    stderr = self.refused(self.unreadable(herdr, registry))
+                    self.assertNotIn('Traceback', stderr)
+        self.python(sys.executable)
         registry.unlink()
         registry.mkdir()
         self.refused(f"Namedrop cannot read Herdr's plugin list in {registry},")
@@ -646,9 +741,7 @@ class Installer(unittest.TestCase):
         self.assertIn('non-zero exit status 23', result.stderr)
         self.assertNotIn('In the Rex palette', result.stdout)
 
-    @unittest.skipUnless(sys.platform == 'darwin' and subprocess.run(
-        ['/usr/bin/python3', '-c', 'import sys'], env={'PATH': '/usr/bin:/bin'},
-        capture_output=True).returncode == 0, "needs macOS's own Python")
+    @unittest.skipUnless(SYSTEM_PYTHON in PYTHONS, "needs macOS's own Python")
     def test_system_python_writes_nothing_before_confirmation(self):
         self.python('/usr/bin/python3')
         state = self.record('herdr')

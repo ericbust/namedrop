@@ -336,9 +336,10 @@ where
             HealthSeverity::Notice,
             "The install record names another state directory than the hooks write.",
             &format!(
-                "{} names {}, and an installed hook wrapper writes elsewhere, so Namedrop in a Rex pane would read a directory its hooks never write.",
+                "{} names {}, and an installed hook wrapper writes elsewhere, so Namedrop in a {} would read a directory its hooks never write.",
                 record.display(),
-                recorded.display()
+                recorded.display(),
+                runtime.mux.endpoint().kind.text("Rex block", "Rex pane"),
             ),
             HealthRepairKind::AgentRepair,
             "Activate Namedrop again, which rewrites the wrappers and the record together.",

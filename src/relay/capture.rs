@@ -192,27 +192,47 @@ fn after_floor(
         .map_or((0, None), |(rowid, message_id)| (rowid, Some(message_id))))
 }
 
-/// For each relay author `row` addresses, in order, the message of that
-/// author's in `row`'s thread that `row` answers, which B keeps a reply
-/// against, or `None` for an author of a label, as A has.
+/// What a message answers of one relay author's.
+enum Answer {
+    /// The message of that author's which B keeps a reply against, or none,
+    /// so B cannot keep it and counts it. An author of a label has none.
+    Message(Option<String>),
+    /// The relay's host notice, which an agent answered before it was given
+    /// the message the notice told about: an acknowledgement, which B
+    /// neither keeps nor counts (round B's review, F1).
+    Notice,
+}
+
+/// For each relay author `row` addresses, in order, what `row` answers of
+/// that author's in `row`'s thread.
 fn answered(
     transaction: &crate::store::StateTransaction<'_>,
     endpoint: &Endpoint,
     row: &ToRelayAuthor,
-) -> Result<Vec<Option<String>>, crate::StoreError> {
+) -> Result<Vec<Answer>, crate::StoreError> {
     let namespace = StateNamespace::for_space(&endpoint.key, &row.space);
+    let acknowledgement = match row.in_reply_to.as_deref() {
+        Some(in_reply_to) => transaction.acknowledges_notice(&namespace, row.rowid, in_reply_to)?,
+        None => false,
+    };
     row.relay_recipients
         .iter()
         .map(|recipient| match recipient.display.rsplit_once('@') {
-            Some((alias, label)) if !is(recipient, RelayOrigin::Label(label), alias) => transaction
-                .relay_answered(
-                    &namespace,
-                    &ThreadId::new(&row.thread_id),
-                    row.rowid,
-                    &recipient.address_id,
-                    row.in_reply_to.as_deref(),
-                ),
-            _ => Ok(None),
+            Some((alias, label)) if !is(recipient, RelayOrigin::Label(label), alias) => {
+                if acknowledgement {
+                    return Ok(Answer::Notice);
+                }
+                transaction
+                    .relay_answered(
+                        &namespace,
+                        &ThreadId::new(&row.thread_id),
+                        row.rowid,
+                        &recipient.address_id,
+                        row.in_reply_to.as_deref(),
+                    )
+                    .map(Answer::Message)
+            }
+            _ => Ok(Answer::Message(None)),
         })
         .collect()
 }
@@ -225,7 +245,7 @@ fn capture_one(
     relay: &RelayStore,
     endpoint: &Endpoint,
     row: &ToRelayAuthor,
-    answered: &[Option<String>],
+    answered: &[Answer],
     now: i64,
 ) -> Result<(Vec<String>, Vec<String>), String> {
     let error = |error: crate::StoreError| error.to_string();
@@ -245,6 +265,9 @@ fn capture_one(
             labels.push(origin.to_owned());
             continue;
         }
+        let Answer::Message(answered) = answered else {
+            continue;
+        };
         let kept = match &mapped {
             Some((host_id, thread)) if is(recipient, RelayOrigin::Host(host_id), alias) => {
                 keep_for(

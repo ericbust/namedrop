@@ -266,7 +266,9 @@ fn seal(home: &Path, state: &Path, old: &Path) -> Result<Value, String> {
 /// and has not run this state's hooks. Every SessionStart and
 /// UserPromptSubmit hook binds its agent in its own state with no activation
 /// needed (`mux::home::context_hook`), so a binding of that incarnation here
-/// proves the agent runs the new hooks (the U13 review's F1).
+/// proves the agent runs the new hooks (the U13 review's F1). Its time says
+/// nothing: a hook rewrites only a binding that changed, so a turn in the
+/// same session keeps the old one (round C's review, F1).
 pub(crate) fn predecessor_warnings(home: &Path, state: &Path) -> Vec<String> {
     let Ok(Some(record)) = registration(home) else {
         return Vec::new();

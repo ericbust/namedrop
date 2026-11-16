@@ -719,8 +719,58 @@ fn tries_as(
     in_reply_to: &str,
     source: &str,
 ) -> Result<Value, String> {
+    tries_on(b, REX, space, alias, in_reply_to, source)
+}
+
+/// The reply of `alias` in `session:<space>` of `endpoint`.
+fn tries_on(
+    b: &B,
+    endpoint: &str,
+    space: &str,
+    alias: &str,
+    in_reply_to: &str,
+    source: &str,
+) -> Result<Value, String> {
+    bound_on(b, endpoint, space, alias);
     let (block, space) = (format!("block:{space}"), format!("session:{space}"));
-    let namespace = StateNamespace::for_space(REX, &space);
+    let mux = crate::mux::fake::FakeMux::world()
+        .endpoint(endpoint)
+        .space(&space)
+        .checkout("/repo-b")
+        .pane(&block)
+        .tab("window:b1")
+        .session(&format!("session-{alias}"))
+        .idle()
+        .build();
+    let ids = crate::ProcessIds::default();
+    let runtime = crate::LifecycleRuntime {
+        state_directory: &b.0,
+        home_directory: None,
+        agent_config: Default::default(),
+        cwd: Path::new("/repo-b"),
+        workspace_id: Some(&space),
+        current_pane_id: Some(&block),
+        session_socket_id: endpoint,
+        mux: &mux,
+        clock: &crate::SystemClock,
+        ids: &ids,
+    };
+    crate::execute_message_operation(
+        "reply",
+        json!({"request_id": format!("reply-{}", super::super::now_ms()), "in_reply_to": in_reply_to, "source": source}),
+        &runtime,
+    )
+    .map_err(|error| error.to_string())
+}
+
+/// Binds `alias` in `session:<space>` to block `block:<space>`, once.
+fn bound(b: &B, space: &str, alias: &str) {
+    bound_on(b, REX, space, alias);
+}
+
+fn bound_on(b: &B, endpoint: &str, space: &str, alias: &str) {
+    let (block, space) = (format!("block:{space}"), format!("session:{space}"));
+    let namespace = StateNamespace::for_space(endpoint, &space);
     let attribution = MutationAttribution::new(ActorKind::Human, "test", 3);
     StateStore::open(&b.0)
         .unwrap()
@@ -737,33 +787,34 @@ fn tries_as(
             Ok(())
         })
         .unwrap();
-    let mux = crate::mux::fake::FakeMux::world()
-        .space(&space)
-        .checkout("/repo-b")
-        .pane(&block)
-        .tab("window:b1")
-        .session(&format!("session-{alias}"))
-        .idle()
-        .build();
-    let ids = crate::ProcessIds::default();
-    let runtime = crate::LifecycleRuntime {
-        state_directory: &b.0,
-        home_directory: None,
-        agent_config: Default::default(),
-        cwd: Path::new("/repo-b"),
-        workspace_id: Some(&space),
-        current_pane_id: Some(&block),
-        session_socket_id: REX,
-        mux: &mux,
-        clock: &crate::SystemClock,
-        ids: &ids,
-    };
-    crate::execute_message_operation(
-        "reply",
-        json!({"request_id": format!("reply-{}", super::super::now_ms()), "in_reply_to": in_reply_to, "source": source}),
-        &runtime,
-    )
-    .map_err(|error| error.to_string())
+}
+
+/// Gives `@bob` the message `message_id` at `at_ms`: the delivery attempt
+/// the dispatcher makes as it puts the message into his pane.
+fn give_bob(b: &B, message_id: &str, at_ms: i64) {
+    bound(b, "b1", "bob");
+    let given = Connection::open(b.0.join("namedrop.sqlite3"))
+        .unwrap()
+        .execute(
+            "INSERT INTO delivery_attempts (session_socket_id, worktree_id, attempt_id,
+                delivery_id, address_id, binding_id, agent_session_id, created_at_ms)
+             SELECT session_socket_id, worktree_id, 'attempt-' || delivery_id, delivery_id,
+                address_id, 'binding-bob', 'session-bob', ?2
+             FROM mailbox_deliveries WHERE message_id = ?1",
+            params![message_id, at_ms],
+        )
+        .unwrap();
+    assert_eq!(given, 1);
+}
+
+/// When the message whose body ends with `text` was made.
+fn made_at(b: &B, text: &str) -> i64 {
+    b.rows(
+        "namedrop.sqlite3",
+        &format!("SELECT created_at_ms FROM collaboration_messages WHERE body LIKE '%{text}'"),
+    )[0][0]
+        .as_i64()
+        .unwrap()
 }
 
 /// On B, an answer to a relayed message becomes one kept reply for A that
@@ -1614,8 +1665,12 @@ fn relayed_id(b: &B, item: &str) -> String {
 
 /// Purges `session:<space>`, as a person does with a space they closed.
 fn purge(b: &B, space: &str) {
+    purge_on(b, REX, space);
+}
+
+fn purge_on(b: &B, endpoint: &str, space: &str) {
     let space = format!("session:{space}");
-    let namespace = StateNamespace::for_space(REX, &space);
+    let namespace = StateNamespace::for_space(endpoint, &space);
     let attribution = MutationAttribution::new(ActorKind::Human, "test", 5);
     let mut main = StateStore::open(&b.0).unwrap();
     main.transaction(|transaction| transaction.deactivate_worktree(&namespace, &attribution))
@@ -1744,23 +1799,41 @@ fn after_a_purge_capture_reads_again_from_the_last_relay_message_still_there() {
     assert_eq!(outbox_texts(&b), [[json!("third answer")]]);
 }
 
-/// B's agent may answer the notice of a sender's self-named host, which the
-/// relay put before the message, rather than the message itself. What it
-/// says is its answer, so it is kept for A as an answer to that message,
-/// and nothing is counted as let go of.
-#[test]
-fn an_answer_to_the_relay_s_own_notice_answers_the_message_it_told_about() {
-    let b = B::new();
-    b.call(&deliver("m1", "bob", "t1", "what is 2+2?"));
-    b.call(&deliver("m2", "bob", "t1", "and 3+3?"));
-    let notice = b.rows(
+/// The id of the host notice B put before the first message of a thread.
+fn host_notice(b: &B) -> String {
+    b.rows(
         "namedrop.sqlite3",
         "SELECT message_id FROM collaboration_messages
          WHERE grammar_version = 'relay-notice/v1'",
     )[0][0]
         .as_str()
         .unwrap()
-        .to_owned();
+        .to_owned()
+}
+
+/// What B's outbox pages to A.
+fn page_texts(b: &B) -> Vec<String> {
+    let mut collect = deliver("m1", "bob", "t1", "x");
+    collect["op"] = json!("collect");
+    collect.as_object_mut().unwrap().remove("item");
+    b.call(&collect)
+        .outbox
+        .into_iter()
+        .map(|reply| reply.text)
+        .collect()
+}
+
+/// B's agent may answer the notice of a sender's self-named host, which the
+/// relay put before the message, rather than the message itself. Once it
+/// was given the message, what it says is its answer, so it is kept for A
+/// as an answer to that message, and nothing is counted as let go of.
+#[test]
+fn an_answer_to_the_relay_s_own_notice_answers_the_message_it_told_about() {
+    let b = B::new();
+    b.call(&deliver("m1", "bob", "t1", "what is 2+2?"));
+    b.call(&deliver("m2", "bob", "t1", "and 3+3?"));
+    let notice = host_notice(&b);
+    give_bob(&b, &relayed_id(&b, "m1"), super::super::now_ms() - 1);
     bob_answers(&b, &notice, "@alice@laptop the answer is 4");
     let endpoint = Endpoint::parse(REX);
     super::super::capture::capture(&b.0, &endpoint, &mut |_| {}).unwrap();
@@ -1780,13 +1853,57 @@ fn an_answer_to_the_relay_s_own_notice_answers_the_message_it_told_about() {
     assert!(super::super::expired_replies(&b.0).is_empty());
 }
 
+/// An agent given the host notice as a prompt of its own may acknowledge it
+/// before it is given the message the notice told about. That answers
+/// nothing A sent, so B neither keeps nor counts it, and A's thread gets
+/// only the answer to the message (round B's review, F1, its
+/// rvb_notice_acknowledged_then_message_answered and
+/// rvb_a_takes_the_acknowledgement_and_the_answer).
+#[test]
+fn an_acknowledgement_of_the_host_notice_is_neither_kept_nor_counted() {
+    let b = B::new();
+    b.call(&deliver("m1", "bob", "t1", "what is 2+2?"));
+    let endpoint = Endpoint::parse(REX);
+    let capture = || super::super::capture::capture(&b.0, &endpoint, &mut |_| {}).unwrap();
+    give_bob(&b, &host_notice(&b), super::super::now_ms() - 1);
+    bob_answers(
+        &b,
+        &host_notice(&b),
+        "@alice@laptop Noted, thanks for the heads-up.",
+    );
+    capture();
+    assert_eq!(outbox_texts(&b), Vec::<Vec<Value>>::new());
+    assert!(super::super::expired_replies(&b.0).is_empty());
+    // An attempt made in the reply's own millisecond came after it was
+    // written, as far as anyone can tell.
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    bob_answers(&b, &host_notice(&b), "@alice@laptop Noted again.");
+    give_bob(&b, &relayed_id(&b, "m1"), made_at(&b, "Noted again."));
+    capture();
+    assert_eq!(outbox_texts(&b), Vec::<Vec<Value>>::new());
+    assert!(super::super::expired_replies(&b.0).is_empty());
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    bob_answers(&b, &relayed_id(&b, "m1"), "@alice@laptop 4");
+    capture();
+    assert_eq!(
+        b.rows("relay.sqlite3", "SELECT re, text FROM outbox ORDER BY seq"),
+        [[json!("m1"), json!("4")]]
+    );
+    assert_eq!(page_texts(&b), ["4"]);
+    assert!(super::super::expired_replies(&b.0).is_empty());
+}
+
 /// Activates `session:<space>` on B with an agent of each alias.
 fn space(b: &B, space: &str, aliases: &[&str]) {
+    space_on(b, REX, space, aliases);
+}
+
+fn space_on(b: &B, endpoint: &str, space: &str, aliases: &[&str]) {
     let attribution = MutationAttribution::new(ActorKind::Human, "test", 7);
     StateStore::open(&b.0)
         .unwrap()
         .transaction(|transaction| {
-            let namespace = StateNamespace::for_space(REX, space);
+            let namespace = StateNamespace::for_space(endpoint, space);
             transaction.activate_worktree(&namespace, &attribution)?;
             for alias in aliases {
                 let id = format!("address-{space}-{alias}");
@@ -1908,6 +2025,135 @@ fn replies_made_below_a_purged_floor_are_kept() {
         ]
         .map(|text| json!(text))
     );
+    assert!(super::super::expired_replies(&b.0).is_empty());
+}
+
+/// Below a floor whose message is gone, the history ends at the endpoint's
+/// last message made at or before the floor's millisecond. A reply made in
+/// that millisecond before the floor was there when the relay database was
+/// made, so it is history: B neither reads it again nor counts it, and
+/// keeps the reply made after (round B's review, F3).
+#[test]
+fn a_reply_made_in_the_floor_s_millisecond_is_history() {
+    let b = B::new();
+    space(&b, "session:b4", &["dave"]);
+    b.call(&deliver("d0", "dave", "td0", "an old question"));
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    tries_as(
+        &b,
+        "b4",
+        "dave",
+        &relayed_id(&b, "d0"),
+        "@alice@laptop from before",
+    )
+    .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    b.call(&deliver("c1", "carol", "tc", "history"));
+    made_again(&b);
+    // As if the floor's message had been made in the reply's millisecond.
+    Connection::open(b.0.join("relay.sqlite3"))
+        .unwrap()
+        .execute(
+            "UPDATE capture_start SET created_at_ms = ?1",
+            [made_at(&b, "from before")],
+        )
+        .unwrap();
+    b.call(&deliver("m1", "bob", "tb", "please answer"));
+    purge(&b, "b2");
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    bob_answers(&b, &relayed_id(&b, "m1"), "@alice@laptop after");
+    super::super::capture::capture(&b.0, &Endpoint::parse(REX), &mut |_| {}).unwrap();
+    assert_eq!(outbox_texts(&b), [[json!("after")]]);
+    assert!(super::super::expired_replies(&b.0).is_empty());
+}
+
+/// A second Rex server whose spaces share this state.
+const REX2: &str = "rex:/tmp/namedrop-relay-accept-2.sock";
+
+/// Two servers' spaces in one state, and a relay database made in the
+/// middle of their history, so its floor is a message of the first. The
+/// second endpoint's capture reads none of its history before the floor,
+/// and keeps each of its replies once when the floor's space and then its
+/// own newest space are purged. The first endpoint's own first capture
+/// after both reads only its new reply (round B's review, F3).
+#[test]
+fn two_endpoints_in_one_state_share_the_floor() {
+    let b = B::new();
+    let call_on = |endpoint: &str, args: &Value| {
+        accept(
+            &b.0,
+            &Endpoint::parse(endpoint),
+            HOST_B,
+            None,
+            args.to_string().as_bytes(),
+            &mut |_| {},
+        )
+    };
+    let pause = || std::thread::sleep(std::time::Duration::from_millis(3));
+    space_on(&b, REX2, "session:x1", &["xena"]);
+    space_on(&b, REX2, "session:x2", &["yan"]);
+    call_on(REX2, &deliver("h1", "xena", "th", "old question"));
+    tries_on(
+        &b,
+        REX2,
+        "x1",
+        "xena",
+        &relayed_id(&b, "h1"),
+        "@alice@laptop xena old",
+    )
+    .unwrap();
+    for n in 1..=3 {
+        b.call(&deliver(&format!("c{n}"), "carol", "tc", "history"));
+    }
+    made_again(&b);
+    let second = Endpoint::parse(REX2);
+    let capture_second = || super::super::capture::capture(&b.0, &second, &mut |_| {}).unwrap();
+    capture_second();
+    assert!(outbox_texts(&b).is_empty(), "the second endpoint's history");
+    call_on(REX2, &deliver("y1", "yan", "ty", "new question"));
+    let to_yan = relayed_id(&b, "y1");
+    pause();
+    tries_on(&b, REX2, "x2", "yan", &to_yan, "@alice@laptop yan 1").unwrap();
+    capture_second();
+    assert_eq!(outbox_texts(&b), [[json!("yan 1")]]);
+    acked(&b);
+    // The floor's space, of the first endpoint, goes.
+    purge(&b, "b2");
+    pause();
+    tries_on(&b, REX2, "x2", "yan", &to_yan, "@alice@laptop yan 2").unwrap();
+    capture_second();
+    assert_eq!(outbox_texts(&b), [[json!("yan 2")]]);
+    acked(&b);
+    // Then the second endpoint's own newest space: its cursor and mark go.
+    purge_on(&b, REX2, "x2");
+    space_on(&b, REX2, "session:x2", &["yan"]);
+    pause();
+    call_on(REX2, &deliver("y2", "yan", "ty2", "again"));
+    let to_yan = relayed_id(&b, "y2");
+    for n in 3..=5 {
+        pause();
+        tries_on(
+            &b,
+            REX2,
+            "x2",
+            "yan",
+            &to_yan,
+            &format!("@alice@laptop yan {n}"),
+        )
+        .unwrap();
+        capture_second();
+    }
+    assert_eq!(
+        outbox_texts(&b),
+        [[json!("yan 3")], [json!("yan 4")], [json!("yan 5")]]
+    );
+    acked(&b);
+    b.call(&deliver("m1", "bob", "tb", "please"));
+    pause();
+    bob_answers(&b, &relayed_id(&b, "m1"), "@alice@laptop bob 1");
+    super::super::capture::capture(&b.0, &Endpoint::parse(REX), &mut |_| {}).unwrap();
+    capture_second();
+    assert_eq!(outbox_texts(&b), [[json!("bob 1")]]);
     assert!(super::super::expired_replies(&b.0).is_empty());
 }
 

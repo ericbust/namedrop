@@ -647,7 +647,15 @@ fn doctor_checks_current_package_files_and_preserves_the_exact_error_read_only()
 /// a directory its hooks never write.
 #[test]
 fn doctor_reports_an_install_record_that_differs_from_the_wrappers() {
-    let f = Fixture::new();
+    // Herdr's Doctor keeps its words on a HOME it shares with Rex (round B's
+    // review, F7).
+    for (endpoint, place) in [("socket-a", "Rex block"), (REX, "Rex pane")] {
+        doctor_reports_an_install_record_in(endpoint, place);
+    }
+}
+
+fn doctor_reports_an_install_record_in(endpoint: &'static str, place: &str) {
+    let f = Fixture::at(endpoint);
     f.register();
     let record = f.home.join(".config/namedrop/state-directory");
     assert_eq!(
@@ -673,9 +681,13 @@ fn doctor_reports_an_install_record_that_differs_from_the_wrappers() {
         .iter()
         .find(|issue| issue.code == "ND-INTEGRATION-002")
         .unwrap_or_else(|| panic!("{report:?}"));
-    assert!(
-        issue.explanation.contains("/elsewhere/namedrop"),
-        "{issue:?}"
+    assert_eq!(
+        issue.explanation,
+        format!(
+            "{} names /elsewhere/namedrop, and an installed hook wrapper writes elsewhere, so Namedrop in a {place} would read a directory its hooks never write.",
+            record.display()
+        ),
+        "{endpoint}"
     );
     assert_eq!(issue.repair.operation.as_deref(), Some("activate"));
     fs::remove_file(&record).unwrap();
