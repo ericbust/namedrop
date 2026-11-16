@@ -2009,6 +2009,53 @@ fn a_hold_on_two_requests_waits_for_both_answers() {
     assert!(space.unresolved_disposition_warnings().is_empty());
 }
 
+/// A delivery held on background work records its task, not a request, so
+/// the answer to a request the session sends later is not its answer: only
+/// that work's notice wakes it, and the answer's prompt shows its way back.
+#[test]
+fn an_answer_wakes_no_hold_on_background_work() {
+    let space = Space::new();
+    let ask = space.held_on_first_task();
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap();
+    space.settle_attempt(&ask);
+    dispatch::message(
+        "send",
+        json!({"request_id":"later","source":"@lead Is the deploy green?",
+               "author_kind":"agent_session"}),
+        &space.runtime("pane-reviewer"),
+    )
+    .unwrap();
+    let helper = space.herdr.envelope_for("pane-lead");
+    assert_eq!(helper["untrusted_body"], "Is the deploy green?");
+    dispatch::message(
+        "reply",
+        bound_reply(&space, &helper, "@reviewer Deploy is green."),
+        &space.runtime("pane-lead"),
+    )
+    .unwrap();
+    let answer = space.herdr.envelope_for("pane-reviewer");
+    assert_eq!(answer["untrusted_body"], "Deploy is green.");
+    let context = space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        ("prompt_id", "answer-turn"),
+        &answer.to_string(),
+    );
+    assert!(!context.contains(&woken_for(attempt)), "{context}");
+    assert!(
+        context.contains(&format!(
+            "delivery {attempt} from an earlier turn is still open"
+        )),
+        "{context}"
+    );
+    space.stop(
+        "session-reviewer",
+        ("prompt_id", "answer-turn"),
+        "Deploy is green.",
+    );
+    assert_eq!(space.claims()[0]["state"], json!({"left":"held"}));
+}
+
 /// The lead's answer reaches a turn that is about another delivery, so its
 /// final message can't also be the held one's answer: that delivery's way
 /// back shows, and it stays held.
