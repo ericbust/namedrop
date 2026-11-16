@@ -244,10 +244,12 @@ UNCOACHED_HOLD_PROMPT = (
     "Run this shell command in the foreground and wait for it: python3 -c 'import time; time.sleep(15)'. Then "
     "end this turn at once with a one-line waiting status. Don't wait or poll for anything else in this turn. "
     "A helper's answer holding a word arrives in a later turn; when it does, tell me the word.")
-SCRIPTED_HOLD_PROMPT = (UNCOACHED_HOLD_PROMPT + " Tell me by running the reply line Namedrop shows you for this "
-                        "delivery, with the word as its body.")
-"""Told to use the way-back line, because a real Codex sometimes writes the answer as its final
-message instead, which never reaches the person. check_uncoached_hold reports how that went."""
+SCRIPTED_HOLD_PROMPT = (UNCOACHED_HOLD_PROMPT + " Tell me in your final message of the turn that answer starts. If "
+                        "Namedrop shows you a line to answer this delivery instead, run it with the word as its body.")
+"""Told both ways the answer lands, as the delivery's own guidance says: the final message of the turn
+the helper's answer starts, or the way-back line a later turn shows when the answer reaches a turn
+about something else. The turn the answer starts shows only a line that replies to the helper, so
+the prompt names no reply line for that turn. run_uncoached_hold reports a hold told neither."""
 SCRIPTED_HELP = ("@{helper} Run `sleep 60` in your shell in the background, and when it finishes, reply with "
                  "the single word {word}.")
 """In the background: Claude Code's harness blocks a long standalone sleep in the foreground and offers
