@@ -4,18 +4,18 @@ Each release is a section here, newest first. The GitHub release for a version u
 
 ## [1.12.0] - 2026-11-16
 
-Namedrop now runs in Rex as well as in Herdr. Rex support is experimental. In Herdr, Namedrop works as in 1.11.1, apart from the changes and fixes below.
+Namedrop now runs in Rex as well as in Herdr. Rex support is experimental. In Herdr, Namedrop works as in 1.11.1, apart from the changes and fixes below. Three of the changes are to **Type to agent** and **Stop thread** in Channels.
 
 ### Added
 
-- Namedrop runs in [Rex](https://www.superlogical.com/rex/docs) without Herdr. It supports Rex preview.14, preview.18 and preview.19, at Rex control API revisions 12 to 14. [Run Namedrop on Rex](docs/rex.md) walks through the setup, and [Namedrop on Rex reference](docs/rex-reference.md) gives the details.
-- The release archive has an installer for Rex. In a Rex pane, run `sh scripts/install.sh` from the extracted archive. It lists what it will write and changes nothing until you answer `y`. It installs the Namedrop module for Rex, adds one line to `init.lua`, and installs the Claude Code and Codex packages and the `namedrop` command in `~/.local/bin`. It runs on macOS on Apple silicon and on Linux with glibc, and needs Python 3.9 or newer. `namedrop install --remove` removes the install and keeps your names and messages.
-- The Rex command palette has eleven Namedrop actions in its `Namedrop` category: **Activate Namedrop**, **Name this pane**, **Manage Namedrop names and agents**, **Namedrop Doctor**, **Agent status**, **Namedrop tour**, **Open Namedrop Channels**, **Pause Namedrop**, **Resume Namedrop**, **Deactivate Namedrop** and **About Namedrop**. Their screens open in floating layers. Five actions have keys, such as <kbd>Option</kbd>+<kbd>Shift</kbd>+<kbd>Command</kbd>+<kbd>I</kbd> for **Name this pane**. The module binds a key only when no other binding holds it.
+- Namedrop runs in [Rex](https://www.superlogical.com/rex/docs) without Herdr. It supports Rex preview.14, preview.18 and preview.19, at Rex control API revisions 12 to 14. [Run Namedrop on Rex](https://github.com/ericbust/namedrop/blob/main/docs/rex.md) gives the setup steps, and [Namedrop on Rex reference](https://github.com/ericbust/namedrop/blob/main/docs/rex-reference.md) gives the details.
+- The release archive has an installer for Rex. In a Rex pane, run `sh scripts/install.sh` from the extracted archive. The installer lists what it will write and changes nothing until you answer `y`. Then it installs the Namedrop module for Rex, adds one line to `init.lua`, and installs the Claude Code and Codex packages and the `namedrop` command in `~/.local/bin`. `install.sh` runs on macOS on Apple silicon and on Linux with glibc, and needs Python 3.9 or newer. To remove the install and keep your names and messages, run `namedrop install --remove --input-json '{"confirmed":true}'`.
+- The Namedrop module for Rex adds eleven actions to the `Namedrop` category of Rex's command palette: **Activate Namedrop**, **Name this pane**, **Manage Namedrop names and agents**, **Namedrop Doctor**, **Agent status**, **Namedrop tour**, **Open Namedrop Channels**, **Pause Namedrop**, **Resume Namedrop**, **Deactivate Namedrop** and **About Namedrop**. Their screens open in floating layers. The module gives five of the actions keys, such as <kbd>Option</kbd>+<kbd>Shift</kbd>+<kbd>Command</kbd>+<kbd>I</kbd> for **Name this pane**, and binds a key only when no other binding holds it.
 - In a Rex session, Namedrop names panes and delivers mentions and replies between Claude Code, Codex and terminals. Its bridge, a background process that reads Rex's events, keeps the names current and starts when Rex loads the module. Names survive a Rex server restart. Each agent's hooks record which Rex pane its session runs in.
 - You can mention an agent on another machine that runs its own Rex server and Namedrop. Add the machine with `rex hosts add`, then have an agent run `namedrop send` with an address such as `@codex@devbox`. Your machine keeps the message until the other machine accepts it, collects replies every 30 seconds while the thread is open, and puts each reply in the sender's thread. The other machine relays mentions only to agents, unless you create `relay/allow-terminals` in its state directory. Doctor reports relay problems as `ND-RELAY-001` to `ND-RELAY-005`.
 - An install that `install.sh` made checks GitHub for a newer release once a day. When there is one, agents show it at the start of a session, and Doctor shows `ND-UPDATE-001` with `Update: download Namedrop <version> and run sh scripts/install.sh`. The check offers only 1.12.0 and later, the releases that include the installer. To turn it off, put `{"check_for_updates": false}` in `~/.config/namedrop/settings.json`. Herdr installs check for updates as before.
-- Herdr and Rex can share one Namedrop on a machine. If Namedrop is installed in Herdr, `install.sh` adopts Herdr's install, and Herdr's updates then update Namedrop for both. If you installed for Rex first, activating Namedrop in Herdr takes the install over, and Herdr's Doctor shows `ND-INSTALL-001` until each agent from before the move has run Herdr's hooks. You can also run Herdr as the program of a Rex pane. In a Herdr pane, Namedrop uses Herdr.
-- Rex support has known limits. [Limits of the experimental build](docs/rex-reference.md#limits-of-the-experimental-build) lists them all. These matter most:
+- Herdr and Rex can share one Namedrop on a machine. If Namedrop is installed in Herdr, `install.sh` adopts Herdr's install, and Herdr's updates then update Namedrop for both. If you installed for Rex first, activating Namedrop in Herdr takes the install over, and Herdr's Doctor shows `ND-INSTALL-001` until each agent from before the move has run Herdr's hooks. The names made on Rex are not carried over, so run **Activate Namedrop** again in each Rex session and name its panes again. You can also run Herdr as the program of a Rex pane. In a Herdr pane, Namedrop uses Herdr.
+- Rex support has known limits. [Limits of Rex support](https://github.com/ericbust/namedrop/blob/main/docs/rex-reference.md#limits-of-rex-support) lists them all. These matter most:
 	- Channels' setup and Doctor hints tell a Rex user to open Herdr, and **New channel** and **Add agent** refuse in a Rex session.
 	- After a reboot, the Channels tailnet link stays down on Rex until you run `namedrop channels --no-open`.
 	- The actions were tested with `rex do --origin palette`, not in the Rex app's own palette or with its keys.
@@ -24,20 +24,24 @@ Namedrop now runs in Rex as well as in Herdr. Rex support is experimental. In He
 ### Changed
 
 - Activating Namedrop in Herdr writes `~/.config/namedrop/state-directory`, which names Namedrop's state directory. `install.sh` reads it to find Herdr's install.
-- `namedrop` commands accept `--endpoint`, `--space` and `--pane` beside the `--herdr-*` flags, and read the state directory from `NAMEDROP_STATE_DIR`. The agent skill names both sets.
+- `namedrop` commands accept `--endpoint`, `--space` and `--pane` beside the `--herdr-*` flags, and, outside Herdr, read the state directory from `NAMEDROP_STATE_DIR`. The agent skill names both sets.
 - The agent hook wrappers changed. They name their agent in `NAMEDROP_HOOK_RUNTIME`, and Namedrop, not the wrapper, now starts delivery after a prompt sends a mention. Read **Upgrade** below if you run Codex.
 - When an update needs a session refresh, **Update Namedrop** in Herdr also waits for agent sessions in Rex panes.
+- **Type to agent** in Channels sends nothing while Namedrop is typing into the pane, as it does for a delivery. The box shows `Namedrop is typing into <alias> right now, so nothing was sent. Try again.` In 1.11.1, **Type to agent** typed the line even then.
+- A line that you send with **Type to agent** now starts your own turn in that pane, unless it answers a question or a permission prompt that blocks a delivery's agent. **Stop thread** on an earlier delivery's thread then stops the thread but presses no Ctrl-C in that pane, so your turn keeps running. In 1.11.1, **Stop thread** pressed Ctrl-C.
+- **Stop thread** waits up to 5 seconds for other input to an agent's pane to finish before it presses Ctrl-C there. In 1.11.1, it waited up to 2 seconds. The longer wait covers a **Type to agent** input, which keeps the pane for up to about 3 seconds.
 
 ### Fixed
 
-- Agent-status summaries and persona suggestions now work when Codex's home is not a plain `~/.codex`. The worker that runs Codex for them stopped with `failed to canonicalize CODEX_HOME` when `CODEX_HOME` named another directory, such as one under `~/.config`. It also could not read Codex's sign-in when `~/.codex` was a symbolic link, as a dotfiles manager makes it, or when `HOME` was reached through a link.
-- When that worker fails, its error shows the line where Codex says why it stopped. Before, the error kept the first 200 characters of Codex's output, which could cut the reason to "Er".
+- On macOS, agent-status summaries and persona suggestions now work in three more setups. The worker that runs Codex for them stopped with `failed to canonicalize CODEX_HOME` when `CODEX_HOME` named another directory, such as one under `~/.config`. The worker also could not read Codex's sign-in when `~/.codex` was a symbolic link, as a dotfiles manager makes it, or when `HOME` was reached through a symbolic link.
+- When the worker fails, its error shows the line where Codex says why it stopped. Before, the error kept the first 200 characters of Codex's output, which could cut the reason to "Er".
+- A reminder clock that an agent's Stop hook started gave each `herdr` command that it ran to fire a reminder only 250 ms, the Stop hook's own time limit. The clock now uses the default limit of 10 seconds.
 <!-- held-turn fix: fill in when exp/held-turn merges -->
 
 ### Upgrade
 
-- In Herdr, update with **Update Namedrop**. The update runs live. The state schema stays at 8, and agent sessions and pending deliveries carry on.
-- Restart each Codex session that was running before the update. The hook wrappers changed, and Codex refuses to run a plugin's hooks once the plugin's files change. Until you restart it, the session can lose its hooks, answer only in its terminal and raise `ND-DELIVERY-003`. Its screen shows `plugin contents changed; hook approval required`. In the new session, trust the Namedrop hooks at **Hooks need review**.
+- In Herdr, update with **Update Namedrop**. The update runs live. The state schema stays at 8, and agent sessions and pending deliveries keep running.
+- Restart each Codex session that was running before the update. The hook wrappers changed, and Codex refuses to run a plugin's hooks once the plugin's files change. Until you restart it, the session can lose its hooks, answer only in its terminal and raise `ND-DELIVERY-003`. Its screen shows `plugin contents changed; hook approval required`, and Doctor names it in `ND-SETUP-005` if it ran a hook on 1.6.5 or later. In the new session, trust the Namedrop hooks at **Hooks need review**.
 - If you ran Rex support from the `experimental` branch, run `sh scripts/install.sh` from this release's archive. It prints `Namedrop Rex install: update` and keeps your names and messages. If your relay database has a layout from an unreleased build, Namedrop sets it aside and starts a new one, and Doctor names the old file in `ND-RELAY-004`. Messages to other machines that were in flight stay in that file.
 
 ## [1.11.1] - 2026-11-13
@@ -372,7 +376,7 @@ Start new agent sessions after updating so they learn the reminder commands and 
 
 - Namedrop's state moves to schema 6 the first time the new release opens it. Context handoffs still stay inside one workspace.
 - Namedrop's Codex hooks changed, so Codex asks once to trust them again in `/hooks`. A Codex session started before the update keeps receiving and answering messages, but a mention typed into it is not sent until you start a new Codex session and approve the hooks.
-- Namedrop 1.3.3 and earlier refuse to open state at schema 6, so going back to one of them after this update needs a [state backup](docs/operations.md#back-up-and-restore-state) taken before it.
+- Namedrop 1.3.3 and earlier refuse to open state at schema 6, so going back to one of them after this update needs a [state backup](https://github.com/ericbust/namedrop/blob/main/docs/operations.md#back-up-and-restore-state) taken before it.
 
 ## [1.3.3] - 2026-10-26
 
@@ -406,7 +410,7 @@ Start new agent sessions after updating so they learn the reminder commands and 
 
 ### Added
 
-- Namedrop now tells you when Codex 0.162 or later runs a Codex pane's session through its shared app-server. That server keeps the environment of wherever it started, so Herdr cannot tell which pane the session is in: mentions to that agent stay queued, a second Codex pane's session can land on the first, and Namedrop's own Codex hooks go silent. `namedrop doctor` reports it once as ND-SESSION-003, and stops giving the first-prompt and reinstall advice that cannot help here. Naming a Codex pane, activation and the start of an affected Codex session say the same thing. Each explains what is wrong, what the fix does and costs, the commands to run, and how to undo it. Namedrop never changes the Codex setting itself. See [the shared app-server](docs/compatibility.md#codex-0162-and-later-the-shared-app-server).
+- Namedrop now tells you when Codex 0.162 or later runs a Codex pane's session through its shared app-server. That server keeps the environment of wherever it started, so Herdr cannot tell which pane the session is in: mentions to that agent stay queued, a second Codex pane's session can land on the first, and Namedrop's own Codex hooks go silent. `namedrop doctor` reports it once as ND-SESSION-003, and stops giving the first-prompt and reinstall advice that cannot help here. Naming a Codex pane, activation and the start of an affected Codex session say the same thing. Each explains what is wrong, what the fix does and costs, the commands to run, and how to undo it. Namedrop never changes the Codex setting itself. See [the shared app-server](https://github.com/ericbust/namedrop/blob/main/docs/compatibility.md#codex-0162-and-later-the-shared-app-server).
 
 ### Changed
 
