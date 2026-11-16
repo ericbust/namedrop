@@ -169,6 +169,12 @@ try:
     launcher = state / 'runtime/namedrop'
     decision = 'adopt' if recorded and selected_owner == 'herdr' else 'update' if recorded else 'new'
     if decision == 'adopt':
+        # `herdr plugin uninstall` keeps the state and the record that names
+        # it, and nothing updates a runtime that Herdr no longer lists.
+        require(herdr_lists_namedrop(home, state),
+                f"Namedrop's install record names Herdr's Namedrop state ({state}), but Namedrop is no "
+                'longer installed in Herdr. Install it in Herdr again, or move that directory away, '
+                'then run sh scripts/install.sh again.')
         require(supports_rex(launcher), 'Update Namedrop in Herdr first, then run sh scripts/install.sh again.')
     # The archive's own binary finds the Rex server as `namedrop install`
     # does, and names what that install writes. It writes nothing.

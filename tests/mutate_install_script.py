@@ -137,6 +137,13 @@ MUTATIONS = [
     ('nit-home-unset-unexplained', 'scripts/install.sh',
      "require(os.environ.get('HOME'), 'Namedrop install needs HOME set to your home directory.')", 'pass',
      'test_home_must_be_set_and_absolute'),
+    # Pre-release round C, for round A's review.
+    ('c1-recorded-herdr-list-ignored', 'scripts/install.sh', 'require(herdr_lists_namedrop(home, state),',
+     'require(True,', 'test_a_recorded_herdr_state_is_adopted_only_while_herdr_lists_namedrop'),
+    ('c1-recorded-herdr-list-of-the-default-state', 'scripts/install.sh',
+     'require(herdr_lists_namedrop(home, state),',
+     "require(herdr_lists_namedrop(home, home / '.local/state/herdr/plugins/namedrop'),",
+     'test_a_recorded_herdr_state_is_adopted_only_while_herdr_lists_namedrop'),
 ]
 
 

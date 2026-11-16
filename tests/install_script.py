@@ -180,7 +180,11 @@ class Installer(unittest.TestCase):
         self.assertEqual(list(self.root.rglob('__pycache__')), [], 'Python cached bytecode beside a script')
 
     def record(self, owner='standalone', capable=True, legacy=False, state=None):
+        """A record naming a state of `owner`. Herdr lists Namedrop for a
+        state of its own, as it does until `herdr plugin uninstall`."""
         state = state or self.root / 'recorded state'
+        if owner == 'herdr' or legacy:
+            self.registry(['namedrop'])
         runtime = state / 'runtime'
         runtime.mkdir(parents=True)
         launcher = runtime / 'namedrop'
@@ -303,6 +307,34 @@ class Installer(unittest.TestCase):
         self.assertNotIn('Namedrop Rex install:', result.stdout)
         self.unchanged(before)
         return result.stderr
+
+    def test_a_recorded_herdr_state_is_adopted_only_while_herdr_lists_namedrop(self):
+        # `herdr plugin uninstall` keeps the state and the record that names
+        # it, and nothing would update its runtime (round A's review, F1).
+        herdr = self.record('herdr')
+        self.assertIn('install: adopt', self.ok(self.run_install(answer='n\n')))
+        registry = self.home / '.config/herdr/plugins.json'
+        gone = (f"Namedrop's install record names Herdr's Namedrop state ({herdr}), but Namedrop is no "
+                'longer installed in Herdr. Install it in Herdr again, or move that directory away, '
+                'then run sh scripts/install.sh again.')
+        for label, plugins in [('another plugin', ['other']), ('no plugins', []), ('no registry', None)]:
+            with self.subTest(label):
+                if plugins is None:
+                    registry.unlink()
+                else:
+                    self.registry(plugins)
+                (self.root / 'calls').unlink(missing_ok=True)
+                self.refused(gone)
+                self.assertEqual([call for call in self.calls() if 'install' in call], [])
+        registry = self.registry(b'[')
+        self.refused(f"Namedrop cannot read Herdr's plugin list in {registry}, so it cannot tell whether "
+                     f'Namedrop is still installed in Herdr ({herdr}). If it is not, move that directory '
+                     'away, then run sh scripts/install.sh again.')
+        # Moved away, the state leaves a stale record, so the archive makes
+        # an install of its own.
+        self.registry([])
+        shutil.move(herdr, self.root / 'moved away')
+        self.assertIn('install: new', self.ok(self.run_install(answer='n\n')))
 
     def test_herdr_without_a_record_is_refused(self):
         # Herdr's Namedrop before step 6 writes no record, only its state.
