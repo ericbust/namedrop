@@ -23,7 +23,7 @@ use namedrop::{
     final_reply::{BoundOperation, FinalText, HostTurn, StopFacts, mark_stopped, settle_at_stop},
     issue_registration_challenge,
     mux::{
-        AgentKind, Depth, Effect, InputOutcome, MuxError,
+        AgentKind, AgentState, Depth, Effect, InputOutcome, MuxError,
         fake::{
             CHECKOUT_LISTINGS, FakeMux, Read, ScopeKind, SentInput, StrictSpace, Surveyed, Takes,
         },
@@ -1794,6 +1794,27 @@ impl Space {
         delivered
     }
 
+    /// Herdr shows the reviewer's agent working on a turn, or idle again.
+    fn reviewer_working(&self, working: bool) {
+        let state = if working {
+            AgentState::Working
+        } else {
+            AgentState::Idle
+        };
+        self.herdr.space.set_state("pane-reviewer", state);
+    }
+
+    /// The summaries of the open ND-DELIVERY-003 warnings on `attempt`.
+    fn warnings_on(&self, attempt: &str) -> Vec<String> {
+        self.rows(&format!(
+            "SELECT summary FROM attention_items WHERE source_kind = 'agent_disposition'
+               AND source_id = '{attempt}' AND resolved_at_ms IS NULL"
+        ))
+        .into_iter()
+        .map(|row| row[0].clone())
+        .collect()
+    }
+
     /// The answers in the person's thread, without the progress notes.
     fn answers_to(&self, question: &Value) -> Vec<String> {
         self.reviewer_posts(question)
@@ -2136,6 +2157,92 @@ fn an_answer_turn_that_never_stops_warns_about_the_held_delivery() {
     );
     assert_ne!(space.question_leg(&question), "working");
     assert!(space.answers_to(&question).is_empty());
+}
+
+/// The turn the lead's answer starts replies to the lead with the line its
+/// text offers, and works on. That reply settles the answer's attempt, but
+/// the turn is not over: nothing warns while its pane works, and its Stop
+/// answers the held delivery. Interrupted instead, it warns once its pane
+/// has sat idle past the Stop's grace.
+#[test]
+fn a_reply_to_the_helper_while_the_answer_turn_runs_warns_nothing() {
+    for interrupted in [false, true] {
+        let space = Space::new();
+        let (question, ask, answer) = space.held_on_the_lead();
+        let attempt = ask["control"]["attempt_id"].as_str().unwrap();
+        let answer_attempt = answer["control"]["attempt_id"].as_str().unwrap();
+        space.reviewer_working(true);
+        let context = space.reviewer_prompt_at(100_000, "answer-turn", &answer.to_string());
+        assert!(context.contains(&woken_for(attempt)), "{context}");
+        dispatch::message(
+            "reply",
+            bound_reply(&space, &answer, "@lead Thanks, that settles it."),
+            &space.pane_at("pane-reviewer", &At(102_000)),
+        )
+        .unwrap();
+        space.observe_at(102_500);
+        space.observe_at(102_000 + STOP_ARRIVAL_GRACE_MS + 1_000);
+        space.observe_at(102_000 + STOPPED_GRACE_MS + 1_000);
+        assert_eq!(space.warnings_on(attempt), Vec::<String>::new());
+        assert_eq!(space.question_leg(&question), "working");
+        if interrupted {
+            space.reviewer_working(false);
+            let due = space.observe_at(200_000);
+            assert_eq!(space.warnings_on(attempt), Vec::<String>::new());
+            assert_eq!(due, Some(200_000 + STOP_ARRIVAL_GRACE_MS));
+            space.observe_at(200_000 + STOP_ARRIVAL_GRACE_MS);
+            let warnings = space.warnings_on(attempt);
+            assert_eq!(warnings.len(), 1, "{warnings:?}");
+            assert!(
+                warnings[0].contains("ended its turn without a reply"),
+                "{warnings:?}"
+            );
+            assert!(space.answers_to(&question).is_empty());
+        } else {
+            space.reviewer_stop_at(200_000, "answer-turn", "FINAL: option B is safe.");
+            space.reviewer_working(false);
+            space.observe_at(200_500);
+            assert_eq!(space.answers_to(&question), ["FINAL: option B is safe."]);
+            // The lead never settles the reply it got, so only the reviewer's
+            // deliveries count here.
+            assert_eq!(space.warnings_on(attempt), Vec::<String>::new());
+            assert_eq!(space.warnings_on(answer_attempt), Vec::<String>::new());
+        }
+    }
+}
+
+/// The turn the lead's answer starts replies to the lead, asks it a
+/// follow-up, and ends waiting: the delivery is held again, with no warning
+/// for the whole second hold, and the follow-up's answer answers it.
+#[test]
+fn a_turn_that_replies_to_the_helper_and_asks_again_holds_without_a_warning() {
+    let space = Space::new();
+    let (question, ask, answer) = space.held_on_the_lead();
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap();
+    space.reviewer_working(true);
+    space.reviewer_prompt_at(100_000, "answer-turn", &answer.to_string());
+    dispatch::message(
+        "reply",
+        bound_reply(&space, &answer, "@lead Thanks. One more question coming."),
+        &space.pane_at("pane-reviewer", &At(102_000)),
+    )
+    .unwrap();
+    space.reviewer_sends_at(103_000, "@lead And what about option C?");
+    space.observe_at(108_000);
+    space.reviewer_stop_at(120_000, "answer-turn", "Asked a follow-up; waiting.");
+    space.reviewer_working(false);
+    assert_eq!(space.claims()[0]["state"], json!({"left":"held"}));
+    space.observe_at(121_000);
+    space.observe_at(3_700_000);
+    assert_eq!(space.warnings_on(attempt), Vec::<String>::new());
+    assert_eq!(space.question_leg(&question), "working");
+
+    let answer = space.lead_answers_at(3_800_000, "And what about option C?", "C is unsafe.");
+    let context = space.reviewer_prompt_at(3_800_100, "answer-2", &answer.to_string());
+    assert!(context.contains(&woken_for(attempt)), "{context}");
+    space.reviewer_stop_at(3_800_200, "answer-2", "FINAL: B is safe, C is not.");
+    assert_eq!(space.answers_to(&question), ["FINAL: B is safe, C is not."]);
+    assert_eq!(space.warnings_on(attempt), Vec::<String>::new());
 }
 
 /// A reply the agent sends during the turn opens no request, even to an

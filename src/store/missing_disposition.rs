@@ -473,8 +473,8 @@ impl StateTransaction<'_> {
             .unwrap_or(false))
     }
 
-    /// When the attempt settled, which is when its pane was seen idle, if
-    /// it has.
+    /// When the attempt settled, if it has: when reconciliation saw its pane
+    /// idle, or when a reply or a no-reply answered it.
     fn settled_at(
         &self,
         ns: &StateNamespace,
@@ -490,6 +490,43 @@ impl StateTransaction<'_> {
                 TransitionEntityKind::DeliveryAttempt.as_str(),
                 attempt.as_str(),
                 TransitionKind::Settled.as_str()
+            ],
+            |row| row.get(0),
+        )?;
+        Ok(at.map(|at| u64::try_from(at).unwrap_or(0)))
+    }
+
+    /// When the pane of the turn that `attempt`'s delivery started was seen
+    /// idle after it, if it was. Reconciliation settles an attempt as it sees
+    /// its pane idle, so that is when it settled, unless it has a reply or a
+    /// no-reply: the agent may run either while its turn goes on. Then it is
+    /// the first time its session was seen idle since.
+    fn idle_at(
+        &self,
+        ns: &StateNamespace,
+        attempt: &crate::DeliveryAttemptId,
+    ) -> Result<Option<u64>, StoreError> {
+        if !self.delivery_disposition_exists(ns, attempt)? {
+            return self.settled_at(ns, attempt);
+        }
+        let at: Option<i64> = self.transaction.query_row(
+            "SELECT MIN(o.observed_at_ms)
+             FROM delivery_dispositions p
+             JOIN delivery_attempts a USING (session_socket_id, worktree_id, attempt_id)
+             JOIN agent_session_observations o
+               ON o.session_socket_id = a.session_socket_id
+              AND o.worktree_id = a.worktree_id
+              AND o.address_id = a.address_id
+              AND o.agent_session_id = a.agent_session_id
+              AND o.status IN (?4, ?5)
+              AND o.observed_at_ms >= p.occurred_at_ms
+             WHERE p.session_socket_id = ?1 AND p.worktree_id = ?2 AND p.attempt_id = ?3",
+            params![
+                ns.session_socket_id,
+                ns.space_id.as_str(),
+                attempt.as_str(),
+                crate::mux::AgentState::Idle.as_str(),
+                crate::mux::AgentState::Done.as_str()
             ],
             |row| row.get(0),
         )?;
@@ -840,7 +877,7 @@ impl StateTransaction<'_> {
             ns,
             &session,
             attempt,
-            |idle| self.settled_at(ns, idle),
+            |idle| self.idle_at(ns, idle),
             now_ms,
         )?;
         Ok(MissingDispositionFacts {

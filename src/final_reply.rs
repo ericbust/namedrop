@@ -890,16 +890,17 @@ fn find_claim(
 /// What `session`'s claim says at `now_ms` about its answer to `attempt`.
 /// An open claim is decided by its Stop's worker within `STOPPED_GRACE_MS`
 /// of the Stop, or by a Stop that arrives within `STOP_ARRIVAL_GRACE_MS` of
-/// the pane going idle, which is when its attempt settled, as `settled_at`
-/// says. A held claim whose helper's answer started a turn waits the same
-/// way for that turn's Stop, from when the answer's attempt settled: a turn
-/// interrupted with Esc, or ended by an API error, lost the held answer too.
+/// the pane going idle, as `idle_at` says of the claim's attempt. A held
+/// claim whose helper's answer started a turn waits the same way for that
+/// turn's Stop, from when that turn's pane was seen idle, as `idle_at` says
+/// of the answer's attempt: a turn interrupted with Esc, or ended by an API
+/// error, lost the held answer too.
 pub(crate) fn answer_claim<E>(
     state: &Path,
     namespace: &crate::StateNamespace,
     session: &crate::AgentSessionId,
     attempt: &crate::DeliveryAttemptId,
-    settled_at: impl FnOnce(&crate::DeliveryAttemptId) -> Result<Option<u64>, E>,
+    idle_at: impl FnOnce(&crate::DeliveryAttemptId) -> Result<Option<u64>, E>,
     now_ms: u64,
 ) -> Result<AnswerClaim, E> {
     let directory = session_directory(state, &namespace.session_socket_id, session.as_str());
@@ -924,7 +925,7 @@ pub(crate) fn answer_claim<E>(
     };
     let until_ms = match stopped_at(&directory, turn) {
         Some(at) => at.saturating_add(STOPPED_GRACE_MS),
-        None => match settled_at(idle)? {
+        None => match idle_at(idle)? {
             Some(at) => at.saturating_add(STOP_ARRIVAL_GRACE_MS),
             // The turn the helper's answer started is still running.
             None if claim.state != ClaimState::Open => return Ok(AnswerClaim::Held),
