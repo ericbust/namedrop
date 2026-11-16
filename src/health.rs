@@ -81,7 +81,7 @@ where
     let mut report = diagnose_space(runtime);
     if let Some(home) = runtime.home_directory {
         for warning in crate::rex_ui::predecessor_warnings(home, runtime.state_directory) {
-            report.issues.push(issue("ND-INSTALL-001",HealthSeverity::Notice,"Agents on Rex still run the old hooks.",&warning,HealthRepairKind::AgentRepair,"In each Rex session, run Activate Namedrop again and name the panes again, then restart those agents so they load the new hooks."));
+            report.issues.push(issue("ND-INSTALL-001",HealthSeverity::Notice,"Agents on Rex have not run the new hooks yet.",&warning,HealthRepairKind::AgentRepair,"In each Rex session, run Activate Namedrop again and name the panes again. Restart an agent that shows Hook failed or does not answer a mention."));
             if report.status == HealthStatus::Healthy {
                 report.status = HealthStatus::NeedsAttention;
             }

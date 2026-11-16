@@ -4,7 +4,8 @@ namedrop_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 usage() {
   printf '%s\n' 'Usage: sh scripts/release.sh version | check BASE-REF | notes VERSION' \
     'version  prints the release version after checking Cargo.toml, Cargo.lock and herdr-plugin.toml agree.' \
-    'check    fails unless the version is above the one at BASE-REF and CHANGELOG.md has a section for it.' \
+    'check    fails unless the version is above the one at BASE-REF and CHANGELOG.md has a section for it,' \
+    '         and, for main, unless INSTALLER_FLOOR names a release that ships scripts/install.sh.' \
     'notes    prints the CHANGELOG.md section for VERSION without its heading.'
 }
 fail() { printf '%s\n' "$@" >&2; exit 65; }
@@ -41,6 +42,20 @@ version_above() {
     if (length(left[2]) != length(right[2])) { print (length(left[2]) > length(right[2]) ? 1 : 0); exit }
     print (left[2] != right[2] && ("x" left[2]) > ("x" right[2]) ? 1 : 0)
   }'
+}
+
+# A standalone install is offered no release below scripts/check-update.py's
+# INSTALLER_FLOOR, because an older release has no installer. Once main ships
+# scripts/install.sh, the floor must be this release, or a tagged release that
+# ships scripts/install.sh: a forgotten floor offers nothing, and one set too
+# low offers releases that cannot be installed.
+installer_floor() {
+  [ "${1##*/}" = main ] && [ -f "$namedrop_root/scripts/install.sh" ] || return 0
+  floor=$(sed -n "s/^INSTALLER_FLOOR = '\(.*\)'\$/\1/p" "$namedrop_root/scripts/check-update.py")
+  [ -n "$floor" ] || fail "scripts/check-update.py sets no INSTALLER_FLOOR = 'X.Y.Z' line."
+  [ "$floor" = "$2" ] || git -C "$namedrop_root" cat-file -e "v$floor:scripts/install.sh" 2>/dev/null ||
+    fail "INSTALLER_FLOOR in scripts/check-update.py is $floor, but no release tag v$floor ships scripts/install.sh." \
+      "Set it to $2 if this is the first release with scripts/install.sh, else to the first release that shipped it, and fetch tags first (see docs/releasing.md#publish)."
 }
 
 section() {
@@ -80,6 +95,7 @@ case "$1" in
         "If this pull request changes nothing users run, label it no-release instead."
     section "$version" > /dev/null ||
       fail "CHANGELOG.md has no '## [$version] - YYYY-MM-DD' section. Add one at the top describing what changes for users."
+    installer_floor "$base" "$version"
     printf '%s\n' "Release $version is ready: above $base_version on $base, with a changelog section." ;;
   notes)
     [ "$#" -eq 2 ] || { usage >&2; exit 64; }

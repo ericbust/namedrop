@@ -180,9 +180,44 @@ pub fn start(state: &Path, now: u64) -> Option<Child> {
 
 /// Starts the update check of a standalone install, from its Rex bridge,
 /// which runs no `reconcile` or lifecycle event. A Herdr-owned state keeps
-/// its own triggers.
+/// its own triggers. The check reads `runtime/source.json`, which a first
+/// install writes after the bridge has started, so until it exists the
+/// bridge's next start runs the check (the U10 review's F2).
 pub(crate) fn start_standalone(state: &Path, now: u64) -> Option<Child> {
-    standalone(state).then(|| start(state, now)).flatten()
+    if !standalone(state) || !state.join("runtime/source.json").is_file() || apple_python_stub() {
+        return None;
+    }
+    start(state, now)
+}
+
+/// On a Mac without the developer tools, `/usr/bin/python3` is Apple's stub,
+/// which fails and offers to install them. It writes no cache, so the bridge
+/// would run it on every connection and every hour (the U10 review's F1).
+/// The stub is the `python3` that `start` would run when it is the first on
+/// PATH and `xcode-select -p`, found as the check finds it, fails.
+fn apple_python_stub() -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    if !cfg!(target_os = "macos") {
+        return false;
+    }
+    // Without PATH, Command searches the system default.
+    let path = env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into());
+    let first = env::split_paths(&path)
+        .map(|directory| directory.join("python3"))
+        .find(|candidate| {
+            fs::metadata(candidate).is_ok_and(|metadata| {
+                metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+            })
+        });
+    first.and_then(|python| fs::canonicalize(python).ok())
+        == Some(PathBuf::from("/usr/bin/python3"))
+        && !Command::new("xcode-select")
+            .arg("-p")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
 }
 
 #[derive(Deserialize, Serialize)]

@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -84,9 +85,26 @@ class UpdateCheck(unittest.TestCase):
         self.calls = []
         self.commit = 'b' * 40
         self.remote = '1.10.0'
+        # A test runs `git` only as a stub it wrote under its own root. Any
+        # other `git` would reach GitHub, so the test fails instead (the U10
+        # review's F4).
+        self.unstubbed = []
+        run = worker.run
+
+        def guarded(command, timeout, **options):
+            if command[0] == 'git':
+                found = shutil.which('git', path=(options.get('env') or os.environ).get('PATH'))
+                if not found or self.root.resolve() not in Path(found).resolve().parents:
+                    self.unstubbed.append(command)
+                    raise AssertionError(f'an unstubbed git would run: {found} {command}')
+            return run(command, timeout, **options)
+        patcher = patch.object(worker, 'run', guarded)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def tearDown(self):
         self.temporary.cleanup()
+        self.assertEqual(self.unstubbed, [], 'an unstubbed git would have run')
 
     def registration(self):
         self.calls.append('registration')
