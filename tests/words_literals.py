@@ -93,6 +93,11 @@ def rust_tokens(text):
             i += 1
 
 
+def is_punct(token, value):
+    """Whether `token` is the punctuation `value`, never a string that holds it."""
+    return token[0] == 'punct' and token[1] == value
+
+
 def without_test_items(tokens):
     """The tokens outside `#[cfg(test)]` and test-support items, and the
     module files those items declare."""
@@ -102,9 +107,9 @@ def without_test_items(tokens):
         if kind == 'punct' and value == '#' and i + 1 < len(tokens) and tokens[i + 1][1] == '[':
             depth, j = 0, i + 1
             while True:
-                if tokens[j][1] == '[':
+                if is_punct(tokens[j], '['):
                     depth += 1
-                elif tokens[j][1] == ']':
+                elif is_punct(tokens[j], ']'):
                     depth -= 1
                     if depth == 0:
                         break
@@ -112,10 +117,10 @@ def without_test_items(tokens):
             attribute = ' '.join(str(t[1]) for t in tokens[i + 2:j])
             if attribute in ('cfg ( test )', 'cfg ( feature = test-support )', 'cfg ( any ( test , feature = test-support ) )', 'cfg ( all ( test , feature = test-support ) )'):
                 k, item = j + 1, []
-                while tokens[k][1] not in ('{', ';'):
+                while not (is_punct(tokens[k], '{') or is_punct(tokens[k], ';')):
                     item.append(tokens[k])
                     k += 1
-                if tokens[k][1] == ';':
+                if is_punct(tokens[k], ';'):
                     words = [t[1] for t in item]
                     path = [t[1] for t in item if t[0] == 'str']
                     if 'mod' in words:
@@ -124,9 +129,9 @@ def without_test_items(tokens):
                     continue
                 depth = 0
                 while True:
-                    if tokens[k][1] == '{':
+                    if is_punct(tokens[k], '{'):
                         depth += 1
-                    elif tokens[k][1] == '}':
+                    elif is_punct(tokens[k], '}'):
                         depth -= 1
                         if depth == 0:
                             break

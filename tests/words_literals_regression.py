@@ -48,6 +48,9 @@ def main():
             ("Rex workspace", "src/new.rs", 'fn f() { println!("Rex workspace"); }', "Rex workspace"),
             ("Lua quoted", "src/rex_ui/module.lua", 'error("Herdr popup")', "Herdr"),
             ("Lua long string", "src/rex_ui/module.lua", 'error([=[Herdr popup]=])', "Herdr"),
+            # A brace inside a string is no brace of the test module's body,
+            # so the literal after the module is still read.
+            ("brace in a test string", "src/new.rs", '#[cfg(test)]\nmod tests { fn t() { let _ = "{"; } }\nfn f() { println!("Herdr popup"); }', "Herdr"),
         ]
         for case in cases:
             check(root, *case)
