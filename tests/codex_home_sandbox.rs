@@ -3,7 +3,9 @@
 //! before it asks a model: it resolves a `CODEX_HOME` it was given, stops
 //! with Codex's own two lines when it cannot, and reads its credential file
 //! by the resolved path. The file holds no credential, and nothing reaches
-//! a provider or the network.
+//! a provider or the network. The stand-in then tries to list each
+//! directory in `STAND_IN_PRIVATE`, which the profile lets it look up but
+//! never list, and says in its answer whether it was handed a home.
 #![cfg(target_os = "macos")]
 
 use namedrop::suggest_agent_persona;
@@ -15,6 +17,7 @@ use std::{
 };
 
 const STAND_IN: &str = r#"
+#include <dirent.h>
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
@@ -42,6 +45,17 @@ int main(int argc, char **argv) {
         return 1;
     }
     fclose(auth);
+    const char *private_dirs = getenv("STAND_IN_PRIVATE");
+    char list[4 * PATH_MAX];
+    snprintf(list, sizeof list, "%s", private_dirs ? private_dirs : "");
+    for (char *dir = strtok(list, ":"); dir; dir = strtok(NULL, ":")) {
+        DIR *listing = opendir(dir);
+        if (listing && readdir(listing)) {
+            fprintf(stderr, "Listed %s\n", dir);
+            return 1;
+        }
+        if (listing) closedir(listing);
+    }
     while (fread(buffer, 1, sizeof buffer, stdin) > 0) {}
     const char *output = NULL;
     for (int i = 1; i + 1 < argc; i++) {
@@ -52,19 +66,22 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Error writing the last message: %s\n", strerror(errno));
         return 1;
     }
-    fputs("{\"description\": \"Reviews the parser changes.\"}", result);
+    fputs(given ? "{\"description\": \"Reviews the parser changes with a given home.\"}"
+                : "{\"description\": \"Reviews the parser changes.\"}", result);
     fclose(result);
     return 0;
 }
 "#;
 
 /// A home and the `CODEX_HOME` a person's environment gives the worker, or
-/// none, and where Codex's files really are.
+/// none, where Codex's files really are, and directories above them that
+/// Codex may look up but not list.
 struct Layout {
     name: &'static str,
     home: PathBuf,
     given: Option<PathBuf>,
     files: PathBuf,
+    private: Vec<PathBuf>,
 }
 
 fn compile(directory: &Path) -> PathBuf {
@@ -115,24 +132,32 @@ fn the_worker_resolves_a_codex_home_it_was_given() {
             home: profile("testbed").join("home"),
             given: Some(profile("testbed").join("codex")),
             files: profile("testbed").join("codex"),
+            private: vec![root.join("profiles")],
         },
         Layout {
             name: "a profile reached through a link",
             home: profile("linked").join("home"),
             given: Some(root.join("link").join("codex")),
             files: profile("linked").join("codex"),
+            private: vec![root.join("profiles")],
         },
         Layout {
             name: "a home under ~/.config",
             home: profile("config").join("home"),
             given: Some(profile("config").join("home/.config/agents/codex")),
             files: profile("config").join("home/.config/agents/codex"),
+            private: vec![
+                profile("config").join("home/.config"),
+                profile("config").join("home/.config/agents"),
+                root.join("profiles"),
+            ],
         },
         Layout {
             name: "the default under HOME",
             home: profile("default").join("home"),
             given: None,
             files: profile("default").join("home/.codex"),
+            private: vec![root.join("profiles")],
         },
         // As a HOME under macOS's /tmp is: Codex reads its default home by
         // the path through the link, which it does not resolve.
@@ -141,6 +166,7 @@ fn the_worker_resolves_a_codex_home_it_was_given() {
             home: root.join("home-link/users/me"),
             given: None,
             files: profile("home-link").join("users/me/.codex"),
+            private: vec![root.join("profiles")],
         },
         // Codex reads `~/.codex` by the path through the link, which the
         // sandbox checks at the link's own path (round B's review, F4).
@@ -149,6 +175,7 @@ fn the_worker_resolves_a_codex_home_it_was_given() {
             home: profile("dot-link").join("home"),
             given: None,
             files: profile("dot-link").join("dotfiles/codex"),
+            private: vec![profile("dot-link").join("dotfiles"), root.join("profiles")],
         },
     ];
     let mut failures = Vec::new();
@@ -166,9 +193,20 @@ fn the_worker_resolves_a_codex_home_it_was_given() {
             }
             env::set_var("NAMEDROP_AGENT_STATUS_CODEX_BIN", &codex);
             env::remove_var("NAMEDROP_AGENT_STATUS_SANDBOX_BIN");
+            env::set_var(
+                "STAND_IN_PRIVATE",
+                env::join_paths(&layout.private).unwrap(),
+            );
         }
+        // Codex is handed a home only when the person's environment gave it
+        // one, so with none it finds its own default as it always did.
+        let expected = if layout.given.is_some() {
+            "Reviews the parser changes with a given home."
+        } else {
+            "Reviews the parser changes."
+        };
         match suggest_agent_persona("reviewer", "", "codex", &AtomicBool::new(false)) {
-            Ok(suggestion) if suggestion == "Reviews the parser changes." => {}
+            Ok(suggestion) if suggestion == expected => {}
             outcome => failures.push(format!("{}: {outcome:?}", layout.name)),
         }
     }
