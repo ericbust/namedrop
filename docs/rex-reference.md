@@ -34,40 +34,42 @@ Without `--yes`, any answer other than `y` or `yes` cancels with `Installation c
 
 `install.sh` checks these in order. It changes nothing before you confirm.
 
-1. The platform: macOS on Apple silicon, or Linux on x86_64 or aarch64.
+1. The platform, as `uname` reports it: macOS on Apple silicon, or Linux on x86_64 or aarch64. `install.sh` does not check the C library. `scripts/build.sh` checks for glibc.
 2. Python 3: it runs `python3`, because on a Mac without the developer tools `/usr/bin/python3` exists but fails.
 3. Rex: `rex` on `PATH`, else `$REX_BIN_DIR/rex`.
-4. The install record, `~/.config/namedrop/state-directory`. It counts only when the directory it names holds an executable `runtime/namedrop`.
-5. The state directory: the recorded one, else `$NAMEDROP_STATE_DIR`, else `$XDG_STATE_HOME/namedrop`, else `~/.local/state/namedrop`.
+4. The install record, `~/.config/namedrop/state-directory`. The record counts only when it names an absolute path whose `runtime/namedrop` is an executable file. The record's path follows `HOME` and ignores `XDG_CONFIG_HOME`.
+5. The state directory: the recorded one, else `$NAMEDROP_STATE_DIR`, else `$XDG_STATE_HOME/namedrop`, else `~/.local/state/namedrop`. It must be an absolute path.
 6. The owner of that state directory, and any marker that a removal or a move to Herdr left there.
-7. With no record, Herdr's Namedrop state, `$XDG_STATE_HOME/herdr/plugins/namedrop`, else `~/.local/state/herdr/plugins/namedrop`. It counts only while Herdr's plugin list names Namedrop. The list is `$XDG_CONFIG_HOME/herdr/plugins.json`, else `~/.config/herdr/plugins.json`. A missing list names no plugin.
-8. The Rex server, which the package's own `namedrop --install-preview` finds. That is the socket that `REX_SERVER` names, else Rex's default socket for your `HOME`. The preview writes nothing.
+7. With no record, Herdr's Namedrop state: `$XDG_STATE_HOME/herdr/plugins/namedrop` if `XDG_STATE_HOME` is an absolute path, else `~/.local/state/herdr/plugins/namedrop`. It counts only while Herdr's plugin list names Namedrop.
+8. With a record that names a Herdr state, Herdr's plugin list. The state is adopted only while the list names Namedrop.
+9. The Rex server, which the package's own `namedrop --install-preview` finds. That is the socket that `REX_SERVER` names, else Rex's default socket. On macOS, the default is `~/Library/Application Support/rex/server.sock`. On Linux, it is `$XDG_RUNTIME_DIR/rex/server.sock`. The preview writes nothing.
 
-<!-- TODO(round C): install.sh follows Herdr's XDG_CONFIG_HOME rule. Check items 4 and 7 against round C's code, and correct the paths if its rule differs. -->
-<!-- TODO(round C): install.sh adopts a recorded Herdr state only while Herdr lists Namedrop. Add that condition to the adopt row below. -->
+`install.sh` reads Herdr's plugin list where Herdr reads it. With `XDG_CONFIG_HOME` set, even to an empty or relative value, the list is `$XDG_CONFIG_HOME/herdr/plugins.json`. `install.sh` resolves an empty or relative value from the directory you run it in. With `XDG_CONFIG_HOME` unset, the list is `~/.config/herdr/plugins.json`. A missing list names no plugin. Under an empty or relative `XDG_CONFIG_HOME`, a missing list stops the run as an unreadable one does, because Herdr resolves that directory from its own working directory.
 
 | Decision | When | What it does |
 |---|---|---|
 | `new` | No record, and the state directory has no owner, a `standalone` owner, or a removal marker | Publishes the runtime into the state directory, then runs `namedrop install` |
 | `update` | The record names a `standalone` state | Publishes the new runtime into that state, migrates its store when the schema changed, then runs `namedrop install` |
-| `adopt` | The record names a Herdr state whose runtime supports Rex | Runs `namedrop install` with Herdr's runtime, and publishes no runtime. Herdr's updates keep updating it |
+| `adopt` | The record names a Herdr state whose runtime supports Rex, and Herdr's plugin list names Namedrop | Runs `namedrop install` with Herdr's runtime, and publishes no runtime. Herdr's updates keep updating it |
 
 ### install.sh messages
 
-Each message ends the run. A message that the table marks "stopped" prints after `Namedrop Rex installation stopped: `.
+Each message below ends the run. A message that the table marks "stopped" prints after `Namedrop Rex installation stopped: `. The table leaves out other stopped messages, which name a problem with `HOME`, with an owner file, or with a marker in the state directory.
 
 | Message | Exit | Cause |
 |---|---|---|
+| `Unknown argument: <argument>` | 64 | An argument other than `--yes`, `-h`, or `--help` |
 | `Namedrop supports macOS on Apple silicon and GNU/Linux on x86_64 or aarch64; this machine reports <platform>.` | 69 | Another platform, or an Intel-emulated terminal on a Mac |
 | `Namedrop needs Python 3. On macOS, install the Command Line Tools with xcode-select --install, then run sh scripts/install.sh again.` | 69 | `python3` does not run |
 | `Namedrop needs Rex. Put rex on PATH, or set REX_BIN_DIR to the directory containing rex, then run sh scripts/install.sh again.` | 69 | No `rex` found |
 | `Namedrop found no running Rex server: <error>. Start Rex, or set REX_SERVER to its Unix socket, then run sh scripts/install.sh again.` | 69 | No server answers on the socket |
-| `Namedrop cannot tell where Rex's server is. Start Rex, or set REX_SERVER to its Unix socket, then run sh scripts/install.sh again.` | 69 | No socket path can be worked out |
+| `Namedrop cannot tell where Rex's server is. Start Rex, or set REX_SERVER to its Unix socket, then run sh scripts/install.sh again.` | 69 | `REX_SERVER` names no Unix socket. Or it is unset, and on Linux `XDG_RUNTIME_DIR` is unset too, as in some ssh shells |
 | `No built Namedrop executable was found. Run sh scripts/build.sh, or unpack the release archive again.` | 2, stopped | A checkout with no `bin/namedrop` |
 | `Namedrop is already installed in Herdr (<dir>). Run Activate Namedrop in Herdr first, then run sh scripts/install.sh again.` | 2, stopped | Herdr lists Namedrop and its runtime supports Rex, but it has written no install record |
 | `Namedrop is already installed in Herdr (<dir>). Update Namedrop in Herdr first, then run sh scripts/install.sh again.` | 2, stopped | Herdr lists Namedrop, and its runtime has no Rex support |
-| `Update Namedrop in Herdr first, then run sh scripts/install.sh again.` | 2, stopped | The record names a Herdr state whose runtime has no Rex support |
-| `Namedrop cannot read Herdr's plugin list in <file>, so it cannot tell whether Namedrop is still installed in Herdr (<dir>). If it is not, move that directory away, then run sh scripts/install.sh again.` | 2, stopped | Herdr's `plugins.json` cannot be read or parsed |
+| `Namedrop's install record names Herdr's Namedrop state (<dir>), but Namedrop is no longer installed in Herdr. Install it in Herdr again, or move that directory away, then run sh scripts/install.sh again.` | 2, stopped | The record names a Herdr state, and Herdr's plugin list does not name Namedrop. Once `<dir>` is moved away, the record no longer counts, and the next run is a new install |
+| `Update Namedrop in Herdr first, then run sh scripts/install.sh again.` | 2, stopped | The record names a Herdr state that Herdr lists, and its runtime has no Rex support |
+| `Namedrop cannot read Herdr's plugin list in <file>, so it cannot tell whether Namedrop is still installed in Herdr (<dir>). If it is not, move that directory away, then run sh scripts/install.sh again.` | 2, stopped | Herdr's `plugins.json` cannot be read or parsed, or it is missing under an empty or relative `XDG_CONFIG_HOME`. `<file>` is an absolute path |
 | `Namedrop is moving to Herdr. Run Activate Namedrop in Herdr again.` | 2, stopped | A move to Herdr stopped part way |
 | `ND-INSTALL-002: Namedrop's shared agent packages belong to Herdr's install in <state>. Run Activate Namedrop in Herdr to update them.` | 2, stopped | The state directory that `install.sh` would use belongs to Herdr |
 | `Installation cancelled; no files changed.` | 0 | You answered no |
@@ -82,9 +84,9 @@ A failure inside the install prints the install's own message and exits with its
 
 | What | Where |
 |---|---|
-| Runtime | `<state>/runtime/`: `releases/<sha256>/`, the `current` link, the launcher `namedrop`, `owner`, and `source.json`. An adoption writes none of these |
+| Runtime and store | `<state>/runtime/`: `releases/<sha256>/`, the `current` link, the launcher `namedrop`, `owner`, `source.json`, and migration records. The install also creates the store in `<state>`, or migrates it. An adoption writes none of these |
 | Rex module | `namedrop.lua`, in the folder of the `init.lua` that the Rex server reads. Its first line is `-- Managed by Namedrop. `namedrop install` rewrites this file, so edits here are lost.` |
-| Rex config line | `pcall(require, "namedrop");` as the first line of `init.lua`, with a backup `init.lua.namedrop-<UTC time>.bak` beside it. Only the newest backup is kept |
+| Rex config line | `pcall(require, "namedrop");` as the first line of `init.lua`. When `init.lua` already exists, the install first copies it to `init.lua.namedrop-<UTC time>.bak` beside it. Only the newest backup is kept |
 | Shell command | `~/.local/bin/namedrop` |
 | PATH lines | A `# Namedrop CLI` block in `.zshrc` under zsh, or in `.bashrc` and a login file under bash. Other shells get none |
 | Codex package | `~/.agents/skills/namedrop` |
@@ -107,7 +109,7 @@ The install edits `init.lua` only when the file is a regular file or missing. It
 | `namedrop install --print-config --input-json '{"confirmed":true}'` | Installs as above, but prints the `init.lua` line and where it goes instead of editing `init.lua` |
 | `namedrop install --remove --input-json '{"confirmed":true}'` | Removes Namedrop from Rex. Without confirmation it says what removal deletes and changes nothing |
 
-Removal deletes the first line of `init.lua` only when it is the line that the install inserted. It deletes `namedrop.lua` only when its first line is the managed line, then deletes `rex.json`. For a standalone install, it also stops the install's helpers and removes the agent packages, the permissions, the Codex rules and plugin entries, `~/.local/bin/namedrop`, and the install record. It never deletes the state directory or the `PATH` lines.
+Removal deletes the first line of `init.lua` only when it is the line that the install inserted. It deletes `namedrop.lua` only when its first line is the managed line, then deletes `rex.json`. For a standalone install, it also stops the install's background processes, such as its bridge, and removes the agent packages, the permissions, the Codex rules and plugin entries, `~/.local/bin/namedrop`, and the install record. It never deletes the state directory or the `PATH` lines. When it edits `init.lua`, it backs the file up as the install does, and keeps only that newest backup.
 
 | Removal result | Meaning |
 |---|---|
@@ -120,7 +122,7 @@ After a standalone removal, the old runtime's commands print `Namedrop was remov
 
 ## Palette actions and keys
 
-The module defines these actions in the `Namedrop` category of the Rex command palette. Each one runs `namedrop rex action <name>` for the pane you run it from.
+The module defines these actions in the `Namedrop` category of the Rex command palette. Each one except About Namedrop runs `namedrop rex action <name>` for the pane you run it from. About Namedrop answers from the module itself.
 
 | Title | Rex action | Key | Effect |
 |---|---|---|---|
@@ -163,7 +165,7 @@ When Rex loads the module, it also starts `namedrop rex ensure --from-server`, w
 | Settings file | `~/.config/namedrop/settings.json` for a standalone install. A Herdr install reads `$XDG_CONFIG_HOME/herdr/plugins/config/namedrop/settings.json`, else `~/.config/herdr/plugins/config/namedrop/settings.json` |
 | Setting | `check_for_updates`, `true` or `false`. A missing file means `true`. Any other key makes the file invalid, and Doctor reports `ND-UPDATE-002` |
 | Agent notice | At the start of a session, at most once a day for each version: `Namedrop <version> is available (you have <installed>). Update: download Namedrop <version> and run sh scripts/install.sh` |
-| macOS without the developer tools | The bridge starts no check when the first `python3` on its `PATH` is `/usr/bin/python3` and `xcode-select -p` fails. A check that runs anyway records `skipped` with `developer_tools_missing`, and runs no `git` |
+| macOS without the developer tools | The bridge starts no check when the first `python3` on its `PATH` is `/usr/bin/python3`, by name or through a link, and `xcode-select -p` fails. It runs `xcode-select -p` only when the setting and the daily limit allow a check. A check that runs anyway records `skipped` with `developer_tools_missing`, and runs no `git` |
 
 ## One machine with Herdr and Rex
 
@@ -175,7 +177,7 @@ One machine has one set of agent packages: `~/.claude/skills/namedrop`, `~/.agen
 | Rex first, then Herdr | Herdr's activation retires the standalone state and takes over the packages, the record, and the module. The names made on Rex stay in the old state |
 | Rex first, then a Herdr release without Rex support | That release takes the packages and leaves the module naming the standalone state. Doctor on Rex reports `ND-INSTALL-003` |
 
-The retired state keeps `runtime/retired.json`, with `reason` `herdr_handoff` and the new state as `successor`. From then on, its hooks exit with no output, its helpers exit, and its commands print the short form of `ND-INSTALL-001` and exit 69. `install.sh` refuses that state.
+The retired state keeps `runtime/retired.json`, with `reason` `herdr_handoff` and the new state as `successor`. From then on, its hooks exit with no output, its background processes exit, and its commands print the short form of `ND-INSTALL-001` and exit 69. `install.sh` refuses that state.
 
 ## Remote addresses
 
@@ -187,9 +189,7 @@ A remote address is `@<name>@<label>`.
 - A send to a remote address carries text only. It refuses `context`, `request_context`, tracked work, and `in_reply_to`, with `a message to an agent on another host is a plain send: it carries no context and no tracked work`.
 - A send to a label that `rex hosts list` does not print fails at once with `<label> is not in your Rex hosts (rex hosts list): <labels>`, and Namedrop queues nothing.
 - A relayed message shows its sender as `@<name>@<host>`. When Rex identifies A as a Tailscale principal, `<host>` is A's Tailscale device name. Otherwise it is the name that A's Namedrop gives its machine, which is A's host name up to its first dot. In that case B's agent gets `[Namedrop: <host> is the name the sending machine gave itself, which Rex did not confirm.]` before the first message of each thread.
-
-<!-- TODO(round C): the host notice's acknowledgement is not relayed. Confirm, then keep this line. -->
-An agent's answer to that notice stays on B and is not relayed to A.
+- An answer to that notice reaches A as an answer to the message only when B had tried to deliver the message to the answering agent before the agent answered. Any other answer to the notice is an acknowledgement. B neither keeps it for A nor counts it, so A never gets it.
 
 ## Relay timings and sizes
 
@@ -201,7 +201,7 @@ An agent's answer to that notice stays on B and is not relayed to A.
 | Wait between tries after a fault | 1, 2, 5, and 10 seconds, then 30 seconds for each later try |
 | How long one `rex` call may take | 15 seconds. A message whose call timed out is sent again with the same ID, and B accepts it once |
 | How often A's bridge restarts a stopped relay worker | Every 10 seconds, for each label with a message queued or a thread open |
-| Largest message A sends | A request of 60 KiB. A larger send fails at once with `the message to @<name>@<label> is too large to relay` |
+| Largest message A sends | A request of 60 KiB. A larger send fails at once with `the message to @<name>@<label> is too large to relay: its request is <n> bytes, and the limit is 61440` |
 | Largest reply text | 60 KiB. A longer reply is cut and ends with `[Namedrop cut this message to relay it.]` |
 | Largest reason A keeps from B | 1 KiB |
 | How long B keeps a reply for A | 7 days |
@@ -228,6 +228,8 @@ A tells the sender of a failed message once, in its thread, as a message from th
 | `<label> is no longer in your Rex hosts` | Someone removed the label after the send |
 | `<label> keeps no more replies for this machine until this machine collects them` | B keeps 10,000 replies for A. Each message that A had not sent yet fails |
 | `<label> was unreachable for 24 hours` | B did not answer for 24 hours |
+| `the Automatic Reply Limit kept its thread on <label> paused for 24 hours` | B's Automatic Reply Limit paused the thread, and the message still waited 24 hours after A queued it |
+| `the message is too large to relay` | B's Rex server refused the call as too large |
 
 While B's bridge is stopped or B cannot be reached, A keeps the message and tries again. A refusal is stored with the message, so a later change on B, such as a new `relay/allow-terminals`, does not change the answer to that message.
 
@@ -331,6 +333,10 @@ A writer that may not change the shared agent packages reports `ND-INSTALL-002` 
 | Explanation | "Namedrop has no session identity for this Rex pane. Submit the first prompt, then check registration. If identity is still missing after a turn, run Activate Namedrop again and restart the agent so it loads the Namedrop hooks." |
 | Repair | "Run Activate Namedrop again, then restart this agent to load the Namedrop hooks." |
 
+### ND-SESSION-003
+
+`ND-SESSION-003` is not Rex-only. It reports a Codex session that runs through Codex's shared app-server, so Namedrop cannot tell which pane it runs in. [Codex 0.162 and later: the shared app-server](compatibility.md#codex-0162-and-later-the-shared-app-server) gives the fix.
+
 ### ND-SESSION-004
 
 | Field | Text |
@@ -414,37 +420,19 @@ Each label in the explanation lists one or more of these conditions:
 
 ## Limits of the experimental build
 
-- **Experimental.** Rex is a preview, and Namedrop's Rex support can change between releases.
-- **Channels names Herdr.** **Open Namedrop Channels** opens a page that tells a Rex user to open Herdr: "Open this workspace in Herdr and choose Namedrop setup from the command palette to repair the integration.", "Open this workspace in Herdr and choose Namedrop Doctor to review this item.", "Answer it in its pane in Herdr.", "Rename it in Herdr.", and "This workspace has no label in Herdr." Rex has no counterpart for these Herdr steps. Use the palette actions and `namedrop` commands instead.
-- **Rex can miss a new session's first events.** Rex sometimes sends no startup events, such as `block_created`, for the first pane of a new session. Namedrop loses nothing: activation reads the session's panes itself, and that pane's later events still arrive.
+- **Experimental.** Rex is a preview, and Namedrop's Rex support can change between releases. No release includes it yet.
+- **Channels names Herdr.** **Open Namedrop Channels** opens a page that tells a Rex user to open Herdr: "Open this workspace in Herdr and choose Namedrop setup from the command palette to repair the integration.", "Open this workspace in Herdr and choose Namedrop Doctor to review this item.", "Answer it in its pane in Herdr.", "Rename it in Herdr.", and "This workspace has no label in Herdr." Rex has no counterpart for these Herdr steps. The palette actions and `namedrop` commands do that work on Rex.
+- **Rex can miss a new session's first events.** Rex sometimes sends no startup events, such as `block_created`, for the first pane of a new Rex session. Namedrop loses nothing: activation reads the Rex session's panes itself, and that pane's later events still arrive.
 - **The Rex app's palette is not tested.** The actions were run with `rex do --origin palette`, which proves what they do. Whether the Rex app's palette lists them, what it shows for About Namedrop, and whether the app's keys reach them are not tested.
-- **Windows is out of scope.** `install.sh` runs only on macOS on Apple silicon and on Linux with glibc. B's relay accepts only a Tailscale principal or a local peer with B's user ID, so it refuses other callers, such as a Windows peer.
+- **Windows is out of scope.** `install.sh` runs only on macOS on Apple silicon and on Linux, and a Linux build needs glibc. B's relay accepts only a Tailscale principal or a local peer with B's user ID, so it refuses other callers, such as a Windows peer.
 - **Remote mentions only through `namedrop send`.** A remote address typed at the start of an agent's prompt is not a mention.
+- **The relay reads hosts from Rex's default socket.** The relay lists A's hosts with `rex hosts list`, which ignores `-S` and `REX_SERVER`. It reads your Rex home and the Rex server on this machine's default socket. With A's server on another socket, and no other home chosen, each remote send fails with `could not read your Rex hosts: <error>`.
 - **A sender's host is the sender's own claim.** Unless Rex identifies the caller as a Tailscale principal, the host in a relayed sender's name, such as `@alice@laptop`, is what the sending machine says. B does not check it, and tells its agent so.
 - **No delivery confirmation across machines.** A learns that B accepted a message. A does not learn when B's agent received it.
-- **Two labels for one server.** A compares the endpoints that `rex hosts list --json` gives each label, as Rex dials them. If two labels reach one server through endpoints that differ, A relays nothing through the second label, and `ND-RELAY-003` names both. Give each server one label, or the same endpoints.
-- **Your Rex home decides which labels exist.** The hosts that `rex hosts list` prints come from your Rex home and from this machine's server. Use a Rex home that you trust, because its entries decide where your remote mentions go.
-- **B started without restore retires its names.** If B's Rex server starts with `--restore=false`, B's bridge finds B's sessions gone and retires their names. Name the panes again after B's next normal start.
+- **Two labels for one server.** A compares the endpoints that `rex hosts list --json` gives each label, as Rex dials them. If two labels reach one server through endpoints that differ, A relays nothing through the second label, and `ND-RELAY-003` names both. Relaying resumes when the two labels list the same endpoints, or when one of them is removed.
+- **Your Rex home decides which labels exist.** The hosts that `rex hosts list` prints come from your Rex home and from this machine's server. Their entries decide where your remote mentions go.
+- **B started without restore retires its names.** If B's Rex server starts with `--restore=false`, B's bridge finds B's Rex sessions gone and retires their names. After B's next normal start, its panes need to be named again.
 - **Names made on Rex do not move to Herdr.** After a move from Rex to Herdr, the old names stay in the old state directory.
-- **Each relay call opens its own ssh connection.** Over `ssh://`, each `rex` call that the relay makes starts a new ssh tunnel. In the lab, a call took about 125 ms, and A started 3 tunnels at each 30-second collect. On a slow link, each tunnel is a full ssh handshake.
+- **Each relay call opens its own ssh connection.** Over `ssh://`, each `rex` call that the relay makes starts a new ssh tunnel. In the remote-host lab, a call took about 125 ms, and A started 3 tunnels at each 30-second collect. On a slow link, each tunnel is a full ssh handshake.
 
-## What has not been tested
-
-The remote-host lab ran a scratch macOS A against a Linux B in a Docker container on the same Mac, over `ssh://`, with Superlogical's apt Rex package on B. B ran preview.18 and preview.19. The lab proved these:
-
-- `rex hosts check` reached B, and Rex identified A as B's own user, a local peer.
-- B accepted a message once, refused unknown, ambiguous, and terminal names with the reasons above, and a terminal on B ran a relayed command once. Its reply reached A at A's next collect.
-- While B was away in four ways, A kept the message, Rex never answered `not_found`, and B ran it once after it came back.
-- A retry after a timeout was accepted once.
-- B refused an anonymous `http://` caller, and A refused a second label for B's server.
-- Namedrop's Linux process reads passed on B, and a Codex stand-in bound in a B pane.
-
-These are not tested:
-
-- TLS to a Rex server, such as through Tailscale, and the Tailscale principal and device name that B shows for A.
-- A real Linux host, and a server that `rex server install ssh://` set up.
-- Mac to Mac across a network.
-- A real Claude Code or Codex on B. The lab used terminals and a stand-in.
-- sshd's per-source penalties on a real B, which can refuse A for a while after a dropped connection.
-- An update of Namedrop on B while B's bridge runs. In the lab, replacing B's executable under a running bridge made B answer every relayed message with a retry until the bridge restarted.
-- A restart of the Rex app, as opposed to its server.
+[What has been tested on Rex](compatibility.md#what-has-been-tested-on-rex) records what has been tested, and what has not.
