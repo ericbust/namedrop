@@ -58,7 +58,7 @@ Namedrop speaks Rex's control protocol, `rex.control.v1`, at API revisions 12, 1
 | Rex | API revision | Status |
 |---|---|---|
 | `0.1.0-preview.14`, commit `7e460d0` | 12, supports 0 to 12 | Supported, at revision 12. The spike and the adapter's design probes ran on it |
-| `0.1.0-preview.18`, commit `baf79e0` | 13, supports 0 to 13 | Supported, at revision 13. The installer, the palette actions, both install orders, and agents were tested on it through pre-release round B, and the relay to a Linux host in the remote-host lab. No preview.18 build was left for round C |
+| `0.1.0-preview.18`, commit `baf79e0` | 13, supports 0 to 13 | Supported, at revision 13. The installer, the palette actions, both install orders, and agents were tested on it through pre-release round B, and the relay to a Linux host in the remote-host lab. Round C did not run on preview.18 |
 | `0.1.0-preview.19`, commit `ad5a836` | 14, supports 0 to 14 | Supported, at revision 14. Tested as preview.18 was, except that the remote-host lab ran it only as B. Also tested with Herdr inside Rex, and in pre-release round C |
 
 Rex has been tested with real agents only on macOS on Apple silicon. A Linux Rex server was tested only as the receiving machine in the remote-host lab, in a Docker container, with no real agent. The testbed's Rex lanes use the `rex` that the testbed finds, and their logs do not record its version, except where an entry below names it.

@@ -122,11 +122,11 @@ To turn off the check, create `~/.config/namedrop/settings.json` with this conte
 
 On a Mac without the developer tools, the check does not run, because Apple's `/usr/bin/python3` and `/usr/bin/git` only offer to install them. Run `xcode-select --install` to turn the check on. [Updates](rex-reference.md#updates) gives the full rules.
 
-If Herdr owns your Namedrop install, as after [Herdr first, then Rex](#herdr-first-then-rex), update it with **Update Namedrop** in Herdr. That updates Namedrop for both Herdr and Rex.
+If Herdr owns your Namedrop install, as it does after [Herdr first, then Rex](#herdr-first-then-rex), update it with **Update Namedrop** in Herdr. That updates Namedrop for both Herdr and Rex.
 
 ## Use Herdr and Rex on one machine
 
-A machine has one Namedrop: one state directory, one runtime, and one set of agent packages, which Herdr and Rex share. Whichever of the two you install Namedrop in first owns them.
+A machine has one Namedrop: one state directory, one runtime, and one set of agent packages, which Herdr and Rex share. Herdr's install owns them once Herdr has Namedrop. Until then, the install that `install.sh` made owns them.
 
 ### Run Herdr inside Rex
 
@@ -202,7 +202,7 @@ In the rest of this guide, A is your machine and B is the machine whose agent yo
 	```
 
 3. Make sure that `rex` is on the `PATH` of Namedrop's commands on A. The relay runs `rex` to reach B. A Rex pane has it. A shell outside Rex may not.
-4. Run A's Rex server on Rex's default socket. The relay reads A's hosts with `rex hosts list`, which ignores `-S` and `REX_SERVER`. It reads your Rex home and the Rex server on the default socket, and your home is that server unless you chose another with `rex home set` or `REX_HOME`. With A's server on another socket, each remote send fails with `could not read your Rex hosts: <error>`.
+4. The relay works only while A's Rex server runs on Rex's default socket. The relay reads A's hosts with `rex hosts list`, which ignores `-S` and `REX_SERVER`. It reads your Rex home and the Rex server on the default socket, and your home is that server unless you chose another with `rex home set` or `REX_HOME`. With A's server on another socket, each remote send fails with `could not read your Rex hosts: <error>`.
 5. Ask a named agent on A to send the message. In Claude Code's prompt, type:
 
 	```text
@@ -234,7 +234,7 @@ Do these steps on B, the machine whose agent A mentions. B runs Linux or macOS. 
 2. On B, install Namedrop as [Install Namedrop for Rex](#install-namedrop-for-rex) describes, with B's Rex server running. Run the installer on B itself, because it edits and reloads the configuration of the local Rex server only. In an ssh shell on B:
 	- `rex` may not be on your `PATH`. Set `REX_BIN_DIR` to its directory, such as `~/.local/bin`.
 	- On Linux, the installer looks for B's Rex server at `$XDG_RUNTIME_DIR/rex/server.sock`. If your shell has no `XDG_RUNTIME_DIR`, set `REX_SERVER` to the socket of B's server. Without `XDG_RUNTIME_DIR`, Rex puts it at `~/.local/state/rex/run/server.sock`.
-3. Open a pane on B. From A, run `rex -S devbox new agents`, which creates a Rex session named `agents` on B with one shell pane. The `rex` command does not show a pane in your terminal. `rex -S devbox send` and `rex -S devbox send-key` type into the pane, and `rex -S devbox capture` prints its screen. A Rex app connected to B can show B's panes too, which Namedrop has not tested.
+3. Open a pane on B. From A, run `rex -S devbox new agents`, which creates a Rex session named `agents` on B with one shell pane. The `rex` command does not show a pane in your terminal. `rex -S devbox send` and `rex -S devbox send-key` type into the pane, and `rex -S devbox capture` prints its screen. For another pane, run `rex -S devbox split`, which adds a pane and moves the focus to it. `rex -S devbox block ls --short=false` lists the panes, and `-b <block ID>` selects one for `send`, `send-key` and `capture`. A Rex app connected to B can also show B's panes. Namedrop has not tested that.
 4. Start the agents in panes of B's Rex server, as in [Start Claude Code and Codex in a Rex pane](#start-claude-code-and-codex-in-a-rex-pane). Activate the Rex session and name the agents with `namedrop` in a shell pane on B, as in [Activate Namedrop and name your panes](#activate-namedrop-and-name-your-panes).
 5. Name the agent in only one of B's Rex sessions. If the name is in two of them, B answers that the mention is ambiguous and names both Rex sessions.
 6. Keep B's bridge running. Rex starts it when B's server loads the Namedrop module, and any Namedrop command or hook in one of B's panes starts it too. While the bridge is stopped, A keeps the message and tries again. After 24 hours, A gives up and tells the sender `devbox was unreachable for 24 hours`.
