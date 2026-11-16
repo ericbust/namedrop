@@ -505,15 +505,15 @@
       "file": "scripts/check-update.py",
       "reason": "The update check of a Herdr registration; a standalone install reads source.json instead.",
       "literals": [
-        [55, "plugins"],
-        [56, "plugin_list"],
-        [60, "plugin_id"],
-        [78, "plugin_root"],
-        [93, "--plugin"],
-        [93, "HERDR_BIN_PATH"],
-        [93, "herdr"],
-        [93, "plugin"],
-        [221, "https://raw.githubusercontent.com/{source[\"owner\"]}/{source[\"repo\"]}/{commit}/{prefix}herdr-plugin.toml"]
+        [54, "plugins"],
+        [55, "plugin_list"],
+        [59, "plugin_id"],
+        [77, "plugin_root"],
+        [92, "--plugin"],
+        [92, "HERDR_BIN_PATH"],
+        [92, "herdr"],
+        [92, "plugin"],
+        [220, "https://raw.githubusercontent.com/{source[\"owner\"]}/{source[\"repo\"]}/{commit}/{prefix}herdr-plugin.toml"]
       ]
     },
     {
