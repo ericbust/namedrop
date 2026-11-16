@@ -2202,13 +2202,13 @@ pub(crate) fn final_reply_guidance(
         // another agent's ask, so it is not told to show the person.
         Armed::NoReply(NoReplyCase::ReportToHuman) => {
             return Some(match woken {
-                Some(held) => format!("{REPORT_TO_HUMAN_WOKEN} {}", woken_sentence(held)),
+                Some(held) => format!("{REPORT_TO_HUMAN_WOKEN} {}", woken_sentence(held, false)),
                 None => REPORT_TO_HUMAN_GUIDANCE.to_owned(),
             });
         }
         Armed::NoReply(NoReplyCase::ResultSet) => {
             return Some(match woken {
-                Some(held) => format!("{RESULT_SET_GUIDANCE} {}", woken_sentence(held)),
+                Some(held) => format!("{RESULT_SET_GUIDANCE} {}", woken_sentence(held, false)),
                 None => RESULT_SET_GUIDANCE.to_owned(),
             });
         }
@@ -2245,7 +2245,7 @@ pub(crate) fn final_reply_guidance(
                 // what the final message does.
                 Some(held) => format!(
                     "Namedrop commands: this answers your message. {} Namedrop closes this answer without a reply when your turn ends. To reply to {} as well, run this line: it goes only to {}, and your final message still answers delivery {}.",
-                    woken_sentence(held),
+                    woken_sentence(held, true),
                     addressee(control)?,
                     addressee(control)?,
                     held.as_str()
@@ -2287,10 +2287,17 @@ fn final_reply_waiting(delivery: &str) -> String {
 
 /// What a turn that a held delivery's helper answered is for: its final
 /// message answers that delivery, unless the turn asks again and waits.
-fn woken_sentence(held: &crate::DeliveryAttemptId) -> String {
+/// `reply_shown` says the line shown replies to the helper, which asks
+/// nothing.
+fn woken_sentence(held: &crate::DeliveryAttemptId, reply_shown: bool) -> String {
     let held = held.as_str();
+    let ask = if reply_shown {
+        "send a new request rather than a reply"
+    } else {
+        "send a new request"
+    };
     format!(
-        "Delivery {held} from an earlier turn waited on it, so your final message is your answer to delivery {held}, and Namedrop sends it there: run no settle command and write no status line. If this does not answer delivery {held} yet, send a new request rather than a reply, and end your turn while you wait for its answer. {}",
+        "Delivery {held} from an earlier turn waited on it, so your final message is your answer to delivery {held}, and Namedrop sends it there: run no settle command and write no status line. If this does not answer delivery {held} yet, {ask}, and end your turn while you wait for its answer. {}",
         final_reply_waiting(&format!("delivery {held}"))
     )
 }

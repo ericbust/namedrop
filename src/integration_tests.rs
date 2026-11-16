@@ -413,11 +413,12 @@ fn a_final_reply_delivery_says_what_the_stop_does_and_shows_only_the_other_line(
         );
         assert_eq!(
             final_reply_guidance(&control, &Armed::NoReply(case), Some(&held)).unwrap(),
-            format!("{woken} {}", woken_sentence(&held))
+            format!("{woken} {}", woken_sentence(&held, false))
         );
     }
     // A terminal's result answers the held delivery, which another agent may
-    // have asked: the text never sends that answer to the person.
+    // have asked: the text never sends that answer to the person. It shows
+    // no line that replies, so it asks again only with a new request.
     let result = final_reply_guidance(
         &control,
         &Armed::NoReply(NoReplyCase::ReportToHuman),
@@ -425,6 +426,11 @@ fn a_final_reply_delivery_says_what_the_stop_does_and_shows_only_the_other_line(
     )
     .unwrap();
     assert!(!result.contains("the person"), "{result}");
+    assert!(
+        result.contains("yet, send a new request, and end your turn")
+            && !result.contains("rather than a reply"),
+        "{result}"
+    );
     let relayed = Armed::NoReply(NoReplyCase::Relayed);
     assert_eq!(
         final_reply_guidance(&control, &relayed, None).unwrap(),
