@@ -1635,30 +1635,40 @@ fn the_turn_a_helpers_answer_starts_answers_the_held_delivery() {
         assert!(!typed.contains("is still open"), "{typed}");
     }
 
-    let space = Space::new();
-    let (question, ask, answer) = space.held_on_the_lead();
-    let attempt = ask["control"]["attempt_id"].as_str().unwrap();
-    let turn = ("prompt_id", "answer-turn");
-    space.prompt(
-        "pane-reviewer",
-        "session-reviewer",
-        turn,
-        &answer.to_string(),
-    );
-    space.stop("session-reviewer", turn, "  ");
-    assert!(space.reviewer_posts(&question).is_empty());
-    assert_eq!(
-        space.unresolved_disposition_warnings().len(),
-        1,
-        "a held answer whose turn came and went without it warns"
-    );
-    let typed = space.typed_context("typed-turn", "Did you hear back?");
-    assert!(
-        typed.contains(&format!(
-            "Namedrop: delivery {attempt} from an earlier turn is still open"
-        )),
-        "{typed}"
-    );
+    // The answer's turn ends with no final message, or is interrupted and
+    // never stops: the person is warned, and the way back shows again.
+    for stops in [true, false] {
+        let space = Space::new();
+        let (question, ask, answer) = space.held_on_the_lead();
+        let attempt = ask["control"]["attempt_id"].as_str().unwrap();
+        let turn = ("prompt_id", "answer-turn");
+        space.prompt(
+            "pane-reviewer",
+            "session-reviewer",
+            turn,
+            &answer.to_string(),
+        );
+        if stops {
+            space.stop("session-reviewer", turn, "  ");
+        }
+        let typed = space.typed_context("typed-turn", "Did you hear back?");
+        assert!(space.reviewer_posts(&question).is_empty());
+        let warned = space.rows(&format!(
+            "SELECT summary FROM attention_items WHERE source_kind = 'agent_disposition'
+               AND source_id = '{attempt}' AND resolved_at_ms IS NULL"
+        ));
+        assert_eq!(
+            warned.len(),
+            1,
+            "{stops}: a held answer whose turn came and went without it warns"
+        );
+        assert!(
+            typed.contains(&format!(
+                "Namedrop: delivery {attempt} from an earlier turn is still open"
+            )),
+            "{stops}: {typed}"
+        );
+    }
 }
 
 /// A reply the agent sends during the turn opens no request, even to an
