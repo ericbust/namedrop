@@ -115,6 +115,40 @@ impl StateTransaction<'_> {
             .map(crate::MessageId::new))
     }
 
+    /// Whether the attempt's recipient, in its own session, sent `message` at
+    /// or after `since_ms` and no later than the attempt settled.
+    pub(crate) fn sent_before_settle(
+        &self,
+        namespace: &StateNamespace,
+        attempt_id: &crate::DeliveryAttemptId,
+        message: &crate::MessageId,
+        since_ms: u64,
+    ) -> Result<bool, StoreError> {
+        let Some(settled_at) = self.settled_at(namespace, attempt_id)? else {
+            return Ok(false);
+        };
+        Ok(self.transaction.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM delivery_attempts a
+                 JOIN collaboration_messages m
+                   ON m.session_socket_id = a.session_socket_id
+                  AND m.worktree_id = a.worktree_id
+                  AND m.author_address_id = a.address_id
+                  AND m.author_session_snapshot = a.agent_session_id
+                 WHERE a.session_socket_id = ?1 AND a.worktree_id = ?2 AND a.attempt_id = ?3
+                   AND m.message_id = ?4 AND m.created_at_ms BETWEEN ?5 AND ?6)",
+            params![
+                namespace.session_socket_id,
+                namespace.space_id.as_str(),
+                attempt_id.as_str(),
+                message.as_str(),
+                to_i64(since_ms)?,
+                to_i64(settled_at)?
+            ],
+            |row| row.get(0),
+        )?)
+    }
+
     /// The messages the attempt's recipient, in its own session, sent between
     /// `since_ms` and `until_ms` that open a request to someone besides the
     /// person and have no answer yet: while there are any, the turn ended

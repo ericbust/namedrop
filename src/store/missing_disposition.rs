@@ -475,7 +475,7 @@ impl StateTransaction<'_> {
 
     /// When the attempt settled, if it has: when reconciliation saw its pane
     /// idle, or when a reply or a no-reply answered it.
-    fn settled_at(
+    pub(super) fn settled_at(
         &self,
         ns: &StateNamespace,
         attempt: &crate::DeliveryAttemptId,

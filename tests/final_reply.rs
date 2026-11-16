@@ -1815,6 +1815,21 @@ impl Space {
         .collect()
     }
 
+    /// Rewrites the claims on `attempts` as an older build left them: with
+    /// no requests recorded.
+    fn as_older_build(&self, attempts: &[&str]) {
+        let mut claims: Value =
+            serde_json::from_slice(&fs::read(self.claims_file()).unwrap()).unwrap();
+        for claim in claims.as_array_mut().unwrap() {
+            if attempts.contains(&claim["attempt_id"].as_str().unwrap()) {
+                let claim = claim.as_object_mut().unwrap();
+                claim.remove("helpers");
+                claim.remove("answered_turn");
+            }
+        }
+        fs::write(self.claims_file(), claims.to_string()).unwrap();
+    }
+
     /// The answers in the person's thread, without the progress notes.
     fn answers_to(&self, question: &Value) -> Vec<String> {
         self.reviewer_posts(question)
@@ -1984,14 +1999,7 @@ fn a_hold_an_older_build_left_takes_its_helpers_answer_after_the_update() {
     let space = Space::new();
     let (question, ask, answer) = space.held_on_the_lead();
     let attempt = ask["control"]["attempt_id"].as_str().unwrap();
-    let mut claims: Value =
-        serde_json::from_slice(&fs::read(space.claims_file()).unwrap()).unwrap();
-    for claim in claims.as_array_mut().unwrap() {
-        let claim = claim.as_object_mut().unwrap();
-        claim.remove("helpers");
-        claim.remove("answered_turn");
-    }
-    fs::write(space.claims_file(), claims.to_string()).unwrap();
+    space.as_older_build(&[attempt]);
     let turn = ("prompt_id", "answer-turn");
     let context = space.prompt(
         "pane-reviewer",
@@ -2007,6 +2015,117 @@ fn a_hold_an_older_build_left_takes_its_helpers_answer_after_the_update() {
         ["The lead says option B is safe."]
     );
     assert!(space.unresolved_disposition_warnings().is_empty());
+}
+
+/// An older build's hold takes only the answer to a request its own turn
+/// sent. The lead first answers a request the session sent before the hold:
+/// that answer's turn is for the person, and the hold's own answer still
+/// lands in its thread.
+#[test]
+fn an_older_hold_ignores_the_answer_to_a_request_sent_before_it() {
+    let space = Space::new();
+    space.reviewer_prompt_at(50, "typed-task", "Check the deploy with the lead.");
+    space.reviewer_sends_at(60, "@lead Is the deploy green?");
+    space.reviewer_stop_at(70, "typed-task", "Asked the lead about the deploy.");
+    let (question, attempt) = space.held_at(100, "Question one?");
+    space.as_older_build(&[&attempt]);
+
+    let answer = space.lead_answers_at(300, "Is the deploy green?", "Deploy is green.");
+    let context = space.reviewer_prompt_at(310, "answer-deploy", &answer.to_string());
+    assert!(!context.contains(&woken_for(&attempt)), "{context}");
+    assert!(
+        context.contains(&format!(
+            "delivery {attempt} from an earlier turn is still open"
+        )),
+        "{context}"
+    );
+    space.reviewer_stop_at(320, "answer-deploy", "DEPLOY: green.");
+    assert!(space.answers_to(&question).is_empty());
+
+    let answer = space.lead_answers_at(400, "Question one?", "One is yes.");
+    let context = space.reviewer_prompt_at(410, "answer-one", &answer.to_string());
+    assert!(context.contains(&woken_for(&attempt)), "{context}");
+    space.reviewer_stop_at(420, "answer-one", "ANSWER-ONE: yes.");
+    assert_eq!(space.answers_to(&question), ["ANSWER-ONE: yes."]);
+}
+
+/// A hold 1.11 left behind: its helper answered under that build, which
+/// dropped the answer's final message and kept the delivery held. Hours
+/// after the update, a turn the person types asks the lead something else:
+/// that answer is not the stale hold's, and its thread gets nothing.
+#[test]
+fn a_hold_an_older_build_left_stale_ignores_a_later_turns_request() {
+    let space = Space::new();
+    let (question, attempt) = space.held_at(100, "Question one?");
+    // The older build's turn for the answer saw no hold of this build's, so
+    // its final message reached only the pane.
+    let file = space.claims_file();
+    let stale = fs::read(&file).unwrap();
+    fs::remove_file(&file).unwrap();
+    let answer = space.lead_answers_at(200, "Question one?", "One is yes.");
+    space.reviewer_prompt_at(210, "old-answer", &answer.to_string());
+    space.reviewer_stop_at(220, "old-answer", "ANSWER-ONE: yes.");
+    assert!(space.answers_to(&question).is_empty());
+    let mut claims: Value = serde_json::from_slice(&stale).unwrap();
+    let later: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    claims
+        .as_array_mut()
+        .unwrap()
+        .extend(later.as_array().unwrap().iter().cloned());
+    fs::write(&file, claims.to_string()).unwrap();
+    space.as_older_build(&[&attempt]);
+
+    let hours = 3 * 3_600_000;
+    space.reviewer_prompt_at(hours, "typed-task", "Check the deploy with the lead.");
+    space.reviewer_sends_at(hours + 10, "@lead Is the deploy green?");
+    space.reviewer_stop_at(hours + 20, "typed-task", "Asked the lead about the deploy.");
+    let answer = space.lead_answers_at(hours + 100, "Is the deploy green?", "Deploy is green.");
+    let context = space.reviewer_prompt_at(hours + 110, "answer-deploy", &answer.to_string());
+    assert!(!context.contains(&woken_for(&attempt)), "{context}");
+    space.reviewer_stop_at(hours + 120, "answer-deploy", "DEPLOY: green.");
+    assert!(
+        space.answers_to(&question).is_empty(),
+        "{:?}",
+        space.answers_to(&question)
+    );
+}
+
+/// Two holds an older build left, each on its own request to the lead,
+/// answered in the other order: each answer lands in its own question's
+/// thread.
+#[test]
+fn two_older_holds_each_take_their_own_answer_in_either_order() {
+    let space = Space::new();
+    let (first, first_attempt) = space.held_at(100, "Question one?");
+    let (second, second_attempt) = space.held_at(200, "Question two?");
+    space.as_older_build(&[&first_attempt, &second_attempt]);
+    // The lead's turn on the first request ends with no reply yet, and its
+    // mailbox moves on to the second.
+    let asked_first = space.herdr.envelope_for("pane-lead");
+    assert_eq!(asked_first["untrusted_body"], "Question one?");
+    space.settle_attempt_at(asked_first["control"]["attempt_id"].as_str().unwrap(), 250);
+    dispatch::wake(&space.pane_at("pane-lead", &At(260)));
+
+    let answer = space.lead_answers_at(300, "Question two?", "Two is no.");
+    let context = space.reviewer_prompt_at(310, "answer-2", &answer.to_string());
+    assert!(context.contains(&woken_for(&second_attempt)), "{context}");
+    space.reviewer_stop_at(320, "answer-2", "ANSWER-TWO: no.");
+    assert!(space.answers_to(&first).is_empty());
+    assert_eq!(space.answers_to(&second), ["ANSWER-TWO: no."]);
+
+    dispatch::message(
+        "reply",
+        bound_reply(&space, &asked_first, "@reviewer One is yes."),
+        &space.pane_at("pane-lead", &At(400)),
+    )
+    .unwrap();
+    let answer = space.herdr.envelope_for("pane-reviewer");
+    assert_eq!(answer["untrusted_body"], "One is yes.");
+    let context = space.reviewer_prompt_at(410, "answer-1", &answer.to_string());
+    assert!(context.contains(&woken_for(&first_attempt)), "{context}");
+    space.reviewer_stop_at(420, "answer-1", "ANSWER-ONE: yes.");
+    assert_eq!(space.answers_to(&first), ["ANSWER-ONE: yes."]);
+    assert_eq!(space.answers_to(&second), ["ANSWER-TWO: no."]);
 }
 
 /// The turn that held the delivery asked the lead two things. The first

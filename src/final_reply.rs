@@ -1056,13 +1056,16 @@ impl Claims {
     /// The held claim whose helper request `answered` is: the oldest still
     /// outstanding that waits on it. An older build held claims without
     /// recording their requests, and this one holds a claim only on a request
-    /// or a task, so failing that, it is the oldest claim held on neither: one
-    /// an older build held before an update.
+    /// or a task, so failing that, it is the oldest claim held on neither
+    /// whose own turn sent `answered`: one an older build held before an
+    /// update.
     fn answered(&self, state: &Path, answered: &crate::MessageId) -> Option<usize> {
         self.oldest_outstanding(state, |claim| claim.helpers.contains(answered))
             .or_else(|| {
                 self.oldest_outstanding(state, |claim| {
-                    claim.helpers.is_empty() && claim.awaits.is_empty()
+                    claim.helpers.is_empty()
+                        && claim.awaits.is_empty()
+                        && sent_in_its_turn(state, claim, answered)
                 })
             })
     }
@@ -1952,6 +1955,28 @@ fn settle_facts(
         waiting: !helpers.is_empty(),
     };
     (facts, helpers)
+}
+
+/// Whether the claim's session sent `request` in the turn that held it: since
+/// the claim was first armed, and no later than its attempt settled, which
+/// reconciliation does once the pane is idle after that turn.
+fn sent_in_its_turn(state: &Path, claim: &Claim, request: &crate::MessageId) -> bool {
+    crate::StateStore::open_read_only(state)
+        .ok()
+        .flatten()
+        .and_then(|mut store| {
+            store
+                .transaction(|transaction| {
+                    transaction.sent_before_settle(
+                        &claim.namespace,
+                        &claim.attempt_id,
+                        request,
+                        claim.helpers_since_ms(),
+                    )
+                })
+                .ok()
+        })
+        .unwrap_or(false)
 }
 
 /// Whether the claim's attempt is still in its session's delivery inbox, or
