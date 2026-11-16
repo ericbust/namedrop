@@ -368,6 +368,42 @@
         {"file": "integrations/tool.json", "line": 1400, "source": "Find which workspaces have an @lead before addressing one with #label."}
       ],
       "reason": "Herdr owns this descriptor on a shared HOME; this exact catalog value is exempt."
+    },
+    {
+      "kind": "shared-home",
+      "text": "herdr plugin action invoke update --plugin namedrop",
+      "surfaces": [
+        "update notice (Herdr owns the state)",
+        "doctor update (Herdr owns the state)",
+        "doctor update text (Herdr owns the state)"
+      ],
+      "sources": [
+        {"file": "src/update_check.rs", "line": 14, "source": "herdr plugin action invoke update --plugin namedrop"}
+      ],
+      "reason": "Herdr's update command, in the SessionStart notice and ND-UPDATE-001 of a Rex pane on a state that Herdr's install owns, which updates through Herdr. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
+    },
+    {
+      "kind": "shared-home",
+      "text": "'herdr' 'plugin' 'action' 'invoke' 'update' '--plugin' 'namedrop'",
+      "surfaces": [
+        "doctor update text (Herdr owns the state)"
+      ],
+      "sources": [
+        {"file": "src/update_check.rs", "line": 14, "source": "herdr plugin action invoke update --plugin namedrop"}
+      ],
+      "reason": "ND-UPDATE-001's repair command in Doctor's text, each word quoted, for a Rex pane on a state that Herdr's install owns. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
+    },
+    {
+      "kind": "shared-home",
+      "text": "<path>/herdr/plugins/config/namedrop/settings.json",
+      "surfaces": [
+        "doctor invalid settings (Herdr owns the state)",
+        "doctor invalid settings text (Herdr owns the state)"
+      ],
+      "sources": [
+        {"file": "src/update_check.rs", "line": 50, "source": "herdr/plugins/config/namedrop/settings.json"}
+      ],
+      "reason": "ND-UPDATE-002 names the settings file it could not read, which for a state that Herdr's install owns is Herdr's. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
     }
   ],
   "unprinted": [
@@ -657,7 +693,7 @@
       "file": "src/agent_status_model.rs",
       "reason": "An environment or config name read or set, never printed.",
       "literals": [
-        [889, "HERDR_"]
+        [926, "HERDR_"]
       ]
     },
     {
@@ -1129,15 +1165,6 @@
       "reason": "The tour's authoring check, which the test suite runs on every shipped tour.",
       "literals": [
         [193, "presentation {id} page {number} wraps to {height} lines at width {BODY_WIDTH}; the popup holds {MAX_BODY_LINES}"]
-      ]
-    },
-    {
-      "kind": "herdr-home-only",
-      "file": "src/update_check.rs",
-      "reason": "Herdr's update instruction and settings file; a standalone install has its own.",
-      "literals": [
-        [14, "herdr plugin action invoke update --plugin namedrop"],
-        [50, "herdr/plugins/config/namedrop/settings.json"]
       ]
     },
     {

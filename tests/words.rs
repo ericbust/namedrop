@@ -163,18 +163,24 @@ fn occurrences(text: &str, pattern: &str) -> Vec<(usize, usize)> {
             .find_map(|end| rest(text, end + part.len(), later))
     }
     let parts: Vec<&str> = pattern.split("<path>").collect();
+    let lead = parts[0];
     let mut found = Vec::new();
     let mut from = 0;
-    while let Some(offset) = text[from..].find(parts[0]) {
+    // A pattern that starts with `<path>` starts where a path does, at a `/`.
+    while let Some(offset) = if lead.is_empty() {
+        text[from..].find('/')
+    } else {
+        text[from..].find(lead)
+    } {
         let start = from + offset;
-        match rest(text, start + parts[0].len(), &parts[1..]) {
+        match rest(text, start + lead.len(), &parts[1..]) {
             Some(end) => {
                 found.push((start, end));
                 from = end.max(start + 1);
             }
             None => from = start + 1,
         }
-        while !text.is_char_boundary(from) {
+        while from < text.len() && !text.is_char_boundary(from) {
             from += 1;
         }
     }
@@ -1423,6 +1429,66 @@ fn shared_home(words: &mut Words, root: &Path) {
         "doctor text (Herdr took the state over)",
         render_health_report_to_text(&report),
     );
+    // A Rex pane on the state Herdr owns, with an update waiting: the state
+    // is Herdr's install, so its notice and Doctor name Herdr's update
+    // command and settings file (the U11 review's F4).
+    fs::write(&registration, json!({"state": herdr.state}).to_string()).unwrap();
+    fs::write(
+        herdr.state.join("update-check.json"),
+        json!({"schema_version":1,"checked_at":100,"last_success_at":100,"last_error":null,
+            "remote_version":"9.10.0"})
+        .to_string(),
+    )
+    .unwrap();
+    let notice = namedrop::update_check::session_notice(
+        r#"{"hook_event_name":"SessionStart","source":"startup"}"#,
+        &herdr.state,
+        1000,
+        None,
+    )
+    .expect("a Herdr-owned state shows Herdr's update notice");
+    words.json("update notice (Herdr owns the state)", &notice);
+    execute_lifecycle_operation("activate", json!({"confirmed":true}), &successor).unwrap();
+    let report = diagnose_collaboration(&successor);
+    let mut value = serde_json::to_value(&report).unwrap();
+    let update = value["issues"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|issue| issue["code"] == "ND-UPDATE-001")
+        .expect("Doctor reports the update");
+    // The repair command's words, as the command line they spell.
+    let command = update["repair"]["command"].take();
+    words.check(
+        "doctor update (Herdr owns the state)",
+        command
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|argument| argument.as_str().unwrap())
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+    words.json("doctor update (Herdr owns the state)", &value);
+    words.check(
+        "doctor update text (Herdr owns the state)",
+        render_health_report_to_text(&report),
+    );
+    let settings = PathBuf::from(std::env::var_os("HOME").unwrap())
+        .join(".config/herdr/plugins/config/namedrop/settings.json");
+    fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    fs::write(&settings, "{").unwrap();
+    let report = diagnose_collaboration(&successor);
+    assert!(report.issues.iter().any(|i| i.code == "ND-UPDATE-002"));
+    words.json(
+        "doctor invalid settings (Herdr owns the state)",
+        &serde_json::to_value(&report).unwrap(),
+    );
+    words.check(
+        "doctor invalid settings text (Herdr owns the state)",
+        render_health_report_to_text(&report),
+    );
+    fs::remove_file(&settings).unwrap();
     cleanup::remove_fixture(&herdr.root).unwrap();
 }
 
@@ -1671,6 +1737,29 @@ fn host_pair_sites_are_reached() {
         words.violations.join("\n")
     );
     cleanup::remove_fixture(&root).unwrap();
+}
+
+/// A printed entry may start with `<path>`: it matches where a path does,
+/// and a text with no path ends the search.
+#[test]
+fn an_entry_may_start_with_a_path() {
+    let pattern = "<path>/herdr/settings.json";
+    let text = "path=/home/me/.config/herdr/settings.json, \"/x/herdr/settings.json\"";
+    let found = occurrences(text, pattern);
+    let matched: Vec<&str> = found
+        .iter()
+        .map(|(start, end)| &text[*start..*end])
+        .collect();
+    assert_eq!(
+        matched,
+        [
+            "/home/me/.config/herdr/settings.json",
+            "/x/herdr/settings.json"
+        ]
+    );
+    assert!(occurrences("no path here", pattern).is_empty());
+    assert!(occurrences("", pattern).is_empty());
+    assert!(occurrences("ends with /", pattern).is_empty());
 }
 
 #[test]
