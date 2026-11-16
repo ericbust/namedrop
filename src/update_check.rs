@@ -159,13 +159,7 @@ pub(crate) fn available(state: &Path) -> Option<AvailableUpdate> {
 /// it started, for a long-lived caller to reap.
 #[doc(hidden)]
 pub fn start(state: &Path, now: u64) -> Option<Child> {
-    let path = settings_path(state).ok()?;
-    if settings(state) != Ok(true)
-        || cache(state)
-            .is_some_and(|cache| now >= cache.checked_at && now - cache.checked_at < DAY_MS)
-    {
-        return None;
-    }
+    let path = due(state, now)?;
     Command::new("python3")
         .args(["-c", include_str!("../scripts/check-update.py")])
         .arg(state)
@@ -178,13 +172,29 @@ pub fn start(state: &Path, now: u64) -> Option<Child> {
         .ok()
 }
 
+/// The settings file of a check that is due: the settings allow it and none
+/// ran within the day.
+fn due(state: &Path, now: u64) -> Option<PathBuf> {
+    let path = settings_path(state).ok()?;
+    (settings(state) == Ok(true)
+        && !cache(state)
+            .is_some_and(|cache| now >= cache.checked_at && now - cache.checked_at < DAY_MS))
+    .then_some(path)
+}
+
 /// Starts the update check of a standalone install, from its Rex bridge,
 /// which runs no `reconcile` or lifecycle event. A Herdr-owned state keeps
 /// its own triggers. The check reads `runtime/source.json`, which a first
 /// install writes after the bridge has started, so until it exists the
-/// bridge's next start runs the check (the U10 review's F2).
+/// bridge's next start runs the check (the U10 review's F2). It asks about
+/// Apple's stub only for a check that is due, so an opted-out or checked
+/// install runs no `xcode-select` (round A's review, F4).
 pub(crate) fn start_standalone(state: &Path, now: u64) -> Option<Child> {
-    if !standalone(state) || !state.join("runtime/source.json").is_file() || apple_python_stub() {
+    if !standalone(state)
+        || !state.join("runtime/source.json").is_file()
+        || due(state, now).is_none()
+        || apple_python_stub()
+    {
         return None;
     }
     start(state, now)

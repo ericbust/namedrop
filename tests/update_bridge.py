@@ -10,9 +10,11 @@ its arguments, so nothing runs `git`. A standalone state's bridge waits for
 `runtime/source.json`, which a first install writes after the bridge
 starts, and on macOS starts nothing when the first `python3` on its PATH is
 Apple's `/usr/bin/python3` and `xcode-select -p` fails, as on a Mac without
-the developer tools (the U10 review's F1 and F2). Those cases run the real
-`/usr/bin/python3`, so a stub `git` comes first on their PATH, and git may
-use only local repositories.
+the developer tools (the U10 review's F1 and F2), whether it is named or
+reached through a link, and it reads the opt-out and the day's check before
+it runs `xcode-select` (round A's review, F4 and F5). Those cases run the
+real `/usr/bin/python3`, so a stub `git` comes first on their PATH, and git
+may use only local repositories.
 
 Usage: python3 -I tests/update_bridge.py BINARY
 """
@@ -42,15 +44,20 @@ tools.mkdir()
 # The stand-in python3 comes first, so this xcode-select must not stop it.
 (tools / 'xcode-select').write_text('#!/bin/sh\nexit 2\n')
 (tools / 'xcode-select').chmod(0o700)
-# Apple's python3 first on PATH, behind tools that have no python3.
+# Apple's python3 first on PATH, behind tools that have no python3, or
+# through a link to it. Each xcode-select records that it ran.
 apple = {}
-for name, status in (('no-developer-tools', 2), ('developer-tools', 0)):
+for name, status in (('no-developer-tools', 2), ('developer-tools', 0), ('linked-python', 2),
+                     ('opted-out-tools', 2), ('checked-today-tools', 2)):
     directory = root / name
     directory.mkdir()
-    (directory / 'xcode-select').write_text('#!/bin/sh\nexit %d\n' % status)
+    (directory / 'xcode-select').write_text('#!/bin/sh\necho ran >> "%s"\nexit %d\n'
+                                            % (directory / 'xcode-select-ran', status))
     (directory / 'git').write_text('#!/bin/sh\necho "$@" >> "%s"\nexit 1\n' % (directory / 'git-ran'))
     for tool in ('xcode-select', 'git'):
         (directory / tool).chmod(0o700)
+    if name == 'linked-python':
+        (directory / 'python3').symlink_to('/usr/bin/python3')
     apple[name] = str(directory) + ':/usr/bin:/bin'
 DAY_MS = 86_400_000
 
@@ -120,7 +127,15 @@ try:
              case('no-source', b'standalone\n', source=False)]
     if sys.platform == 'darwin':
         cases += [case('apple-stub', b'standalone\n', path=apple['no-developer-tools']),
-                  case('apple-python', b'standalone\n', path=apple['developer-tools'])]
+                  case('apple-python', b'standalone\n', path=apple['developer-tools']),
+                  # The stub through a link is the stub (round A's review, F5).
+                  case('apple-stub-linked', b'standalone\n', path=apple['linked-python']),
+                  # Nothing runs xcode-select for a check the settings or the
+                  # day's check rule out (round A's review, F4).
+                  case('apple-stub-opted-out', b'standalone\n', settings='{"check_for_updates": false}',
+                       path=apple['opted-out-tools']),
+                  case('apple-stub-checked-today', b'standalone\n', checked_at=now_ms - 60_000,
+                       path=apple['checked-today-tools'])]
     for each in cases:
         wait(lambda: 'session.attach_all' in each['server'].calls or each['bridge'].poll() is not None,
              each['name'] + ': the bridge connects')
@@ -143,9 +158,14 @@ try:
         if each['name'] == 'apple-python':
             continue
         assert not each['started'].exists(), each['name'] + ': the bridge started the update check'
-        assert not each['checked'].exists() or each['name'] == 'checked-today', \
+        assert not each['checked'].exists() or each['name'].endswith('checked-today'), \
             each['name'] + ': an update check ran'
     assert not (root / 'no-developer-tools/git-ran').exists(), 'git ran without the developer tools'
+    if sys.platform == 'darwin':
+        for name in ('no-developer-tools', 'linked-python'):
+            assert (root / name / 'xcode-select-ran').exists(), name + ': the stub was not asked about'
+        for name in ('opted-out-tools', 'checked-today-tools'):
+            assert not (root / name / 'xcode-select-ran').exists(), name + ': xcode-select ran for no check'
     # The bridge outlives its check, so it reaps the check as it exits.
     rows = subprocess.run(['/bin/ps', '-axo', 'ppid=,stat='], capture_output=True, text=True).stdout.splitlines()
     zombies = [row for row in rows if row.split()[0] == str(standalone['bridge'].pid) and 'Z' in row.split()[1]]
