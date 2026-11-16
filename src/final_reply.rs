@@ -892,10 +892,11 @@ fn find_claim(
 /// An open claim is decided by its Stop's worker within `STOPPED_GRACE_MS`
 /// of the Stop, or by a Stop that arrives within `STOP_ARRIVAL_GRACE_MS` of
 /// the pane going idle, as `idle_at` says of the claim's attempt. A held
-/// claim whose helper's answer started a turn waits the same way for that
-/// turn's Stop, from when that turn's pane was seen idle, as `idle_at` says
-/// of the answer's attempt: a turn interrupted with Esc, or ended by an API
-/// error, lost the held answer too.
+/// claim whose helper's answer started a turn waits for that turn's Stop the
+/// same way, but only once that turn's pane was seen idle, as `idle_at` says
+/// of the answer's attempt: a Stop another hook blocked continues the turn,
+/// and a turn interrupted with Esc, or ended by an API error, lost the held
+/// answer too.
 pub(crate) fn answer_claim<E>(
     state: &Path,
     namespace: &crate::StateNamespace,
@@ -924,14 +925,24 @@ pub(crate) fn answer_claim<E>(
         (ClaimState::Left(LeaveReason::Held), None) => return Ok(AnswerClaim::Held),
         _ => return Ok(AnswerClaim::Neither),
     };
-    let until_ms = match stopped_at(&directory, turn) {
-        Some(at) => at.saturating_add(STOPPED_GRACE_MS),
-        None => match idle_at(idle)? {
-            Some(at) => at.saturating_add(STOP_ARRIVAL_GRACE_MS),
-            // The turn the helper's answer started is still running.
-            None if claim.state != ClaimState::Open => return Ok(AnswerClaim::Held),
-            None => STOP_ARRIVAL_GRACE_MS,
-        },
+    let stopped = stopped_at(&directory, turn);
+    let until_ms = if claim.state == ClaimState::Open {
+        match stopped {
+            Some(at) => at.saturating_add(STOPPED_GRACE_MS),
+            None => idle_at(idle)?
+                .unwrap_or(0)
+                .saturating_add(STOP_ARRIVAL_GRACE_MS),
+        }
+    } else {
+        // The held claim's own attempt settled when the turn that held it
+        // ended, so only the pane going idle says the answer's turn is over.
+        let Some(idle_at) = idle_at(idle)? else {
+            return Ok(AnswerClaim::Held);
+        };
+        let after_idle = idle_at.saturating_add(STOP_ARRIVAL_GRACE_MS);
+        stopped.map_or(after_idle, |at| {
+            at.saturating_add(STOPPED_GRACE_MS).max(after_idle)
+        })
     };
     Ok(if now_ms < until_ms {
         AnswerClaim::Deciding { until_ms }

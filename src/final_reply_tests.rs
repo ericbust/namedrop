@@ -2377,3 +2377,77 @@ fn a_helpers_answer_holds_its_claim_through_the_turn_and_that_turns_stop_answers
     assert_eq!(state.claims()[0].answered_turn, None);
     assert_eq!(next.left_open.len(), 2, "{:?}", next.left_open);
 }
+
+/// Another Stop hook blocked the first Stop of the turn the helper's answer
+/// started, so that Stop's record is on file while the turn goes on and its
+/// pane works: the held claim stays held however long the turn runs. Once
+/// the pane is seen idle, it waits for the later of the Stop's grace and
+/// the idle one.
+#[test]
+fn a_stop_another_hook_blocked_keeps_the_answer_held_while_its_turn_runs() {
+    let state = StateDirectory::new();
+    let mut claims = Claims::lock(
+        session_directory(&state.0, "socket", "session"),
+        STOP_LOCK_WAIT,
+    )
+    .unwrap();
+    claims.claims.push(Claim {
+        helpers: vec![crate::MessageId::new("request-1")],
+        ..claim(reply_plan(), ClaimState::Left(LeaveReason::Held))
+    });
+    claims.save(1);
+    observe_prompt(
+        &state.0,
+        "socket",
+        "session",
+        &turn("answer-turn"),
+        Some(armed(
+            "attempt-2",
+            "answer-turn",
+            Armed::NoReply(NoReplyCase::AnswersOwn),
+        )),
+        PromptFacts {
+            news: None,
+            delivery: true,
+            opens_turn: false,
+            answers: Some(&crate::MessageId::new("request-1")),
+        },
+        30,
+    );
+    mark_stopped(&state.0, "socket", "session", &turn("answer-turn"), 1_000);
+    // The held attempt settled at 2, when the hold's pane went idle.
+    let held_at = |idle_at: Option<u64>, now_ms: u64| {
+        answer_claim(
+            &state.0,
+            &crate::StateNamespace::for_space("socket", "workspace"),
+            &crate::AgentSessionId::new("session"),
+            &crate::DeliveryAttemptId::new("attempt-1"),
+            |attempt| {
+                Ok::<_, ()>(match attempt.as_str() {
+                    "attempt-1" => Some(2),
+                    _ => idle_at,
+                })
+            },
+            now_ms,
+        )
+    };
+    for now_ms in [21_000, 1_000 + STOPPED_GRACE_MS, 601_000] {
+        assert_eq!(held_at(None, now_ms), Ok(AnswerClaim::Held), "{now_ms}");
+    }
+    assert_eq!(
+        held_at(Some(700_000), 701_000),
+        Ok(AnswerClaim::Deciding {
+            until_ms: 700_000 + STOP_ARRIVAL_GRACE_MS
+        })
+    );
+    assert_eq!(
+        held_at(Some(700_000), 700_000 + STOP_ARRIVAL_GRACE_MS),
+        Ok(AnswerClaim::Neither)
+    );
+    assert_eq!(
+        held_at(Some(5_000), 6_000),
+        Ok(AnswerClaim::Deciding {
+            until_ms: 1_000 + STOPPED_GRACE_MS
+        })
+    );
+}

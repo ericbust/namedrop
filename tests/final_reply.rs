@@ -2267,6 +2267,55 @@ fn a_late_stop_that_holds_the_answer_again_withdraws_its_warning() {
     assert_eq!(space.question_leg(&question), "working");
 }
 
+/// Another Stop hook blocks the first Stop of the turn the lead's answer
+/// starts, and the turn goes on, its pane working. Namedrop's Stop hook
+/// recorded that Stop before its worker saw it blocked, yet nothing warns
+/// however long the turn runs, and its real Stop answers the held delivery.
+/// Interrupted instead, it warns once its pane has sat idle past the grace.
+#[test]
+fn a_stop_another_hook_blocked_warns_nothing_while_the_answer_turn_runs() {
+    for interrupted in [false, true] {
+        let space = Space::new();
+        let (question, ask, answer) = space.held_on_the_lead();
+        let attempt = ask["control"]["attempt_id"].as_str().unwrap();
+        space.reviewer_working(true);
+        space.reviewer_prompt_at(100_000, "answer-turn", &answer.to_string());
+        let turn = HostTurn::from_ids(Some("answer-turn"), None).unwrap();
+        mark_stopped(
+            &space.directory.state,
+            "socket-a",
+            "session-reviewer",
+            &turn,
+            100_200,
+        );
+        space.observe_at(100_200 + STOPPED_GRACE_MS + 100);
+        space.observe_at(700_000);
+        assert_eq!(space.warnings_on(attempt), Vec::<String>::new());
+        assert_eq!(space.question_leg(&question), "working");
+        if interrupted {
+            space.reviewer_working(false);
+            let due = space.observe_at(800_000);
+            assert_eq!(space.warnings_on(attempt), Vec::<String>::new());
+            assert_eq!(due, Some(800_000 + STOP_ARRIVAL_GRACE_MS));
+            space.observe_at(800_000 + STOP_ARRIVAL_GRACE_MS);
+            assert_eq!(space.warnings_on(attempt).len(), 1);
+        } else {
+            mark_stopped(
+                &space.directory.state,
+                "socket-a",
+                "session-reviewer",
+                &turn,
+                800_000,
+            );
+            space.reviewer_stop_at(800_000, "answer-turn", "FINAL: option B is safe.");
+            space.reviewer_working(false);
+            space.observe_at(800_500);
+            assert_eq!(space.answers_to(&question), ["FINAL: option B is safe."]);
+            assert!(space.unresolved_disposition_warnings().is_empty());
+        }
+    }
+}
+
 /// A reply the agent sends during the turn opens no request, even to an
 /// agent who has not answered it: a late answer to an earlier delivery does
 /// not make the turn wait, so the person still gets the final message.
