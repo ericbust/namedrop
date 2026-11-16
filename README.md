@@ -94,6 +94,8 @@ You need:
 - **Codex or Claude Code**, and **Python 3.9 or newer** on `PATH`.
 - **Git, Rust 1.97 or newer, and a C compiler and linker**, because Herdr builds Namedrop from source. On macOS, Apple's command-line developer tools provide the compiler. A [release archive](#install-from-a-release-archive) doesn't need these.
 
+To use Namedrop in [Rex](https://www.superlogical.com/rex/docs) without Herdr, see [Run Namedrop on Rex](docs/rex.md) instead. Rex support is experimental, and no release includes it yet.
+
 On Linux, install from a local Herdr workspace. A remote workspace installs Namedrop on the remote host. With Codex on Linux, Agent status summaries and persona suggestions also need Landlock and the official static Codex executable. `namedrop doctor` tells you what's missing. Linux aarch64 builds pass CI but nobody has tested them by hand yet.
 
 ### Install the plugin
@@ -473,7 +475,8 @@ For more detail, see these guides:
 - [Operations and recovery](docs/operations.md) covers names, groups, delivery states, and every command.
 - [Upgrades and backups](docs/operations.md#upgrade) covers replacing an installation, restoring state, and removing Namedrop.
 - [Compatibility](docs/compatibility.md) lists supported platforms, tested versions, and known gaps.
-- [Run Namedrop on Rex](docs/rex.md) sets up the experimental Rex support on the `experimental` branch, including mentions to agents on another machine.
+- [Run Namedrop on Rex](docs/rex.md) builds the `experimental` branch, installs it in Rex without Herdr, and sets up mentions to agents on another machine. Rex support is experimental, and no release includes it yet.
+- [Namedrop on Rex reference](docs/rex-reference.md) lists Rex's palette actions and keys, the files the installer writes, update settings, Doctor's Rex diagnostics, and known limits.
 
 ## Data and privacy
 
