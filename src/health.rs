@@ -122,7 +122,7 @@ where
             &explanation,
             HealthRepairKind::HumanDecision,
             &match diagnostic.repair {
-                Repair::Start => "Run `namedrop channels --no-open` to start the server again on the same port. Devices that are signed in stay signed in. Herdr also starts it when Herdr starts.".to_owned(),
+                Repair::Start => tailnet_start_repair(runtime.mux.endpoint().kind).to_owned(),
                 Repair::FreePort(port) => format!("Stop the program that uses port {port}, then run `namedrop channels --no-open`. To move Channels to another port instead, run `namedrop channels --tailscale off`, then `namedrop channels --tailscale`."),
                 Repair::Reconfigure => "Run `namedrop channels --tailscale off`, then `namedrop channels --tailscale` to configure access again.".to_owned(),
                 Repair::SignIn => "Run `namedrop channels --tailscale --no-open` for a one-time sign-in link.".to_owned(),
@@ -1749,6 +1749,15 @@ fn add_operation<M, C, I>(
 /// it. Only a confirmed module is information; any other is a notice, with a
 /// reload for a module the server loaded before a refresh rewrote it, and a
 /// reinstall otherwise.
+/// What starts a stopped tailnet server again. Herdr's startup command also
+/// does; nothing in a Rex home runs it.
+fn tailnet_start_repair(kind: crate::mux::MuxKind) -> &'static str {
+    kind.text(
+        "Run `namedrop channels --no-open` to start the server again on the same port. Devices that are signed in stay signed in. Herdr also starts it when Herdr starts.",
+        "Run `namedrop channels --no-open` to start the server again on the same port. Devices that are signed in stay signed in.",
+    )
+}
+
 fn rex_module_issue(inspected: Result<serde_json::Value, String>) -> HealthIssue {
     let (confirmed, mut explanation, diagnostic) = match inspected {
         Ok(diagnostic) => (
@@ -1947,6 +1956,19 @@ pub fn render_health_report_to_text(report: &HealthReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Herdr's repair is main's, word for word. A Rex home is told only what
+    /// it can do itself, since no Herdr startup command runs there.
+    #[test]
+    fn a_stopped_tailnet_server_s_repair_names_herdr_only_on_herdr() {
+        use crate::mux::MuxKind;
+        let person = "Run `namedrop channels --no-open` to start the server again on the same port. Devices that are signed in stay signed in.";
+        assert_eq!(
+            tailnet_start_repair(MuxKind::Herdr),
+            format!("{person} Herdr also starts it when Herdr starts.")
+        );
+        assert_eq!(tailnet_start_repair(MuxKind::Rex), person);
+    }
 
     #[test]
     fn rex_module_explanation_is_one_line_with_each_key() {
