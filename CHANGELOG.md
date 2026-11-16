@@ -2,6 +2,44 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.12.0] - 2026-11-16
+
+Namedrop now runs in Rex as well as in Herdr. Rex support is experimental. In Herdr, Namedrop works as in 1.11.1, apart from the changes and fixes below.
+
+### Added
+
+- Namedrop runs in [Rex](https://www.superlogical.com/rex/docs) without Herdr. It supports Rex preview.14, preview.18 and preview.19, at Rex control API revisions 12 to 14. [Run Namedrop on Rex](docs/rex.md) walks through the setup, and [Namedrop on Rex reference](docs/rex-reference.md) gives the details.
+- The release archive has an installer for Rex. In a Rex pane, run `sh scripts/install.sh` from the extracted archive. It lists what it will write and changes nothing until you answer `y`. It installs the Namedrop module for Rex, adds one line to `init.lua`, and installs the Claude Code and Codex packages and the `namedrop` command in `~/.local/bin`. It runs on macOS on Apple silicon and on Linux with glibc, and needs Python 3.9 or newer. `namedrop install --remove` removes the install and keeps your names and messages.
+- The Rex command palette has eleven Namedrop actions in its `Namedrop` category: **Activate Namedrop**, **Name this pane**, **Manage Namedrop names and agents**, **Namedrop Doctor**, **Agent status**, **Namedrop tour**, **Open Namedrop Channels**, **Pause Namedrop**, **Resume Namedrop**, **Deactivate Namedrop** and **About Namedrop**. Their screens open in floating layers. Five actions have keys, such as <kbd>Option</kbd>+<kbd>Shift</kbd>+<kbd>Command</kbd>+<kbd>I</kbd> for **Name this pane**. The module binds a key only when no other binding holds it.
+- In a Rex session, Namedrop names panes and delivers mentions and replies between Claude Code, Codex and terminals. Its bridge, a background process that reads Rex's events, keeps the names current and starts when Rex loads the module. Names survive a Rex server restart. Each agent's hooks record which Rex pane its session runs in.
+- You can mention an agent on another machine that runs its own Rex server and Namedrop. Add the machine with `rex hosts add`, then have an agent run `namedrop send` with an address such as `@codex@devbox`. Your machine keeps the message until the other machine accepts it, collects replies every 30 seconds while the thread is open, and puts each reply in the sender's thread. The other machine relays mentions only to agents, unless you create `relay/allow-terminals` in its state directory. Doctor reports relay problems as `ND-RELAY-001` to `ND-RELAY-005`.
+- An install that `install.sh` made checks GitHub for a newer release once a day. When there is one, agents show it at the start of a session, and Doctor shows `ND-UPDATE-001` with `Update: download Namedrop <version> and run sh scripts/install.sh`. The check offers only 1.12.0 and later, the releases that include the installer. To turn it off, put `{"check_for_updates": false}` in `~/.config/namedrop/settings.json`. Herdr installs check for updates as before.
+- Herdr and Rex can share one Namedrop on a machine. If Namedrop is installed in Herdr, `install.sh` adopts Herdr's install, and Herdr's updates then update Namedrop for both. If you installed for Rex first, activating Namedrop in Herdr takes the install over, and Herdr's Doctor shows `ND-INSTALL-001` until each agent from before the move has run Herdr's hooks. You can also run Herdr as the program of a Rex pane. In a Herdr pane, Namedrop uses Herdr.
+- Rex support has known limits. [Limits of the experimental build](docs/rex-reference.md#limits-of-the-experimental-build) lists them all. These matter most:
+	- Channels' setup and Doctor hints tell a Rex user to open Herdr, and **New channel** and **Add agent** refuse in a Rex session.
+	- After a reboot, the Channels tailnet link stays down on Rex until you run `namedrop channels --no-open`.
+	- The actions were tested with `rex do --origin palette`, not in the Rex app's own palette or with its keys.
+	- Real agents were tested on macOS only. A Linux Rex server was tested only as the machine that receives relayed mentions.
+
+### Changed
+
+- Activating Namedrop in Herdr writes `~/.config/namedrop/state-directory`, which names Namedrop's state directory. `install.sh` reads it to find Herdr's install.
+- `namedrop` commands accept `--endpoint`, `--space` and `--pane` beside the `--herdr-*` flags, and read the state directory from `NAMEDROP_STATE_DIR`. The agent skill names both sets.
+- The agent hook wrappers changed. They name their agent in `NAMEDROP_HOOK_RUNTIME`, and Namedrop, not the wrapper, now starts delivery after a prompt sends a mention. Read **Upgrade** below if you run Codex.
+- When an update needs a session refresh, **Update Namedrop** in Herdr also waits for agent sessions in Rex panes.
+
+### Fixed
+
+- Agent-status summaries and persona suggestions now work when Codex's home is not a plain `~/.codex`. The worker that runs Codex for them stopped with `failed to canonicalize CODEX_HOME` when `CODEX_HOME` named another directory, such as one under `~/.config`. It also could not read Codex's sign-in when `~/.codex` was a symbolic link, as a dotfiles manager makes it, or when `HOME` was reached through a link.
+- When that worker fails, its error shows the line where Codex says why it stopped. Before, the error kept the first 200 characters of Codex's output, which could cut the reason to "Er".
+<!-- held-turn fix: fill in when exp/held-turn merges -->
+
+### Upgrade
+
+- In Herdr, update with **Update Namedrop**. The update runs live. The state schema stays at 8, and agent sessions and pending deliveries carry on.
+- Restart each Codex session that was running before the update. The hook wrappers changed, and Codex refuses to run a plugin's hooks once the plugin's files change. Until you restart it, the session can lose its hooks, answer only in its terminal and raise `ND-DELIVERY-003`. Its screen shows `plugin contents changed; hook approval required`. In the new session, trust the Namedrop hooks at **Hooks need review**.
+- If you ran Rex support from the `experimental` branch, run `sh scripts/install.sh` from this release's archive. It prints `Namedrop Rex install: update` and keeps your names and messages. If your relay database has a layout from an unreleased build, Namedrop sets it aside and starts a new one, and Doctor names the old file in `ND-RELAY-004`. Messages to other machines that were in flight stay in that file.
+
 ## [1.11.1] - 2026-11-13
 
 ### Fixed

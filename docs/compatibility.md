@@ -27,8 +27,9 @@ Nobody has tried musl (Alpine), NixOS or other Linux setups.
 - **Linux x86_64 (Omarchy), 2026-10-28**, Namedrop 1.4.2 from the `chore/remove-dashboard` branch, tested at commit c07f928 before the version bump: Herdr 0.9.1, Codex 0.164.0 with gpt-6-sol, and Claude Code 2.1.310 with claude-opus-5-5. Codex's shared app-server warning appeared and cleared after its fix. Mentions went both ways between Claude and Codex, and each reply arrived once. @shell ran a command for Claude.
 - **Linux x86_64 (Omarchy), 2026-11-07**, Namedrop 1.6.0 from the `feat/message-efficiency` branch at commit 7d0aa09: Herdr 0.9.1, Codex 0.167.0 with gpt-6-sol, and Claude Code 2.1.319 with claude-opus-5-5. Codex's shared app-server warning appeared and cleared after its fix. Mentions went both ways between Claude and Codex, and each reply arrived once. @shell ran a command for Claude.
 - **Linux x86_64 (Omarchy), 2026-11-09**, Namedrop 1.7.0 from the `feat/pointer-prompts` branch on top of 1.6.5, at commit 13d91ae: Herdr 0.9.1, Codex 0.167.0 with gpt-6-sol, and Claude Code 2.1.319 with claude-opus-5-5. Codex's shared app-server warning appeared and cleared after its fix. Mentions went both ways between Claude and Codex as pointer prompts, each settled by the agent's final message with no settle command, and each reply arrived once. @shell ran a command for Claude. Channels posts, a thread reply, direct messages and posts naming another agent reached both agents, the named agent's answer arriving inside the pointer, and a Codex session with no prompt hook read its details through `delivery inbox`. The daily-use lane at commit 217c60a passed 13 of 14 checks; the held-turn check was inconclusive because the Claude helper answered before Codex's turn ended. A 1.6.5 profile, at commit 1bd27f9, upgraded live with both agents left running; Codex sessions started before the update lost their hooks, as with any plugin change.
+- **macOS 26.5 on Apple silicon, 2026-11-16**, Namedrop 1.12.0 from the `exp/merge-main` branch, tested at commit ab7f9cf before the version bump: Herdr 0.9.5, Codex 0.163.0 with gpt-6-sol, and Claude Code 2.1.325 with claude-sonnet-5-5. Codex's shared app-server warning appeared and cleared after its fix. Mentions went both ways between Claude and Codex, and each reply arrived once. @shell ran a command for Claude. The same run passed with Herdr as the program of a pane of Rex preview.19. The daily-use lane passed 13 of 14 checks. In the held-turn check, Claude held its turn and then answered, but the answer never reached the person's thread and nothing warned. The same check failed the same way on `experimental` before the merge of 1.11.1.
 
-Herdr 0.7.5 was only checked for loading the plugin and parsing commands. The full runs above used 0.8.2 and 0.9.1.
+Herdr 0.7.5 was only checked for loading the plugin and parsing commands. The full runs above used 0.8.2, 0.9.1 and 0.9.5.
 
 ## Codex 0.162 and later: the shared app-server
 
@@ -51,7 +52,7 @@ Namedrop reports this as ND-SESSION-003 in `namedrop doctor`, when you name a Co
 
 ## Rex (experimental)
 
-Rex support is experimental, and no release includes it yet. To use it, build the `experimental` branch. On Rex, Namedrop does not need Herdr, and `sh scripts/install.sh` installs it. See [Run Namedrop on Rex](rex.md).
+Rex support is experimental. Namedrop 1.12.0 is the first release that includes it. On Rex, Namedrop does not need Herdr, and `sh scripts/install.sh` from the release archive installs it. See [Run Namedrop on Rex](rex.md).
 
 Namedrop speaks Rex's control protocol, `rex.control.v1`, at API revisions 12, 13 and 14. It offers revisions 12 to 14, and the server answers with the highest revision that both support. Namedrop refuses any other answer with `the server's welcome is not one for rex.control.v1 revisions 12 to 14`. `rex version` prints a server's revision and the range it supports.
 

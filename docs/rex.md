@@ -1,6 +1,6 @@
 # Run Namedrop on Rex
 
-Rex support is experimental, and no release includes it yet. This guide installs Namedrop in [Rex](https://www.superlogical.com/rex/docs) without Herdr, sets up your agents, and connects them to agents on a second machine. For the palette actions, the files the install writes, Doctor's Rex diagnostics, and the known limits, see [Namedrop on Rex reference](rex-reference.md). For the Rex versions that Namedrop accepts and what has been tested, see [Compatibility](compatibility.md#rex-experimental).
+Rex support is experimental. Namedrop 1.12.0 is the first release that includes it. This guide installs Namedrop in [Rex](https://www.superlogical.com/rex/docs) without Herdr, sets up your agents, and connects them to agents on a second machine. For the palette actions, the files the install writes, Doctor's Rex diagnostics, and the known limits, see [Namedrop on Rex reference](rex-reference.md). For the Rex versions that Namedrop accepts and what has been tested, see [Compatibility](compatibility.md#rex-experimental).
 
 On Rex, Namedrop names panes, delivers mentions and replies between agents in one Rex session, and keeps names current through its bridge, a background process that reads Rex's events. Its relay sends a mention to an agent on another machine that runs its own Rex server and its own Namedrop.
 
@@ -15,21 +15,20 @@ You need:
 
 Do these steps on each machine that runs agents.
 
-1. Get Namedrop. No release includes Rex support yet, so build the `experimental` branch. Building needs Git, Rust 1.97 or newer, and a C compiler.
-
-	```sh
-	git clone https://github.com/ericbust/namedrop.git
-	cd namedrop
-	git switch experimental
-	sh scripts/build.sh
-	```
-
-	When a release includes Rex support, you can use its archive instead. Download the `.tar.gz` and its `.sha256` file for your platform from the [releases page](https://github.com/ericbust/namedrop/releases), then check and extract it. On Linux, use `sha256sum -c` instead of `shasum -a 256 -c`.
+1. Get Namedrop 1.12.0 or later. Download the `.tar.gz` and its `.sha256` file for your platform from the [releases page](https://github.com/ericbust/namedrop/releases), then check and extract it. On Linux, use `sha256sum -c` instead of `shasum -a 256 -c`.
 
 	```sh
 	shasum -a 256 -c namedrop-<version>-<target>.tar.gz.sha256
 	tar -xzf namedrop-<version>-<target>.tar.gz
 	cd namedrop-<version>-<target>
+	```
+
+	To build from source instead, you need Git, Rust 1.97 or newer, and a C compiler:
+
+	```sh
+	git clone https://github.com/ericbust/namedrop.git
+	cd namedrop
+	sh scripts/build.sh
 	```
 
 2. Open a shell in a Rex pane, and change to the directory from step 1. Outside a Rex pane, put `rex` on your `PATH`, or set `REX_BIN_DIR` to the directory that holds `rex`.
@@ -105,7 +104,7 @@ An install that `install.sh` made checks for a new release once a day. When one 
 Namedrop <version> is available (you have <installed>). Update: download Namedrop <version> and run sh scripts/install.sh
 ```
 
-The check offers only releases that include Rex support, so it offers none yet.
+The check offers only releases that include Rex support, which are 1.12.0 and later.
 
 To update:
 

@@ -422,7 +422,7 @@ Each label in the explanation lists one or more of these conditions:
 
 ## Limits of the experimental build
 
-- **Experimental.** Rex is a preview, and Namedrop's Rex support can change between releases. No release includes it yet.
+- **Experimental.** Rex is a preview, and Namedrop's Rex support can change between releases. Namedrop 1.12.0 is the first release that includes it.
 - **Channels names Herdr.** **Open Namedrop Channels** opens a page that tells a Rex user to open Herdr: "Open this workspace in Herdr and choose Namedrop setup from the command palette to repair the integration.", "Open this workspace in Herdr and choose Namedrop Doctor to review this item.", "Answer it in its pane in Herdr.", "Rename it in Herdr.", and "This workspace has no label in Herdr." Rex has no counterpart for these Herdr steps. The palette actions and `namedrop` commands do that work on Rex.
 - **Channels can't create channels or add agents in Rex.** **New channel** and **Add agent** open a Herdr workspace or tab, so in a Rex session each form says "Channels can't create a channel in Rex yet." or "Channels can't add an agent in Rex yet." and opens nothing. Start the Rex session or pane yourself, then activate and name it there.
 - **Channels' tailnet link does not come back by itself.** With Tailscale access on, Herdr starts the Channels server again when Herdr starts. Nothing in Rex does, so after a reboot run `namedrop channels --no-open`. Doctor's `ND-TAILSCALE-001` says so.
