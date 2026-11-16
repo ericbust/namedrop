@@ -26,9 +26,6 @@ struct Agent {
     endpoint: String,
     block: String,
     agent: String,
-    /// When a hook bound it, which `rex.json`'s entries leave out.
-    #[serde(default, skip_serializing)]
-    bound_at_ms: u64,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct Predecessor {
@@ -268,10 +265,10 @@ fn seal(home: &Path, state: &Path, old: &Path) -> Result<Value, String> {
 /// One warning for each retired predecessor with an agent that still runs
 /// and has not run this state's hooks. Every SessionStart and
 /// UserPromptSubmit hook binds its agent in its own state with no activation
-/// needed (`mux::home::context_hook`), so a binding of that incarnation here,
-/// made since the move, proves the agent runs the new hooks (the U13
-/// review's F1). One made before it, while the agent ran here once before,
-/// proves nothing (round A's review, F3).
+/// needed (`mux::home::context_hook`), so a binding of that incarnation here
+/// proves the agent runs the new hooks (the U13 review's F1). Its time says
+/// nothing: a hook rewrites only a binding that changed, so a turn in the
+/// same session keeps the old one (round C's review, F1).
 pub(crate) fn predecessor_warnings(home: &Path, state: &Path) -> Vec<String> {
     let Ok(Some(record)) = registration(home) else {
         return Vec::new();
@@ -279,12 +276,10 @@ pub(crate) fn predecessor_warnings(home: &Path, state: &Path) -> Vec<String> {
     let local = ThisMachine;
     let (bound, _) = bindings(state);
     predecessors(&record).into_iter().filter_map(|entry| {
-        let marker = installed_runtime::retirement(&entry.state).ok().flatten().filter(|marker| marker.hands_to(state))?;
-        // A time the marker does not say counts every binding, as before.
-        let moved = marker.at_ms().unwrap_or(0);
+        if !installed_runtime::retirement(&entry.state).ok().flatten().is_some_and(|marker| marker.hands_to(state)) { return None; }
         let agents: Vec<_> = entry.agents.into_iter().filter(|a| {
             a.agent.split_once('@').and_then(|(pid,_)| pid.parse::<u32>().ok()).is_some_and(|pid| matches!(local.read(pid), LocalRead::Alive(p) if p.incarnation.0 == a.agent))
-                && !bound.iter().any(|b| b.agent == a.agent && b.bound_at_ms >= moved)
+                && !bound.iter().any(|b| b.agent == a.agent)
         }).collect();
         if agents.is_empty() { return None; }
         let count = if agents.len() == 1 { "1 agent on Rex has".to_owned() } else { format!("{} agents on Rex have",agents.len()) };

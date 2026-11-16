@@ -94,7 +94,7 @@
         "doctor text (Herdr took the state over)"
       ],
       "sources": [
-        {"file": "src/rex_ui/handoff.rs", "line": 292, "source": "Namedrop on Rex moved to Herdr's install in {}. {count} not run its hooks since the move from {}, and the names made there were not carried over. In each Rex session, run Activate Namedrop again and name the panes again. An agent runs the new hooks at its next turn. Restart one that shows Hook failed or does not answer a mention. This warning clears as each of them takes a turn or ends.\n{blocks}"}
+        {"file": "src/rex_ui/handoff.rs", "line": 287, "source": "Namedrop on Rex moved to Herdr's install in {}. {count} not run its hooks since the move from {}, and the names made there were not carried over. In each Rex session, run Activate Namedrop again and name the panes again. An agent runs the new hooks at its next turn. Restart one that shows Hook failed or does not answer a mention. This warning clears as each of them takes a turn or ends.\n{blocks}"}
       ],
       "reason": "ND-INSTALL-001 in Doctor of the state that took over, read from a Rex block whose agent has not run that state's hooks yet. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
     },

@@ -427,6 +427,62 @@ fn an_identical_bind_is_not_rewritten_and_a_new_session_replaces_the_binding() {
     );
 }
 
+/// Round C's review, F1: an agent handed back to Herdr's state while it
+/// runs, bound there once before, takes its next turn. The real bind keeps
+/// the binding as it was, old time and all, and Doctor counts the agent no
+/// more, as ND-INSTALL-001's text says a turn does.
+#[test]
+fn a_turn_that_rebinds_the_same_binding_clears_the_handed_off_agent() {
+    use crate::installed_runtime::Retirement;
+    let pid = std::process::id();
+    let LocalRead::Alive(me) = ThisMachine.read(pid) else {
+        panic!("this process does not read alive")
+    };
+    let start: u64 = me.incarnation.0.split_once('@').unwrap().1.parse().unwrap();
+    let case: Value = serde_json::from_str(
+        &case("Codex 0.163 with --no-daemon")
+            .to_string()
+            .replace("50380", &pid.to_string()),
+    )
+    .unwrap();
+    let hook = Hook::of(&case);
+    hook.local.alive(pid, start, pid);
+    let state = State::new();
+    let root = std::env::temp_dir().join(format!("nd-rebind-{pid}"));
+    let _ = std::fs::remove_dir_all(&root);
+    let (home, old) = (root.join("home"), root.join("old"));
+    std::fs::create_dir_all(home.join(".config/namedrop")).unwrap();
+    std::fs::create_dir_all(old.join("runtime")).unwrap();
+    let warnings = || crate::rex_ui::predecessor_warnings(&home, &state.0);
+
+    assert_eq!(hook.bind(&state, "session-1", 1000), Ok(()));
+    crate::installed_runtime::retirement::write(
+        &old,
+        &Retirement::HerdrHandoff {
+            successor: state.0.clone(),
+            at: crate::installed_runtime::retirement::utc_now(),
+        },
+    )
+    .unwrap();
+    std::fs::write(
+        crate::locator::rex_registration(&home),
+        serde_json::json!({"predecessors":[{"state":old,"sealed":true,"agents":[
+            {"endpoint":ENDPOINT,"block":BLOCK,"agent":me.incarnation.0}]}]})
+        .to_string(),
+    )
+    .unwrap();
+    assert_eq!(hook.bind(&state, "session-1", 2000), Ok(()));
+    let bound = binding(&state).unwrap();
+    assert_eq!(
+        (bound.agent.as_str(), bound.bound_at_ms),
+        (me.incarnation.0.as_str(), 1000)
+    );
+    assert_eq!(warnings(), Vec::<String>::new());
+    std::fs::remove_file(Bindings::new(&state.0).path(BLOCK).unwrap()).unwrap();
+    assert_eq!(warnings().len(), 1, "with no binding the agent counts");
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
 /// The launcher rule's other half: a program that is not a shell between
 /// the foreground and the hook's agent refuses even when the agent runs
 /// another executable, as another Claude Code version started by a Python
