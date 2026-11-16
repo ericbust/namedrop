@@ -48,6 +48,20 @@ impl MuxAct for Host {
             _ => self.inner.apply(effect),
         }
     }
+    fn open_space(&self, cwd: &str, label: &str) -> Result<NewSpace, MuxError> {
+        self.inner.open_space(cwd, label)
+    }
+    fn open_tab(
+        &self,
+        space: &namedrop::SpaceId,
+        cwd: &str,
+        label: &str,
+    ) -> Result<NewTab, MuxError> {
+        self.inner.open_tab(space, cwd, label)
+    }
+    fn close(&self, closing: &Closing) -> Result<(), MuxError> {
+        self.inner.close(closing)
+    }
 }
 impl MuxInput for Host {
     fn deliver(&self, input: PaneInput<'_>) -> InputOutcome {

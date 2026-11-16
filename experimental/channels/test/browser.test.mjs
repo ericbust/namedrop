@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdir, readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { extname } from "node:path";
@@ -8,6 +9,7 @@ import { isDeepStrictEqual } from "node:util";
 import { chromium } from "playwright-core";
 import { build } from "vite";
 import { threadControlCopy } from "../src/copy.ts";
+import { RECIPES } from "../src/sounds.ts";
 
 const key = (n) => n.toString(16).padStart(20, "0");
 const fixture = JSON.parse(
@@ -50,6 +52,12 @@ function frame(n, name, level = "calm", repo = undefined) {
 }
 const csp =
   "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+// The server's own policy. It allows inline styles, which the terminal view and
+// Mermaid's drawing need; every other test runs under the stricter one above.
+const serverCsp = csp.replace(
+  "style-src 'self'",
+  "style-src 'self' 'unsafe-inline'",
+);
 const types = {
   ".html": "text/html",
   ".js": "text/javascript",
@@ -83,6 +91,15 @@ function readBody(req) {
     req.on("error", reject);
   });
 }
+function readBytes(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("error", reject);
+  });
+}
+const PNG_START = Buffer.from("89504e470d0a1a0a", "hex");
 function sendJson(res, status, value) {
   res.writeHead(status, { "Content-Type": "application/json" });
   res.end(JSON.stringify(value));
@@ -92,8 +109,15 @@ function postRoute(onPost) {
   const session = { secret: "session-1", csrf: "csrf-1", tokenReads: 0 };
   const attempts = [];
   const controls = [];
+  const creates = [];
   const deliveries = [];
   const receipts = new Map();
+  const images = new Map();
+  const uploads = [];
+  const soundPosts = [];
+  let soundState = { default: "chime", muted: false, agents: {} };
+  let soundRefusal = null;
+  let soundDelay = () => null;
   const authorized = (req) =>
     (req.headers.cookie ?? "")
       .split(/;\s*/)
@@ -102,8 +126,87 @@ function postRoute(onPost) {
     session,
     attempts,
     controls,
+    creates,
     deliveries,
     receipts,
+    images,
+    uploads,
+    // Mirrors POST /api/images: cookie, CSRF header, raw bytes, type from the bytes.
+    async upload(req, res) {
+      const bytes = await readBytes(req);
+      const upload = {
+        csrf: req.headers["x-namedrop-csrf"] ?? null,
+        bytes: bytes.length,
+        status: 0,
+      };
+      uploads.push(upload);
+      const reply = (status, value) => {
+        upload.status = status;
+        sendJson(res, status, value);
+      };
+      if (!authorized(req)) return reply(401, {});
+      if (upload.csrf !== session.csrf) return reply(403, {});
+      if (!bytes.subarray(0, 8).equals(PNG_START)) return reply(415, {});
+      const name = `${createHash("sha256").update(bytes).digest("hex")}.png`;
+      images.set(name, bytes);
+      reply(200, { name, line: `Image: /state/channel-images/${name}` });
+    },
+    image(req, res, name) {
+      const bytes = authorized(req) ? images.get(name) : undefined;
+      if (bytes === undefined) return res.writeHead(404).end();
+      res.writeHead(200, { "Content-Type": "image/png" });
+      res.end(bytes);
+    },
+    soundPosts,
+    setSounds(value) {
+      soundState = value;
+    },
+    savedSounds() {
+      return soundState;
+    },
+    refuseSounds(status) {
+      soundRefusal = status;
+    },
+    // `delay(post)` returns a promise to hold that post, or null.
+    delaySounds(delay) {
+      soundDelay = delay;
+    },
+    // Mirrors /api/sounds: GET reads the settings; POST takes one change with
+    // the CSRF header and answers with the settings it leaves, or 409 with
+    // the stored settings when its `was` is not the stored value.
+    async sounds(req, res) {
+      if (!authorized(req)) return sendJson(res, 401, {});
+      if (req.method === "GET") return sendJson(res, 200, soundState);
+      if (req.method !== "POST") return res.writeHead(405).end();
+      const post = {
+        csrf: req.headers["x-namedrop-csrf"] ?? null,
+        body: JSON.parse(await readBody(req)),
+      };
+      soundPosts.push(post);
+      if (post.csrf !== session.csrf) return res.writeHead(403).end();
+      if (soundRefusal !== null) return sendJson(res, soundRefusal, {});
+      await soundDelay(post);
+      const change = post.body;
+      const stored =
+        change.kind === "default"
+          ? soundState.default
+          : change.kind === "muted"
+            ? soundState.muted
+            : (soundState.agents[change.agent] ?? null);
+      if (!("was" in change)) return sendJson(res, 400, {});
+      if (change.was !== stored) return sendJson(res, 409, soundState);
+      if (change.kind === "default")
+        soundState = { ...soundState, default: change.sound };
+      else if (change.kind === "muted")
+        soundState = { ...soundState, muted: change.muted };
+      else if (change.kind === "agent") {
+        const agents = { ...soundState.agents };
+        if (change.sound === null) delete agents[change.agent];
+        else agents[change.agent] = change.sound;
+        soundState = { ...soundState, agents };
+      } else return sendJson(res, 400, {});
+      sendJson(res, 200, soundState);
+    },
     cookie: `${COOKIE}=${session.secret}; Path=/; HttpOnly; SameSite=Strict`,
     rotate() {
       session.csrf = `csrf-${Number(session.csrf.slice(5)) + 1}`;
@@ -202,6 +305,29 @@ function postRoute(onPost) {
       const { status = 200 } = await onControl(request);
       reply(status, status === 200 ? {} : { error: "Refused." });
     },
+    // Mirrors POST /w/<key>/channels and /w/<key>/agents: cookie, CSRF, JSON body.
+    async create(req, res, onCreate, path) {
+      const request = {
+        path,
+        csrf: req.headers["x-namedrop-csrf"] ?? null,
+        type: req.headers["content-type"] ?? null,
+        body: JSON.parse(await readBody(req)),
+        status: 0,
+      };
+      creates.push(request);
+      if (!authorized(req)) {
+        request.status = 401;
+        return sendJson(res, 401, { error: "No session." });
+      }
+      if (request.csrf !== session.csrf) {
+        request.status = 403;
+        res.writeHead(403, { "Content-Type": "text/plain" });
+        return res.end("Forbidden.\n");
+      }
+      const { status, body } = await onCreate(request);
+      request.status = status;
+      sendJson(res, status, body);
+    },
     async deliver(req, res, onDeliver, path) {
       const request = {
         method: req.method,
@@ -284,6 +410,50 @@ function screenRoute(onScreen) {
     },
   };
 }
+// Records each note a page plays: its first frequency and its start.
+function recordNotes() {
+  window.played = [];
+  const param = () => ({
+    value: 0,
+    first: null,
+    setValueAtTime(value) {
+      this.first ??= value;
+      return this;
+    },
+    linearRampToValueAtTime() {
+      return this;
+    },
+    exponentialRampToValueAtTime() {
+      return this;
+    },
+  });
+  const node = () => ({ connect: (target) => target });
+  window.AudioContext = class {
+    state = "suspended";
+    destination = {};
+    get currentTime() {
+      return performance.now() / 1000;
+    }
+    addEventListener() {}
+    resume() {
+      this.state = "running";
+      return Promise.resolve();
+    }
+    createGain() {
+      return { ...node(), gain: param() };
+    }
+    createOscillator() {
+      const frequency = param();
+      return {
+        ...node(),
+        type: "sine",
+        frequency,
+        start: (at) => window.played.push({ freq: frequency.first, at }),
+        stop() {},
+      };
+    }
+  };
+}
 async function open(
   t,
   onConnect,
@@ -299,7 +469,20 @@ async function open(
     onReview = () => ({ status: 200 }),
     observeLanding = false,
     liveInput = false,
+    inlineStyles = false,
     onSkills = () => ({ runtime: null, skills: [] }),
+    onFolders = () => ({ status: 200, body: { folders: [] } }),
+    onFolder = () => ({ status: 200, body: { folder: null } }),
+    onCreateChannel = () => ({
+      status: 500,
+      body: { error: "Herdr couldn't create the workspace. Try again." },
+    }),
+    onAddAgent = () => ({
+      status: 500,
+      body: { error: "Herdr couldn't open a tab for the agent. Try again." },
+    }),
+    sounds = undefined,
+    directPeers = () => [],
   } = {},
 ) {
   const clients = new Set();
@@ -310,7 +493,9 @@ async function open(
   const bodyRequests = [];
   const inputRequests = [];
   const skillRequests = [];
+  const folderRequests = [];
   const posts = postRoute(onPost);
+  if (sounds !== undefined) posts.setSounds(sounds);
   const reviews = [];
   const screens = screenRoute(onScreen);
   const server = createServer(async (req, res) => {
@@ -337,7 +522,19 @@ async function open(
     const url = new URL(req.url ?? "/", "http://localhost");
     if (url.pathname === "/api/session") return posts.token(req, res);
     if (url.pathname === "/api/direct-messages")
-      return sendJson(res, 200, { peers: [] });
+      return sendJson(res, 200, { peers: await directPeers() });
+    if (url.pathname === "/api/sounds") return posts.sounds(req, res);
+    if (/^\/w\/[^/]+\/direct-messages\/[^/]+\/messages$/.test(url.pathname))
+      return sendJson(res, 200, {
+        thread_id: null,
+        messages: [],
+        earlier_omitted: false,
+      });
+    if (req.method === "POST" && url.pathname === "/api/images")
+      return posts.upload(req, res);
+    const image = /^\/api\/images\/([^/]+)$/.exec(url.pathname)?.[1];
+    if (req.method === "GET" && image !== undefined)
+      return posts.image(req, res, image);
     if (
       req.method === "POST" &&
       /^\/w\/[^/]+\/participants\/[^/]+\/input$/.test(url.pathname)
@@ -358,6 +555,25 @@ async function open(
       const catalog = await onSkills(target);
       return sendJson(res, 200, catalog);
     }
+    const folder = /^\/w\/([^/]+)\/folder$/.exec(url.pathname)?.[1];
+    if (req.method === "GET" && folder !== undefined) {
+      const { status, body } = await onFolder(folder);
+      return sendJson(res, status, body);
+    }
+    const folders = /^\/w\/([^/]+)\/folders$/.exec(url.pathname)?.[1];
+    if (req.method === "GET" && folders !== undefined) {
+      folderRequests.push(folders);
+      const { status, body } = await onFolders(folders);
+      return sendJson(res, status, body);
+    }
+    const create = /^\/w\/[^/]+\/(channels|agents)$/.exec(url.pathname)?.[1];
+    if (req.method === "POST" && create !== undefined)
+      return posts.create(
+        req,
+        res,
+        create === "channels" ? onCreateChannel : onAddAgent,
+        url.pathname,
+      );
     const postKey = /^\/w\/([^/]+)\/messages$/.exec(url.pathname)?.[1];
     if (req.method === "POST" && postKey !== undefined)
       return posts.post(req, res, postKey);
@@ -381,7 +597,7 @@ async function open(
       );
     }
     if (
-      /^\/w\/[^/]+\/(threads\/[^/]+\/(continue|stop)|attempts\/[^/]+\/dismiss)$/.test(
+      /^\/w\/[^/]+\/(threads\/[^/]+\/(continue|stop)|attention\/dismiss)$/.test(
         url.pathname,
       )
     )
@@ -449,7 +665,7 @@ async function open(
       res.writeHead(200, {
         "Content-Type":
           types[extname(file.pathname)] ?? "application/octet-stream",
-        "Content-Security-Policy": csp,
+        "Content-Security-Policy": inlineStyles ? serverCsp : csp,
         ...(page ? { "Set-Cookie": posts.cookie } : {}),
       });
       res.end(body);
@@ -461,6 +677,7 @@ async function open(
   const page = await browser.newPage();
   page.setDefaultTimeout(5000);
   page.on("pageerror", (error) => errors.push(error.message));
+  await page.addInitScript(recordNotes);
   await page.addInitScript((observeLanding) => {
     window.cspErrors = [];
     window.initialHistoryLength = history.length;
@@ -520,6 +737,7 @@ async function open(
     bodyRequests,
     inputRequests,
     skillRequests,
+    folderRequests,
     posts,
     reviews,
     screens,
@@ -824,7 +1042,7 @@ test("fix3 item 2: slow first discovery stays loading past the replay timeout un
     "Connecting to Namedrop",
   );
   assert.equal(
-    await ui.page.locator(".sidebar-footer").textContent(),
+    await ui.page.locator(".sidebar-footer .connection-status").textContent(),
     "Connecting…",
   );
   assert.equal(
@@ -1022,7 +1240,7 @@ test("fix3 item 2: interrupted staged discovery and first retries remain loading
   );
   assert.equal(await ui.channels.getByRole("button").count(), 0);
   assert.equal(
-    await ui.page.locator(".sidebar-footer").textContent(),
+    await ui.page.locator(".sidebar-footer .connection-status").textContent(),
     "Connecting…",
   );
   ui.connections[1].send("ready", { keys: [] });
@@ -1041,7 +1259,10 @@ test("fix3 item 2: legacy fallback data followed by last gone keeps known empty 
   await ui.page
     .getByRole("heading", { name: "No workspaces yet", exact: true })
     .waitFor();
-  assert.equal(await ui.page.locator(".sidebar-footer").textContent(), "Live");
+  assert.equal(
+    await ui.page.locator(".sidebar-footer .connection-status").textContent(),
+    "Live",
+  );
   assert.equal(ui.connections.length, 1);
 });
 
@@ -7342,6 +7563,7 @@ test("CH-fix-2 item 3: Allow 10 more replies posts continue with the CSRF header
     allowCopy.label,
     stopCopy.label,
     "Details",
+    threadControlCopy.dismiss.label,
   ]);
   assert.equal(await limit.allow.getAttribute("title"), allowCopy.title);
   assert.equal(await limit.stop.getAttribute("title"), stopCopy.title);
@@ -7483,12 +7705,12 @@ test("a lost answer's Dismiss asks once, posts the confirmation, and the card go
   await dismiss.click();
   await confirm.click();
   await until(() => ui.posts.controls.length === 1, "the dismiss POST");
-  assert.equal(
-    ui.posts.controls[0].path,
-    `/w/${key(1)}/attempts/attempt-1/dismiss`,
-  );
+  assert.equal(ui.posts.controls[0].path, `/w/${key(1)}/attention/dismiss`);
   assert.equal(ui.posts.controls[0].csrf, "csrf-1");
-  assert.deepEqual(JSON.parse(ui.posts.controls[0].body), { confirmed: true });
+  assert.deepEqual(JSON.parse(ui.posts.controls[0].body), {
+    confirmed: true,
+    ids: ["attention-agent-disposition-attempt-1"],
+  });
   value.frame.attention = [];
   value.frame.health = { level: "calm" };
   ui.connections[0].send("space", value);
@@ -7499,34 +7721,191 @@ test("a lost answer's Dismiss asks once, posts the confirmation, and the card go
   );
 });
 
-test("a refused Dismiss says the agent can still answer and the button comes back", async (t) => {
-  const ui = await open(
-    t,
-    (client) => replay(client, [lostAnswer()]),
-    undefined,
+// One card of each kind the person could not dismiss before: a request whose
+// agent can still answer, a terminal reply, and a coordination.
+function stuckWarnings() {
+  const value = lostAnswer();
+  value.frame.attention[0].answer_lost = null;
+  value.frame.attention.push(
     {
-      onControl: () => ({ status: 409 }),
+      attention_id: "terminal-relay:reply-1",
+      source_kind: "terminal_relay",
+      source_id: "reply-1",
+      summary: { text: "A terminal reply needs you.", truncated: false },
+      opened_at_ms: Date.now() - 50_000,
+      subject_alias: "codex",
+    },
+    {
+      attention_id: "coordination-attention:c1",
+      source_kind: "coordination",
+      source_id: "c1",
+      coordination_id: "c1",
+      summary: { text: "A coordination needs a decision.", truncated: false },
+      opened_at_ms: Date.now() - 40_000,
     },
   );
+  value.frame.health = { level: "needs_you", items: 3 };
+  return value;
+}
+
+test("a card whose agent can still answer, a terminal reply and a coordination each have a Dismiss that asks once and names only its card", async (t) => {
+  const value = stuckWarnings();
+  const ui = await open(t, (client) => replay(client, [value]));
   await ui.live();
-  const item = ui.page
+  const items = ui.page
     .getByRole("region", { name: "Attention needed" })
     .locator(".attention-item");
-  await item
-    .getByRole("button", { name: threadControlCopy.dismiss.label, exact: true })
-    .click();
-  await item
+  await items.nth(2).waitFor();
+  assert.equal(await items.count(), 3);
+  const ids = value.frame.attention.map((card) => card.attention_id);
+  for (const [index, id] of ids.entries()) {
+    const item = items.nth(index);
+    await item
+      .getByRole("button", {
+        name: threadControlCopy.dismiss.label,
+        exact: true,
+      })
+      .click();
+    assert.equal(
+      await item.locator(".attention-confirm").textContent(),
+      threadControlCopy.confirmDismissWarning,
+      id,
+    );
+    assert.equal(
+      ui.posts.controls.length,
+      index,
+      `${id}: the first click sends nothing`,
+    );
+    await item
+      .getByRole("button", {
+        name: threadControlCopy.confirmDismiss,
+        exact: true,
+      })
+      .click();
+    await until(() => ui.posts.controls.length === index + 1, `${id}'s POST`);
+    assert.equal(
+      ui.posts.controls[index].path,
+      `/w/${key(1)}/attention/dismiss`,
+    );
+    assert.deepEqual(JSON.parse(ui.posts.controls[index].body), {
+      confirmed: true,
+      ids: [id],
+    });
+  }
+});
+
+test("Dismiss all asks once, posts every card's id, and the list goes", async (t) => {
+  const value = stuckWarnings();
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.live();
+  const list = ui.page.getByRole("region", { name: "Attention needed" });
+  const all = list.getByRole("button", {
+    name: threadControlCopy.dismissAll,
+    exact: true,
+  });
+  await all.click();
+  assert.equal(
+    await list.locator(".attention-more .attention-confirm").textContent(),
+    threadControlCopy.confirmDismissAll(3),
+  );
+  assert.equal(await focusedText(ui), threadControlCopy.dismissCount(3));
+  assert.equal(ui.posts.controls.length, 0, "the first click sends nothing");
+  await ui.page.keyboard.press("Escape");
+  await list
+    .locator(".attention-more .attention-confirm")
+    .waitFor({ state: "detached" });
+  assert.equal(await focusedText(ui), threadControlCopy.dismissAll);
+  assert.equal(ui.posts.controls.length, 0, "Escape sends nothing");
+  await all.click();
+  await list
+    .locator(".attention-more")
     .getByRole("button", {
-      name: threadControlCopy.confirmDismiss,
+      name: threadControlCopy.dismissCount(3),
       exact: true,
     })
     .click();
-  const alert = item.getByRole("alert");
-  await alert.waitFor();
-  assert.equal(await alert.textContent(), threadControlCopy.stillAnswerable);
-  await item
-    .getByRole("button", { name: threadControlCopy.dismiss.label, exact: true })
-    .waitFor();
+  await until(() => ui.posts.controls.length === 1, "the dismiss POST");
+  assert.equal(ui.posts.controls[0].path, `/w/${key(1)}/attention/dismiss`);
+  assert.deepEqual(JSON.parse(ui.posts.controls[0].body), {
+    confirmed: true,
+    ids: value.frame.attention.map((card) => card.attention_id),
+  });
+  value.frame.attention = [];
+  value.frame.health = { level: "calm" };
+  ui.connections[0].send("space", value);
+  await list.waitFor({ state: "detached" });
+});
+
+test("Dismiss all shows every card before it asks, and a card that arrives while it asks stays", async (t) => {
+  const value = stuckWarnings();
+  const card = (id, at) => ({
+    attention_id: id,
+    source_kind: "pane_binding",
+    source_id: id,
+    summary: { text: `${id} needs you.`, truncated: false },
+    opened_at_ms: at,
+  });
+  value.frame.attention.push(
+    card("card-four", Date.now() - 30_000),
+    card("card-five", Date.now() - 20_000),
+  );
+  value.frame.health = { level: "needs_you", items: 5 };
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.live();
+  const list = ui.page.getByRole("region", { name: "Attention needed" });
+  const items = list.locator(".attention-item");
+  await items.nth(2).waitFor();
+  assert.equal(await items.count(), 3, "two cards are behind Show 2 more");
+  await list
+    .getByRole("button", { name: threadControlCopy.dismissAll, exact: true })
+    .click();
+  const confirm = list.locator(".attention-more .attention-confirm");
+  await confirm.waitFor();
+  assert.equal(
+    await items.count(),
+    5,
+    "a card the confirmation counts is not on show",
+  );
+  assert.equal(
+    await confirm.textContent(),
+    threadControlCopy.confirmDismissAll(5),
+  );
+  const seen = value.frame.attention.map((item) => item.attention_id);
+
+  value.frame.attention.push(card("card-late", Date.now()));
+  value.frame.health = { level: "needs_you", items: 6 };
+  ui.connections[0].send("space", value);
+  await items.nth(5).waitFor();
+  assert.equal(
+    await confirm.textContent(),
+    threadControlCopy.confirmDismissAll(5),
+    "the confirmation took in a card that arrived after it was asked",
+  );
+  await list
+    .locator(".attention-more")
+    .getByRole("button", {
+      name: threadControlCopy.dismissCount(5),
+      exact: true,
+    })
+    .click();
+  await until(() => ui.posts.controls.length === 1, "the dismiss POST");
+  assert.deepEqual(JSON.parse(ui.posts.controls[0].body), {
+    confirmed: true,
+    ids: seen,
+  });
+});
+
+test("one card alone has its own Dismiss and no Dismiss all", async (t) => {
+  const ui = await open(t, (client) => replay(client, [lostAnswer()]));
+  await ui.live();
+  const list = ui.page.getByRole("region", { name: "Attention needed" });
+  await list.locator(".attention-item").waitFor();
+  assert.equal(
+    await list
+      .getByRole("button", { name: threadControlCopy.dismissAll, exact: true })
+      .count(),
+    0,
+  );
 });
 
 test("a Dismiss with nothing left to dismiss says it was already cleared, and the card goes on the next update", async (t) => {
@@ -10638,7 +11017,7 @@ test("UI-R4 L1: on a phone or a short narrow window, the thread and the screen t
     }
     const chip = main
       .getByRole("list", { name: "Members" })
-      .getByRole("button", { name: /@codex/ });
+      .getByRole("button", { name: /@claude/ });
     await chip.click();
     await drawer(ui).waitFor();
     assert.equal(await main.isVisible(), false, `the screen fills ${at}`);
@@ -12426,7 +12805,7 @@ test("INTEG-EXP4: the sidebar names the handoff decision count, and a handoff ca
   const card = ui.page.locator('[data-coordination-id="c-0"]');
   assert.deepEqual(
     await card.locator(".attention-actions button").allTextContents(),
-    ["Ask @codex to review", "Details"],
+    ["Ask @codex to review", "Details", "Dismiss"],
   );
   const handoffsOnly = handoffFrame(3);
   handoffsOnly.frame.attention.shift();
@@ -13135,5 +13514,2082 @@ test("subagents: live Peek header follows running and stopped subagents", async 
   assert.equal(
     await drawer(ui).getByRole("button", { name: "Type to agent" }).count(),
     1,
+  );
+});
+
+// A real picture, so the browser draws it: one pixel of the given grey.
+function png(grey) {
+  const crcTable = Array.from({ length: 256 }, (_, n) => {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    return c >>> 0;
+  });
+  const crc = (bytes) => {
+    let c = 0xffffffff;
+    for (const byte of bytes) c = crcTable[(c ^ byte) & 0xff] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  };
+  const chunk = (type, data) => {
+    const body = Buffer.concat([Buffer.from(type), data]);
+    const out = Buffer.alloc(body.length + 8);
+    out.writeUInt32BE(data.length, 0);
+    body.copy(out, 4);
+    out.writeUInt32BE(crc(body), body.length + 4);
+    return out;
+  };
+  const header = Buffer.from([0, 0, 0, 1, 0, 0, 0, 1, 8, 0, 0, 0, 0]);
+  const pixel = Buffer.from([
+    0x78,
+    0x01,
+    0x01,
+    0x02,
+    0x00,
+    0xfd,
+    0xff,
+    0x00,
+    grey,
+    0,
+    0,
+    0,
+    0,
+  ]);
+  // Adler-32 of the two raw bytes: a filter byte of 0 and the pixel.
+  const a = (1 + grey) % 65521;
+  const b = (1 + a) % 65521;
+  pixel.writeUInt32BE(((b << 16) | a) >>> 0, 9);
+  return Buffer.concat([
+    PNG_START,
+    chunk("IHDR", header),
+    chunk("IDAT", pixel),
+    chunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+// Hands the composer files the way a paste or a drop does.
+function giveFiles(box, kind, files, text = "") {
+  return box.evaluate(
+    (element, { kind, files, text }) => {
+      const data = new DataTransfer();
+      for (const file of files)
+        data.items.add(
+          new File([new Uint8Array(file.bytes)], file.name, {
+            type: file.type,
+          }),
+        );
+      if (text !== "") data.setData("text/plain", text);
+      const event =
+        kind === "paste"
+          ? new ClipboardEvent("paste", {
+              clipboardData: data,
+              bubbles: true,
+              cancelable: true,
+            })
+          : new DragEvent("drop", {
+              dataTransfer: data,
+              bubbles: true,
+              cancelable: true,
+            });
+      element.dispatchEvent(event);
+      return event.defaultPrevented;
+    },
+    { kind, files, text },
+  );
+}
+const shot = (grey, name = "shot.png", type = "image/png") => ({
+  bytes: [...png(grey)],
+  name,
+  type,
+});
+const drawn = (image) =>
+  image.evaluate(
+    (element) =>
+      new Promise((resolve) => {
+        const done = () => resolve(element.naturalWidth);
+        if (element.complete) done();
+        else {
+          element.addEventListener("load", done);
+          element.addEventListener("error", done);
+        }
+      }),
+  );
+
+test("IMAGES: a pasted or dropped image shows as a chip, goes with the message as a path line, and shows in the thread", async (t) => {
+  const { ui } = await chatRoom(t, []);
+  const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
+  const composer = ui.page.locator("main .composer");
+  const status = composer.locator(".composer-status");
+  const send = composer.getByRole("button", { name: "Send", exact: true });
+  const chips = composer.locator(".image-chip img");
+  await box.click();
+
+  assert.equal(
+    await giveFiles(box, "paste", [shot(10)], "cell A1"),
+    false,
+    "a paste that carries text stays a text paste",
+  );
+  assert.equal(await chips.count(), 0);
+  assert.equal(ui.posts.uploads.length, 0);
+
+  assert.equal(await giveFiles(box, "paste", [shot(10)]), true);
+  await chips.first().waitFor();
+  assert.equal(await chips.first().getAttribute("alt"), "Attached image 1");
+  assert.equal(await drawn(chips.first()), 1, "the chip draws the picture");
+  assert.equal(ui.posts.uploads[0].csrf, ui.posts.session.csrf);
+  assert.equal(await box.inputValue(), "", "the box holds no path");
+  assert.equal(
+    await status.textContent(),
+    "Add a message to send with the image.",
+  );
+  assert.equal(await send.isDisabled(), true);
+
+  assert.equal(await giveFiles(composer, "drop", [shot(20)]), true);
+  await eventually(async () => (await chips.count()) === 2, "the dropped chip");
+  assert.equal(
+    await giveFiles(composer, "drop", [
+      shot(30, "drawing.svg", "image/svg+xml"),
+    ]),
+    true,
+  );
+  assert.equal(
+    await status.textContent(),
+    "Only PNG, JPEG, GIF and WebP images can be attached.",
+  );
+  await giveFiles(box, "paste", [shot(10)]);
+  await until(() => ui.posts.uploads.length === 3, "the same picture again");
+  await eventually(
+    async () => (await composer.locator(".image-chip.uploading").count()) === 0,
+    "the upload to end",
+  );
+  assert.equal(await chips.count(), 2, "the same picture attaches once");
+
+  await composer.getByRole("button", { name: "Remove image 2" }).click();
+  assert.equal(await chips.count(), 1);
+  await giveFiles(box, "paste", [shot(40), shot(50), shot(60), shot(70)]);
+  await eventually(async () => (await chips.count()) === 4, "four chips");
+  assert.equal(await status.textContent(), "A message takes up to 4 images.");
+  assert.equal(ui.posts.uploads.length, 6, "the fifth image is not uploaded");
+  for (const position of [4, 3, 2])
+    await composer
+      .getByRole("button", { name: `Remove image ${position}` })
+      .click();
+  assert.equal(await chips.count(), 1);
+
+  await box.fill("@codex what does this show? ");
+  assert.equal(await box.inputValue(), "@codex what does this show? ");
+  assert.equal(await chips.count(), 1, "typing keeps the chip");
+  await ui.page.setViewportSize({ width: 390, height: 800 });
+  assert.equal(
+    await ui.page.evaluate(
+      () =>
+        document.documentElement.scrollWidth <=
+        document.documentElement.clientWidth,
+    ),
+    true,
+    "the chip row fits a phone",
+  );
+  const boxEdge = await composer.locator(".composer-box").boundingBox();
+  const chipEdge = await composer.locator(".image-chip").boundingBox();
+  assert.ok(chipEdge.x >= boxEdge.x && chipEdge.y >= boxEdge.y);
+  await ui.page.setViewportSize({ width: 1280, height: 720 });
+
+  await box.press("Enter");
+  await until(() => ui.posts.attempts.length === 1, "the post");
+  const [name] = [...ui.posts.images.keys()];
+  assert.equal(
+    ui.posts.attempts[0].body.source,
+    `@codex what does this show?\n\nImage: /state/channel-images/${name}`,
+  );
+  const pending = ui.page.locator("main article.pending");
+  await pending.waitFor();
+  assert.equal(
+    await pending.locator(".body").textContent(),
+    "@codex what does this show?",
+  );
+  assert.equal(await drawn(pending.locator(".msg-images img")), 1);
+  await eventually(async () => (await chips.count()) === 0, "the chips clear");
+  assert.equal(await box.inputValue(), "");
+
+  const row = ui.posts.postedRow(ui.posts.attempts[0].body.request_id);
+  row.body = { text: "what does this show?", truncated: false };
+  row.images = [name];
+  const value = team(1, "alpha");
+  value.frame.messages = [row];
+  ui.connections.at(-1).send("space", value);
+  const sent = ui.page.locator(
+    `main [data-message-id="${row.message_id}"] .msg-images`,
+  );
+  await sent.waitFor();
+  assert.equal(await drawn(sent.locator("img")), 1);
+  assert.equal(await sent.locator("img").getAttribute("alt"), "Image");
+  assert.equal(
+    await sent.locator("a").getAttribute("href"),
+    `/api/images/${name}`,
+  );
+
+  ui.posts.images.clear();
+  const old = message("old", "an older picture", {
+    images: [`${"0".repeat(64)}.png`],
+    at_ms: 50,
+  });
+  value.frame.messages = [old, row];
+  ui.connections.at(-1).send("space", value);
+  await ui.page
+    .locator('main [data-message-id="old"]')
+    .getByText("Image no longer stored")
+    .waitFor();
+});
+
+test("IMAGES: a message without an image is sent as before, and the composer adds only the attach button", async (t) => {
+  const { ui } = await chatRoom(t, []);
+  const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
+  const composer = ui.page.locator("main .composer");
+  await box.fill("@codex just words");
+  assert.equal(await composer.locator(".composer-images").count(), 0);
+  assert.equal(
+    await composer.locator(".composer-box").evaluate((element) => {
+      const style = getComputedStyle(element);
+      return `${style.flexWrap} ${element.children.length}`;
+    }),
+    "nowrap 4",
+    "the text, the hidden picker, the attach button and Send",
+  );
+  await composer.getByRole("button", { name: "Attach an image" }).waitFor();
+  await box.press("Enter");
+  await until(() => ui.posts.attempts.length === 1, "the post");
+  assert.deepEqual(ui.posts.attempts[0].body, {
+    request_id: ui.posts.attempts[0].body.request_id,
+    source: "@codex just words",
+  });
+  assert.equal(ui.posts.uploads.length, 0);
+});
+
+const SOUND_CODEX = "pane-address-1-1-1";
+const SOUND_CLAUDE = "pane-address-2-2-2";
+const SOUND_SHELL = "pane-address-3-3-3";
+const tune = (tone) => RECIPES[tone].map((note) => note.freq);
+// The notes played so far, grouped into sounds: a sound lasts under 0.6 s.
+async function sounds(page) {
+  const notes = await page.evaluate(() => window.played);
+  const groups = [];
+  for (const note of notes.toSorted((a, b) => a.at - b.at)) {
+    const last = groups.at(-1);
+    if (last && note.at - last.start < 0.7) last.freqs.push(note.freq);
+    else groups.push({ start: note.at, freqs: [note.freq] });
+  }
+  return groups.map((group) => group.freqs);
+}
+async function heardSounds(page, count) {
+  await page.waitForFunction((count) => window.played.length >= count, count);
+  return sounds(page);
+}
+const toPerson = (id, author, text = id) =>
+  message(id, text, {
+    author,
+    legs: [{ to: "human", stage: { stage: "delivered" } }],
+  });
+function room(messages, n = 1, name = "alpha") {
+  const value = frame(n, name);
+  const [codex] = value.frame.participants;
+  value.frame.participants = [
+    { ...codex, address_id: SOUND_CODEX },
+    { ...codex, address_id: SOUND_CLAUDE, alias: "@claude" },
+    {
+      ...codex,
+      address_id: SOUND_SHELL,
+      alias: "@shell",
+      kind: { type: "terminal" },
+    },
+  ];
+  value.frame.messages = messages;
+  return value;
+}
+async function soundRoom(t, settings, { messages = [], ...options } = {}) {
+  const ui = await open(
+    t,
+    (client) => replay(client, [room(messages)]),
+    undefined,
+    {
+      sounds: { default: "chime", muted: false, agents: {}, ...settings },
+      ...options,
+    },
+  );
+  await ui.live();
+  const send = async (messages) => {
+    ui.connections.at(-1).send("space", room(messages));
+    await ui.page
+      .locator(`main [data-message-id="${messages.at(-1).message_id}"]`)
+      .waitFor();
+  };
+  const unlock = async () => {
+    await ui.page.locator(".sound-chip").waitFor();
+    await ui.page.keyboard.press("Shift");
+    await ui.page.locator(".sound-chip").waitFor({ state: "detached" });
+  };
+  return { ui, send, unlock };
+}
+const dmPeer = (address, last) => ({
+  space_key: key(1),
+  address_id: address,
+  alias: "claude",
+  workspace_label: "alpha",
+  pane_label: null,
+  runtime: "claude-code",
+  presence: "idle",
+  closed: false,
+  thread_id: null,
+  last_activity_ms: null,
+  last_message_id: last,
+  last_agent_message_id: last,
+  attention_count: 0,
+});
+
+test("SOUNDS a: a direct message from an agent plays that agent's sound", async (t) => {
+  let reads = 0;
+  let last = "dm-1";
+  const { ui, unlock } = await soundRoom(
+    t,
+    { agents: { [SOUND_CLAUDE]: "knock" } },
+    {
+      directPeers: () => {
+        reads += 1;
+        return [dmPeer(SOUND_CLAUDE, last)];
+      },
+    },
+  );
+  await unlock();
+  await until(() => reads >= 1, "the first directory read");
+  last = "dm-2";
+  assert.deepEqual(await heardSounds(ui.page, 1), [tune("knock")]);
+});
+
+test("SOUNDS b: an agent set to None plays nothing", async (t) => {
+  const { ui, send, unlock } = await soundRoom(t, {
+    agents: { [SOUND_CLAUDE]: "none", [SOUND_CODEX]: "pop" },
+  });
+  await unlock();
+  await send([toPerson("quiet", SOUND_CLAUDE)]);
+  await send([toPerson("quiet", SOUND_CLAUDE), toPerson("loud", SOUND_CODEX)]);
+  assert.deepEqual(await heardSounds(ui.page, 1), [tune("pop")]);
+});
+
+test("SOUNDS c: mute plays nothing until the person turns sounds back on", async (t) => {
+  const { ui, send } = await soundRoom(t, {
+    muted: true,
+    agents: { [SOUND_CLAUDE]: "bell", [SOUND_CODEX]: "pop" },
+  });
+  const control = ui.page.locator(".sound-settings");
+  await control.locator("summary").getByText("Muted").click();
+  await send([toPerson("muted", SOUND_CLAUDE)]);
+  await control.getByRole("checkbox", { name: "Mute all sounds" }).uncheck();
+  await until(() => ui.posts.soundPosts.length === 1, "the mute change");
+  assert.deepEqual(ui.posts.soundPosts[0].body, {
+    kind: "muted",
+    muted: false,
+    was: true,
+  });
+  await control.locator("summary").getByText("Sounds").waitFor();
+  await send([toPerson("muted", SOUND_CLAUDE), toPerson("heard", SOUND_CODEX)]);
+  assert.deepEqual(await heardSounds(ui.page, 1), [tune("pop")]);
+});
+
+test("SOUNDS d: agent-to-agent traffic and the person's own message stay silent", async (t) => {
+  const { ui, send, unlock } = await soundRoom(t, {
+    agents: { [SOUND_CLAUDE]: "bell", [SOUND_CODEX]: "pop" },
+  });
+  await unlock();
+  const quiet = [
+    message("between", "@codex over to you", {
+      author: SOUND_CLAUDE,
+      legs: [{ to: SOUND_CODEX, stage: { stage: "delivered" } }],
+    }),
+    message("mine", "@claude hello", {
+      legs: [{ to: SOUND_CLAUDE, stage: { stage: "delivered" } }],
+    }),
+    message("run", "ls", {
+      author: SOUND_SHELL,
+      legs: [{ to: "human", stage: { stage: "delivered" } }],
+    }),
+  ];
+  await send(quiet);
+  await send([...quiet, toPerson("answer", SOUND_CODEX)]);
+  assert.deepEqual(await heardSounds(ui.page, 1), [tune("pop")]);
+});
+
+test("SOUNDS e: an agent's answer to the person in a channel plays its sound", async (t) => {
+  const { ui, send, unlock } = await soundRoom(t, {
+    agents: { [SOUND_CLAUDE]: "marimba" },
+  });
+  await unlock();
+  await send([toPerson("answer", SOUND_CLAUDE, "Here is what I found.")]);
+  assert.deepEqual(await heardSounds(ui.page, 1), [tune("marimba")]);
+});
+
+test("SOUNDS f: a burst within a second plays once", async (t) => {
+  const { ui, send, unlock } = await soundRoom(t, {
+    agents: { [SOUND_CLAUDE]: "bell", [SOUND_CODEX]: "pop" },
+  });
+  await unlock();
+  const burst = [toPerson("one", SOUND_CLAUDE), toPerson("two", SOUND_CODEX)];
+  await send(burst.slice(0, 1));
+  await send(burst);
+  await send([...burst, toPerson("three", SOUND_CODEX)]);
+  await new Promise((resolve) => setTimeout(resolve, 1100));
+  await send([
+    ...burst,
+    toPerson("three", SOUND_CODEX),
+    toPerson("four", SOUND_CLAUDE),
+  ]);
+  assert.deepEqual(await heardSounds(ui.page, tune("bell").length * 2), [
+    tune("bell"),
+    tune("bell"),
+  ]);
+});
+
+test("SOUNDS g: before any click a quiet chip asks for one, nothing plays, and the click hides it", async (t) => {
+  const { ui, send } = await soundRoom(t, {});
+  const chip = ui.page.getByRole("button", { name: "Click to turn on sounds" });
+  await chip.waitFor();
+  assert.equal(await chip.getAttribute("role"), null);
+  await send([toPerson("early", SOUND_CLAUDE)]);
+  assert.deepEqual(await sounds(ui.page), []);
+  await chip.click();
+  await chip.waitFor({ state: "detached" });
+  await send([
+    toPerson("early", SOUND_CLAUDE),
+    toPerson("later", SOUND_CLAUDE),
+  ]);
+  assert.deepEqual(await heardSounds(ui.page, 1), [tune("chime")]);
+});
+
+test("SOUNDS h: the agent picker saves the choice with the CSRF header, and preview plays it", async (t) => {
+  const { ui } = await soundRoom(
+    t,
+    {},
+    {
+      path: `/?dm=${key(1)}/${encodeURIComponent(SOUND_CLAUDE)}`,
+      directPeers: () => [dmPeer(SOUND_CLAUDE, null)],
+    },
+  );
+  const picker = ui.page.locator(".dm-header .sound-picker");
+  await picker.locator("summary").click();
+  const group = picker.getByRole("group", { name: "Sound for @claude" });
+  assert.equal(
+    await group.getByRole("radio", { name: "Default (Chime)" }).isChecked(),
+    true,
+  );
+  await group.getByRole("radio", { name: "Pop", exact: true }).check();
+  await until(() => ui.posts.soundPosts.length === 1, "the sound change");
+  assert.deepEqual(ui.posts.soundPosts[0], {
+    csrf: ui.posts.session.csrf,
+    body: { kind: "agent", agent: SOUND_CLAUDE, sound: "pop", was: null },
+  });
+  await picker.locator("summary").getByText("Pop").waitFor();
+  await group.getByRole("button", { name: "Play Pop" }).click();
+  assert.deepEqual(await heardSounds(ui.page, 1), [tune("pop")]);
+  await ui.page.keyboard.press("Escape");
+  assert.equal(await picker.evaluate((details) => details.open), false);
+});
+
+test("SOUNDS i: a first direct message from an agent that was not a peer when the page loaded plays", async (t) => {
+  let reads = 0;
+  let peers = [];
+  const { ui, unlock } = await soundRoom(
+    t,
+    { agents: { [SOUND_CLAUDE]: "knock" } },
+    {
+      directPeers: () => {
+        reads += 1;
+        return peers;
+      },
+    },
+  );
+  await unlock();
+  await until(() => reads >= 1, "the first directory read");
+  peers = [dmPeer(SOUND_CLAUDE, "dm-1")];
+  assert.deepEqual(await heardSounds(ui.page, 1), [tune("knock")]);
+});
+
+test("SOUNDS j: a first direct message from a peer that had no message when the page loaded plays", async (t) => {
+  let reads = 0;
+  let last = null;
+  const { ui, unlock } = await soundRoom(
+    t,
+    { agents: { [SOUND_CLAUDE]: "knock" } },
+    {
+      directPeers: () => {
+        reads += 1;
+        return [dmPeer(SOUND_CLAUDE, last)];
+      },
+    },
+  );
+  await unlock();
+  await until(() => reads >= 1, "the first directory read");
+  last = "dm-1";
+  assert.deepEqual(await heardSounds(ui.page, 1), [tune("knock")]);
+});
+
+test("SOUNDS k: a channel that appears after the page loaded plays for a new message to the person, not an old one", async (t) => {
+  const { ui, unlock } = await soundRoom(
+    t,
+    { agents: { [SOUND_CLAUDE]: "bell", [SOUND_CODEX]: "pop" } },
+    { messages: [{ ...toPerson("seen", SOUND_CLAUDE), at_ms: 500 }] },
+  );
+  await unlock();
+  const appear = async (n, name, messages) => {
+    ui.connections.at(-1).send("space", room(messages, n, name));
+    await ui.row(n).waitFor();
+  };
+  await appear(2, "beta", [{ ...toPerson("old", SOUND_CLAUDE), at_ms: 400 }]);
+  await appear(3, "gamma", [{ ...toPerson("new", SOUND_CODEX), at_ms: 600 }]);
+  assert.deepEqual(await heardSounds(ui.page, 1), [tune("pop")]);
+});
+
+test("SOUNDS l: one direct message plays once across three tabs, whenever each tab hears it", async (t) => {
+  const { ui } = await soundRoom(t, { agents: { [SOUND_CLAUDE]: "knock" } });
+  const context = await browser.newContext();
+  t.after(() => context.close());
+  const tabs = [];
+  for (let n = 0; n < 3; n += 1) {
+    const page = await context.newPage();
+    page.setDefaultTimeout(5000);
+    await page.addInitScript(recordNotes);
+    const tab = { page, last: "dm-1", served: [] };
+    await page.route("**/api/direct-messages", (route) => {
+      tab.served.push(tab.last);
+      return route.fulfill({
+        json: { peers: [dmPeer(SOUND_CLAUDE, tab.last)] },
+      });
+    });
+    await page.goto(ui.page.url());
+    await page.locator(".sound-chip").waitFor();
+    await page.keyboard.press("Shift");
+    await page.locator(".sound-chip").waitFor({ state: "detached" });
+    await until(() => tab.served.length >= 1, "the tab's first read");
+    tabs.push(tab);
+  }
+  for (const tab of tabs) {
+    tab.last = "dm-2";
+    await until(() => tab.served.includes("dm-2"), "the tab reads the message");
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+  }
+  const heard = await Promise.all(tabs.map((tab) => sounds(tab.page)));
+  assert.deepEqual(heard.flat(), [tune("knock")]);
+});
+
+test("SOUNDS m: a refused save says why and the picker shows the saved choice again", async (t) => {
+  const { ui } = await soundRoom(
+    t,
+    { agents: { [SOUND_CLAUDE]: "bell" } },
+    {
+      path: `/?dm=${key(1)}/${encodeURIComponent(SOUND_CLAUDE)}`,
+      directPeers: () => [dmPeer(SOUND_CLAUDE, null)],
+    },
+  );
+  const picker = ui.page.locator(".dm-header .sound-picker");
+  await picker.locator("summary").click();
+  const group = picker.getByRole("group", { name: "Sound for @claude" });
+  const bell = group.getByRole("radio", { name: "Bell", exact: true });
+  const pop = group.getByRole("radio", { name: "Pop", exact: true });
+  const alert = picker.getByRole("alert");
+  for (const [status, text] of [
+    [400, "Couldn't save that sound. Too many agents have their own sound."],
+    [503, "Couldn't save that. Try again."],
+  ]) {
+    ui.posts.refuseSounds(status);
+    await pop.check();
+    await alert.getByText(text, { exact: true }).waitFor();
+    await eventually(async () => await bell.isChecked(), "the saved choice");
+    assert.equal(await pop.isChecked(), false);
+  }
+  ui.posts.refuseSounds(null);
+  await pop.check();
+  await alert.waitFor({ state: "detached" });
+  await picker.locator("summary").getByText("Pop").waitFor();
+});
+
+test("SOUNDS n: two quick picks reach the server one at a time, and it keeps the later one", async (t) => {
+  const { ui } = await soundRoom(
+    t,
+    {},
+    {
+      path: `/?dm=${key(1)}/${encodeURIComponent(SOUND_CLAUDE)}`,
+      directPeers: () => [dmPeer(SOUND_CLAUDE, null)],
+    },
+  );
+  let release = () => {};
+  const held = new Promise((resolve) => {
+    release = resolve;
+  });
+  ui.posts.delaySounds((post) => (post.body.sound === "pop" ? held : null));
+  const picker = ui.page.locator(".dm-header .sound-picker");
+  await picker.locator("summary").click();
+  const group = picker.getByRole("group", { name: "Sound for @claude" });
+  const bell = group.getByRole("radio", { name: "Bell", exact: true });
+  await group.getByRole("radio", { name: "Pop", exact: true }).check();
+  await until(() => ui.posts.soundPosts.length === 1, "the first save");
+  await bell.check();
+  await ui.page.evaluate(
+    () => new Promise((resolve) => setTimeout(resolve, 200)),
+  );
+  assert.equal(
+    ui.posts.soundPosts.length,
+    1,
+    "the second save waits for the first answer",
+  );
+  release();
+  await until(() => ui.posts.soundPosts.length === 2, "the second save");
+  assert.deepEqual(ui.posts.soundPosts[1].body, {
+    kind: "agent",
+    agent: SOUND_CLAUDE,
+    sound: "bell",
+    was: "pop",
+  });
+  await until(
+    () => ui.posts.savedSounds().agents[SOUND_CLAUDE] === "bell",
+    "the server keeps the later pick",
+  );
+  assert.equal(await bell.isChecked(), true);
+  await picker.locator("summary").getByText("Bell").waitFor();
+});
+
+test("SOUNDS p: reopening the picker while saves wait shows the pick the server keeps", async (t) => {
+  const { ui } = await soundRoom(
+    t,
+    {},
+    {
+      path: `/?dm=${key(1)}/${encodeURIComponent(SOUND_CLAUDE)}`,
+      directPeers: () => [dmPeer(SOUND_CLAUDE, null)],
+    },
+  );
+  let release = () => {};
+  const held = new Promise((resolve) => {
+    release = resolve;
+  });
+  ui.posts.delaySounds((post) => (post.body.sound === "pop" ? held : null));
+  const picker = ui.page.locator(".dm-header .sound-picker");
+  const summary = picker.locator("summary");
+  await summary.click();
+  const group = picker.getByRole("group", { name: "Sound for @claude" });
+  const bell = group.getByRole("radio", { name: "Bell", exact: true });
+  await group.getByRole("radio", { name: "Pop", exact: true }).check();
+  await until(() => ui.posts.soundPosts.length === 1, "the first save");
+  await bell.check();
+  await summary.click();
+  await summary.click();
+  await group.waitFor();
+  release();
+  await until(
+    () => ui.posts.savedSounds().agents[SOUND_CLAUDE] === "bell",
+    "the server keeps the later pick",
+  );
+  await eventually(async () => await bell.isChecked(), "the kept pick");
+  await summary.getByText("Bell").waitFor();
+  await group.getByRole("radio", { name: "Knock", exact: true }).check();
+  await until(() => ui.posts.soundPosts.length === 3, "the next pick");
+  assert.equal(ui.posts.soundPosts[2].body.was, "bell");
+  await until(
+    () => ui.posts.savedSounds().agents[SOUND_CLAUDE] === "knock",
+    "the next pick saves without a conflict",
+  );
+});
+
+test("SOUNDS o: a pick another window changed first shows the saved choice and says so", async (t) => {
+  const { ui } = await soundRoom(
+    t,
+    {},
+    {
+      path: `/?dm=${key(1)}/${encodeURIComponent(SOUND_CLAUDE)}`,
+      directPeers: () => [dmPeer(SOUND_CLAUDE, null)],
+    },
+  );
+  const picker = ui.page.locator(".dm-header .sound-picker");
+  // Opening the picker reloads the settings; the other window's change
+  // lands after that reload, so the page still shows Default.
+  const reloaded = ui.page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname === "/api/sounds" &&
+      response.request().method() === "GET",
+  );
+  await picker.locator("summary").click();
+  await reloaded;
+  const group = picker.getByRole("group", { name: "Sound for @claude" });
+  await group.getByRole("radio", { name: "Default (Chime)" }).waitFor();
+  ui.posts.setSounds({
+    default: "chime",
+    muted: false,
+    agents: { [SOUND_CLAUDE]: "knock" },
+  });
+  // A click, not check(): the page takes this pick back, so the radio may
+  // already show the saved choice again by the time its state is read.
+  await group.getByRole("radio", { name: "Pop", exact: true }).click();
+  await picker
+    .getByRole("alert")
+    .getByText(
+      "Sounds changed in another window. This shows the saved choice.",
+      { exact: true },
+    )
+    .waitFor();
+  await eventually(
+    async () =>
+      await group
+        .getByRole("radio", { name: "Knock", exact: true })
+        .isChecked(),
+    "the saved choice",
+  );
+  assert.equal(ui.posts.savedSounds().agents[SOUND_CLAUDE], "knock");
+  assert.deepEqual(ui.posts.soundPosts.at(-1).body, {
+    kind: "agent",
+    agent: SOUND_CLAUDE,
+    sound: "pop",
+    was: null,
+  });
+});
+
+const fenced = (source, before = "Here it is:", after = "Done.") =>
+  `${before}\n\`\`\`mermaid\n${source}\n\`\`\`\n${after}`;
+const FLOW =
+  "flowchart TD\n  A[Start] --> B{Ready?}\n  B -- yes --> C[Ship it]\n  B -- no --> D[Wait]";
+// A left-to-right chain. Each step adds about 200 px to the drawing's width.
+const chain = (steps) =>
+  `flowchart LR\n${Array.from({ length: steps - 1 }, (_, n) => `  N${n}[Step number ${n}] --> N${n + 1}[Step number ${n + 1}]`).join("\n")}`;
+// What a live agent answered with. Fitted to the thread pane it was 289 by 45 px.
+const REVIEW_FLOW =
+  "flowchart LR\n  A[Author opens PR] --> B[CI runs checks]\n  B --> C[Reviewer assigned]\n  C --> D{Review decision}\n  D -->|Changes requested| E[Author pushes fixes]\n  E --> B\n  D -->|Approved| F[Final CI pass]\n  F --> G[Merge to main]\n  G --> H[Delete branch]";
+// A drawing is fitted to its column down to this share of its drawn size.
+const SMALLEST_SCALE = 0.7;
+const SEQUENCE =
+  "sequenceDiagram\n  participant Alice\n  participant Bob\n  Alice->>Bob: Are you there?\n  Bob-->>Alice: Yes\n  Note over Alice,Bob: Both agree";
+async function diagramRoom(t, messages) {
+  const room = await chatRoom(
+    t,
+    messages.map((text, index) => channelPost(`d${index + 1}`, text, {})),
+    { inlineStyles: true },
+  );
+  const asked = [];
+  room.ui.page.on("request", (request) => asked.push(request.url()));
+  return { ...room, asked };
+}
+const diagramOf = (ui, id) =>
+  ui.page.locator(`main [data-message-id="${id}"] .diagram`);
+// A diagram is drawn once it is on screen, so this brings it there first.
+async function pictureOf(diagram) {
+  await diagram.scrollIntoViewIfNeeded();
+  const image = diagram.locator(".diagram-box img");
+  await image.waitFor();
+  return image;
+}
+// A message over 480 characters is shown shortened until this is pressed.
+const showWhole = (ui, id) =>
+  ui.page
+    .locator(`main [data-message-id="${id}"]`)
+    .getByRole("button", { name: "Show more" })
+    .click();
+// The picture is an SVG document in a data: address; this is its source.
+const svgOf = async (image) =>
+  decodeURIComponent((await image.getAttribute("src")).split(",")[1]);
+// The words the picture shows, whatever elements Mermaid split them over.
+const wordsOf = (image) =>
+  image.evaluate((element) =>
+    [
+      ...new DOMParser()
+        .parseFromString(
+          decodeURIComponent(element.src.split(",")[1]),
+          "image/svg+xml",
+        )
+        .querySelectorAll("text"),
+    ]
+      .map(
+        (text) =>
+          [...text.querySelectorAll("tspan")]
+            .map((span) => span.textContent.trim())
+            .filter((word) => word !== "")
+            .join(" ") || text.textContent.trim(),
+      )
+      .join(" | "),
+  );
+// The page's text color as the hex a drawing holds.
+const textColor = (ui) =>
+  ui.page.evaluate(() => {
+    const canvas = document.createElement("canvas").getContext("2d");
+    canvas.fillStyle = getComputedStyle(
+      document.documentElement,
+    ).getPropertyValue("--text");
+    canvas.fillRect(0, 0, 1, 1);
+    return `#${[...canvas.getImageData(0, 0, 1, 1).data.slice(0, 3)].map((part) => part.toString(16).padStart(2, "0")).join("")}`;
+  });
+// How an element and the picture in it are laid out.
+const fitOf = (box) =>
+  box.evaluate((element) => {
+    const image = element.querySelector("img");
+    const shown = image.getBoundingClientRect();
+    const frame = element.getBoundingClientRect();
+    return {
+      box: element.clientWidth,
+      content: element.scrollWidth,
+      width: shown.width,
+      height: shown.height,
+      naturalWidth: image.naturalWidth,
+      naturalHeight: image.naturalHeight,
+      inside:
+        shown.left >= frame.left - 0.5 && shown.right <= frame.right + 0.5,
+      page: document.scrollingElement.scrollWidth,
+      viewport: document.documentElement.clientWidth,
+    };
+  });
+function assertShape(fit, what) {
+  assert.ok(fit.page <= fit.viewport, `${what}: the page does not scroll`);
+  const shape = fit.naturalWidth / fit.naturalHeight;
+  assert.ok(
+    Math.abs(fit.width / fit.height - shape) / shape < 0.02,
+    `${what}: the picture keeps its shape`,
+  );
+}
+function assertFits(fit, what) {
+  assert.ok(fit.inside, `${what}: the whole picture is inside its box`);
+  assert.ok(fit.content <= fit.box, `${what}: its box does not scroll`);
+  assert.ok(
+    fit.width >= fit.naturalWidth * SMALLEST_SCALE - 1,
+    `${what}: the picture is no smaller than its labels can be read at: ${fit.width} of ${fit.naturalWidth}`,
+  );
+  assertShape(fit, what);
+}
+// A picture that would be too small to read if it were fitted.
+function assertReadable(fit, what) {
+  assert.ok(
+    Math.abs(fit.width - fit.naturalWidth * SMALLEST_SCALE) <= 1,
+    `${what}: the picture is ${SMALLEST_SCALE} of its drawn size: ${fit.width} of ${fit.naturalWidth}`,
+  );
+  assert.ok(fit.content > fit.box, `${what}: its box scrolls sideways`);
+  assertShape(fit, what);
+}
+async function diagramShots(ui, name) {
+  const directory = process.env.DIAGRAM_SCREENSHOTS;
+  if (!directory) return;
+  await mkdir(directory, { recursive: true });
+  await ui.page.screenshot({ path: `${directory}/${name}.png` });
+}
+
+test("DIAGRAMS: a flowchart and a sequence diagram are drawn, with the source and a copy one press away", async (t) => {
+  const { ui } = await diagramRoom(t, [fenced(FLOW), fenced(SEQUENCE)]);
+  await ui.page
+    .context()
+    .grantPermissions(["clipboard-read", "clipboard-write"]);
+  const flow = diagramOf(ui, "d1");
+  const sequence = diagramOf(ui, "d2");
+  for (const [diagram, words] of [
+    [flow, ["Start", "Ready?", "Ship it", "Wait"]],
+    [sequence, ["Alice", "Bob", "Are you there?", "Both agree"]],
+  ]) {
+    const image = await pictureOf(diagram);
+    assert.ok((await drawn(image)) > 50, "the picture is drawn");
+    assert.equal(await image.getAttribute("alt"), "Diagram");
+    const shown = await wordsOf(image);
+    for (const word of words)
+      assert.ok(shown.includes(word), `${word}: ${shown}`);
+    assert.equal(await diagram.locator("pre").count(), 0, "no source yet");
+  }
+  const body = ui.page.locator('main [data-message-id="d1"] .body');
+  assert.ok((await body.textContent()).startsWith("Here it is:"));
+  assert.ok((await body.textContent()).includes("Done."));
+  assert.ok(
+    !(await body.textContent()).includes("flowchart TD"),
+    "the drawing stands where the source was",
+  );
+
+  const toggle = flow.getByRole("button", { name: "Show source" });
+  await toggle.click();
+  assert.equal(await flow.locator("pre code").textContent(), `${FLOW}\n`);
+  await flow.getByRole("button", { name: "Hide source" }).click();
+  assert.equal(await flow.locator("pre").count(), 0);
+
+  await flow.getByRole("button", { name: "Copy", exact: true }).click();
+  await flow.getByRole("button", { name: "Copied", exact: true }).waitFor();
+  assert.equal(
+    await ui.page.evaluate(() => navigator.clipboard.readText()),
+    `${FLOW}\n`,
+  );
+  assert.equal(
+    await ui.page.locator(".diagram-stage > *").count(),
+    0,
+    "Mermaid's working elements are gone",
+  );
+  await diagramShots(ui, "light");
+});
+
+test("DIAGRAMS: the drawing code loads only when a message holds a diagram", async (t) => {
+  const plain = await diagramRoom(t, [
+    "```js\nconst a = 1;\n```\nno diagram here",
+  ]);
+  await plain.ui.page.locator('main [data-message-id="d1"] pre').waitFor();
+  await plain.ui.page.waitForTimeout(300);
+  assert.deepEqual(
+    plain.asked.filter((url) => url.includes("/diagram/")),
+    [],
+    "a page without a diagram asks for none of the drawing code",
+  );
+
+  const { ui, asked } = await diagramRoom(t, [fenced(FLOW)]);
+  await pictureOf(diagramOf(ui, "d1"));
+  const loaded = asked.filter((url) => url.includes("/diagram/"));
+  assert.ok(loaded.length > 0, "the diagram's code was asked for");
+  assert.ok(
+    loaded.every(
+      (url) => new URL(url).origin === new URL(ui.page.url()).origin,
+    ),
+    "and only from this server",
+  );
+  const bytes = (
+    await Promise.all(
+      loaded.map((url) =>
+        readFile(new URL(`../dist${new URL(url).pathname}`, import.meta.url)),
+      ),
+    )
+  ).reduce((sum, file) => sum + file.length, 0);
+  t.diagnostic(`a flowchart loads ${loaded.length} files, ${bytes} bytes`);
+  assert.ok(bytes < 1_000_000, `a flowchart loads ${bytes} bytes`);
+  assert.ok(
+    !loaded.some((url) => /elk|katex|cytoscape/.test(url)),
+    `a flowchart loads no layout engine or math code it does not use: ${loaded}`,
+  );
+});
+
+test("DIAGRAMS: a diagram that cannot be drawn shows its source and a quiet note", async (t) => {
+  const broken = "flowchart TD\n  A[Start --> ???\n  }}}";
+  const { ui } = await diagramRoom(t, [fenced(broken), fenced(FLOW)]);
+  const failed = diagramOf(ui, "d1");
+  await failed.scrollIntoViewIfNeeded();
+  await failed.locator(".diagram-note").waitFor();
+  assert.equal(
+    await failed.locator(".diagram-note").textContent(),
+    "Diagram could not be drawn",
+  );
+  assert.equal(await failed.locator("pre code").textContent(), `${broken}\n`);
+  assert.equal(await failed.locator("img").count(), 0);
+  assert.equal(
+    await failed.getByRole("button", { name: "Show source" }).count(),
+    0,
+  );
+  assert.equal(await failed.getByRole("button", { name: "Copy" }).count(), 1);
+  assert.ok(
+    !(await ui.page.locator("body").textContent()).includes("Syntax error"),
+    "no error drawing or parser message reaches the page",
+  );
+  await pictureOf(diagramOf(ui, "d2"));
+  assert.equal(
+    await ui.page.locator(".diagram-stage > *").count(),
+    0,
+    "the failed drawing left nothing behind",
+  );
+  await diagramShots(ui, "broken");
+});
+
+test("DIAGRAMS: a diagram cannot run script, load anything remote, loosen its own settings or carry a link", async (t) => {
+  const hostile = [
+    '%%{init: {"securityLevel": "loose", "htmlLabels": true, "layout": "elk", "theme": "forest", "themeCSS": "@import url(https://evil.example/a.css); .node rect { fill: url(https://evil.example/b.png) }"}}%%',
+    "flowchart TD",
+    '  A["<img src=https://evil.example/c.png onerror=window.pwned=1>"] --> B["<script>window.pwned=2</script>"]',
+    '  B --> C["<a href=https://evil.example/d>click me</a>"]',
+    '  click A href "javascript:window.pwned=3"',
+    '  click B call window.alert("pwned")',
+    '  click C href "https://evil.example/e" _blank',
+  ].join("\n");
+  const { ui, asked } = await diagramRoom(t, [fenced(hostile), fenced(FLOW)]);
+  // Mermaid hands each label to DOMPurify, which parses it with DOMParser to
+  // strip what the label must not hold. That document has no window, so a
+  // handler in it cannot run. This counts the handlers parsed that way.
+  await ui.page.evaluate(() => {
+    window.inertHandlers = 0;
+    const parse = DOMParser.prototype.parseFromString;
+    DOMParser.prototype.parseFromString = function (markup, type) {
+      const parsed = parse.call(this, markup, type);
+      if (parsed.defaultView === null)
+        for (const element of parsed.querySelectorAll("*"))
+          window.inertHandlers += [...element.attributes].filter((attribute) =>
+            attribute.name.startsWith("on"),
+          ).length;
+      return parsed;
+    };
+  });
+  const dialogs = [];
+  ui.page.on("dialog", (dialog) => {
+    dialogs.push(dialog.message());
+    void dialog.dismiss();
+  });
+  await showWhole(ui, "d1");
+  const diagram = diagramOf(ui, "d1");
+  const image = await pictureOf(diagram);
+  const plain = await pictureOf(diagramOf(ui, "d2"));
+  assert.equal(
+    await diagram.locator(".diagram-note").count(),
+    0,
+    "the labels are drawn as text",
+  );
+  const svg = await svgOf(image);
+  for (const banned of [
+    "<script",
+    "<foreignObject",
+    "<a ",
+    "<image",
+    "onerror",
+    "javascript:",
+    "@import",
+  ])
+    assert.ok(!svg.includes(banned), `the picture holds no ${banned}`);
+  assert.ok(
+    (await wordsOf(image)).includes("click me"),
+    `a tag in a label is shown as its text: ${await wordsOf(image)}`,
+  );
+  // The page's own look, not the theme the diagram asked for.
+  assert.equal((await svgOf(plain)).includes("#cde498"), false);
+  assert.ok(!svg.includes("#cde498"), "the diagram cannot choose its theme");
+  assert.deepEqual(
+    asked.filter((url) => url.includes("/diagram/elk")),
+    [],
+    "nor the heavy layout engine",
+  );
+
+  await diagram.scrollIntoViewIfNeeded();
+  await image.click();
+  await ui.page.keyboard.press("Escape");
+  await ui.page.waitForTimeout(300);
+  assert.equal(
+    await ui.page.evaluate(() => window.pwned),
+    undefined,
+    "no script from the diagram ran",
+  );
+  assert.deepEqual(dialogs, []);
+  assert.deepEqual(
+    asked.filter(
+      (url) =>
+        !url.startsWith("data:") && new URL(url).hostname !== "127.0.0.1",
+    ),
+    [],
+    "nothing remote was asked for",
+  );
+  assert.equal(
+    await ui.page.locator("main .diagram a, main .diagram script").count(),
+    0,
+  );
+  assert.equal(
+    await ui.page.evaluate(
+      () =>
+        [...document.querySelectorAll("*")].filter((element) =>
+          [...element.attributes].some((attribute) =>
+            attribute.name.startsWith("on"),
+          ),
+        ).length,
+    ),
+    0,
+    "no element of the page carries an inline handler",
+  );
+  // Chrome 157 reports a blocked inline handler for each one DOMParser meets
+  // under the page's policy, although no handler in such a document can run.
+  // Chromium 155 reports none. Those reports are accounted for here, one per
+  // handler parsed that way at most, and any other report still fails the
+  // check that follows every test.
+  const { reports, inert } = await ui.page.evaluate(() => ({
+    reports: window.cspErrors,
+    inert: window.inertHandlers,
+  }));
+  assert.ok(inert > 0, "the label's handler reached DOMPurify to be removed");
+  assert.deepEqual(
+    reports.filter((directive) => directive !== "script-src-attr"),
+    [],
+  );
+  assert.ok(
+    reports.length <= inert,
+    `${reports.length} reports for ${inert} handlers parsed in a document with no window`,
+  );
+  await ui.page.evaluate(() => {
+    window.cspErrors = window.cspErrors.filter(
+      (directive) => directive !== "script-src-attr",
+    );
+  });
+});
+
+test("DIAGRAMS: a block over 10,000 characters and a message's ninth diagram are shown as source, undrawn", async (t) => {
+  const edges = Array.from(
+    { length: 400 },
+    (_, n) => `  N${n}[Step number ${n}] --> N${n + 1}`,
+  ).join("\n");
+  const heavy = `flowchart TD\n${edges}`;
+  assert.ok(heavy.length > 10_000 && heavy.length < 50_000);
+  const large = await diagramRoom(t, [fenced(heavy)]);
+  await showWhole(large.ui, "d1");
+  const refused = diagramOf(large.ui, "d1");
+  await refused.locator(".diagram-note").waitFor();
+  assert.equal(
+    await refused.locator(".diagram-note").textContent(),
+    "Diagram is too large to draw",
+  );
+  assert.equal(await refused.locator("pre code").textContent(), `${heavy}\n`);
+  assert.equal(await refused.getByRole("button", { name: "Copy" }).count(), 1);
+  await refused.scrollIntoViewIfNeeded();
+  await large.ui.page.waitForTimeout(400);
+  assert.equal(await refused.locator("img").count(), 0);
+  assert.deepEqual(
+    large.asked.filter((url) => url.includes("/diagram/")),
+    [],
+    "a block over the limit never reaches the drawing code",
+  );
+
+  const ten = Array.from({ length: 10 }, (_, n) =>
+    fenced(
+      `flowchart LR\n  A${n}[Diagram ${n + 1}] --> B${n}`,
+      `Part ${n + 1}`,
+      "",
+    ),
+  ).join("\n");
+  const { ui } = await diagramRoom(t, [ten]);
+  await showWhole(ui, "d1");
+  const diagrams = diagramOf(ui, "d1");
+  assert.equal(await diagrams.count(), 10);
+  for (let nth = 0; nth < 8; nth++) {
+    const image = await pictureOf(diagrams.nth(nth));
+    assert.ok(
+      (await wordsOf(image)).includes(`Diagram ${nth + 1}`),
+      `diagram ${nth + 1} is drawn`,
+    );
+  }
+  for (const nth of [8, 9]) {
+    const over = diagrams.nth(nth);
+    await over.scrollIntoViewIfNeeded();
+    assert.equal(
+      await over.locator(".diagram-note").textContent(),
+      "Only the first 8 diagrams in a message are drawn",
+    );
+    assert.ok(
+      (await over.locator("pre code").textContent()).includes(
+        `Diagram ${nth + 1}`,
+      ),
+    );
+  }
+  await ui.page.waitForTimeout(400);
+  assert.equal((await diagrams.locator("img").count()) >= 8, true);
+  assert.equal(await diagrams.nth(8).locator("img").count(), 0);
+  assert.equal(await diagrams.nth(9).locator("img").count(), 0);
+  await diagramShots(ui, "caps");
+});
+
+test("DIAGRAMS: a diagram over the limit stays undrawn when the same source was already drawn", async (t) => {
+  const same = fenced("flowchart LR\n  A[Same plan] --> B", "Again", "");
+  const { ui } = await diagramRoom(t, [
+    Array.from({ length: 9 }, () => same).join("\n"),
+  ]);
+  await showWhole(ui, "d1");
+  const row = ui.page.locator('main [data-message-id="d1"]');
+  const diagrams = diagramOf(ui, "d1");
+  assert.equal(await diagrams.count(), 9);
+  for (let nth = 0; nth < 8; nth++) await pictureOf(diagrams.nth(nth));
+  const undrawn = async (when) => {
+    const ninth = diagrams.nth(8);
+    await ninth.scrollIntoViewIfNeeded();
+    await ninth.locator(".diagram-note").waitFor();
+    await ui.page.waitForTimeout(300);
+    assert.equal(
+      await ninth.locator(".diagram-note").textContent(),
+      "Only the first 8 diagrams in a message are drawn",
+      when,
+    );
+    assert.equal(
+      await ninth.locator("img").count(),
+      0,
+      `${when}: no picture beside the note`,
+    );
+    assert.equal(await ninth.locator("pre code").count(), 1, when);
+    assert.equal(
+      await ninth.getByRole("button", { name: "Show source" }).count(),
+      0,
+      when,
+    );
+  };
+  await undrawn("at first");
+  // The message is shown again, now that this source has a kept picture.
+  await row.getByRole("button", { name: "Show less" }).click();
+  await row.getByRole("button", { name: "Show more" }).click();
+  assert.equal(await diagrams.count(), 9);
+  await pictureOf(diagrams.nth(0));
+  await undrawn("shown again");
+});
+
+test("DIAGRAMS: the drawing follows the page's light and dark look", async (t) => {
+  const { ui } = await diagramRoom(t, [fenced(FLOW)]);
+  await ui.page.emulateMedia({ colorScheme: "light" });
+  const image = await pictureOf(diagramOf(ui, "d1"));
+  const light = await textColor(ui);
+  await eventually(
+    async () => (await svgOf(image)).includes(light),
+    "the light drawing",
+  );
+  const lightSource = await image.getAttribute("src");
+
+  await ui.page.emulateMedia({ colorScheme: "dark" });
+  const dark = await textColor(ui);
+  assert.notEqual(dark, light);
+  await eventually(
+    async () => (await svgOf(image)).includes(dark),
+    "the dark drawing",
+  );
+  assert.ok(!(await svgOf(image)).includes(light));
+  assert.notEqual(await image.getAttribute("src"), lightSource);
+  assert.ok((await drawn(image)) > 50);
+  await diagramShots(ui, "dark");
+
+  await ui.page.evaluate(() => {
+    document.documentElement.dataset.theme = "light";
+  });
+  await eventually(
+    async () => (await svgOf(image)).includes(light),
+    "the page's own theme choice wins over the system's",
+  );
+});
+
+test("DIAGRAMS: a diagram is drawn when it comes on screen, and drawn again for a new look only then", async (t) => {
+  const filler = Array.from(
+    { length: 24 },
+    (_, n) => `note ${n + 1}\nwith a second line\nand a third`,
+  );
+  const { ui } = await diagramRoom(t, [
+    fenced(FLOW, "The first plan."),
+    ...filler,
+    fenced(SEQUENCE, "The last plan."),
+  ]);
+  await ui.page.emulateMedia({ colorScheme: "light" });
+  const far = diagramOf(ui, "d1");
+  const near = diagramOf(ui, `d${filler.length + 2}`);
+  const nearImage = await pictureOf(near);
+  await ui.page.waitForTimeout(400);
+  assert.equal(
+    await far.locator("img").count(),
+    0,
+    "a diagram far above the screen is not drawn yet",
+  );
+  const farImage = await pictureOf(far);
+  const light = await textColor(ui);
+  assert.ok((await svgOf(farImage)).includes(light));
+
+  await near.scrollIntoViewIfNeeded();
+  await ui.page.emulateMedia({ colorScheme: "dark" });
+  const dark = await textColor(ui);
+  await eventually(
+    async () => (await svgOf(nearImage)).includes(dark),
+    "the diagram on screen is drawn again",
+  );
+  await ui.page.waitForTimeout(400);
+  assert.ok(
+    (await svgOf(farImage)).includes(light),
+    "the one off screen keeps its picture and costs nothing",
+  );
+  await far.scrollIntoViewIfNeeded();
+  await eventually(
+    async () => (await svgOf(farImage)).includes(dark),
+    "and is drawn again once it is on screen",
+  );
+});
+
+test("DIAGRAMS: at phone width a diagram a little too wide is shown smaller to fit, and a tap opens a wide one full size", async (t) => {
+  const { ui } = await diagramRoom(t, [fenced(chain(2)), fenced(chain(15))]);
+  await ui.page.setViewportSize({ width: 390, height: 800 });
+  const fitted = diagramOf(ui, "d1");
+  await pictureOf(fitted);
+  const fit = await fitOf(fitted.locator(".diagram-box"));
+  assert.ok(
+    fit.naturalWidth > fit.box,
+    `the diagram is wider than the screen's column: ${fit.naturalWidth} > ${fit.box}`,
+  );
+  assert.ok(fit.width < fit.box, "it is shown smaller than its box");
+  assertFits(fit, "at 390 px");
+  await diagramShots(ui, "phone-fitted");
+
+  await showWhole(ui, "d2");
+  const diagram = diagramOf(ui, "d2");
+  await pictureOf(diagram);
+  const wide = await fitOf(diagram.locator(".diagram-box"));
+  assert.ok(
+    wide.naturalWidth > 1000,
+    `the diagram is wide: ${wide.naturalWidth}`,
+  );
+  assertReadable(wide, "at 390 px");
+
+  const full = diagram.locator("dialog.diagram-full");
+  assert.equal(await full.evaluate((dialog) => dialog.open), false);
+  await diagram
+    .getByRole("button", { name: "Open the diagram full size" })
+    .click();
+  await eventually(() => full.evaluate((dialog) => dialog.open), "full size");
+  const shown = await full.evaluate((dialog) => {
+    const image = dialog.querySelector("img");
+    const scroll = dialog.querySelector(".diagram-full-scroll");
+    const pane = dialog
+      .querySelector(".diagram-full-pane")
+      .getBoundingClientRect();
+    return {
+      image: image.getBoundingClientRect().width,
+      natural: image.naturalWidth,
+      pane: pane.width,
+      scrolls: scroll.scrollWidth > scroll.clientWidth,
+      viewport: document.documentElement.clientWidth,
+      page: document.scrollingElement.scrollWidth,
+    };
+  });
+  assert.equal(shown.image, shown.natural, "full size");
+  assert.ok(shown.scrolls, "which scrolls inside the full-size view");
+  assert.ok(shown.pane <= shown.viewport, "inside the screen");
+  assert.ok(shown.page <= shown.viewport);
+  await diagramShots(ui, "phone-full");
+  await ui.page.keyboard.press("Escape");
+  await eventually(
+    async () => !(await full.evaluate((dialog) => dialog.open)),
+    "Escape closes it",
+  );
+  await diagram
+    .getByRole("button", { name: "Open the diagram full size" })
+    .click();
+  await full.getByRole("button", { name: "Close the diagram" }).click();
+  await eventually(
+    async () => !(await full.evaluate((dialog) => dialog.open)),
+    "the close button closes it",
+  );
+});
+
+test("DIAGRAMS: a shortened message shows a label for a diagram it cuts, and the whole message draws it", async (t) => {
+  const long = fenced(
+    `${FLOW}\n${Array.from({ length: 40 }, (_, n) => `  C --> E${n}[Extra step ${n}]`).join("\n")}`,
+    "A long plan follows.",
+  );
+  assert.ok(long.length > 480);
+  const { ui } = await diagramRoom(t, [long]);
+  const row = ui.page.locator('main [data-message-id="d1"]');
+  const label = row.locator(".body .md-diagram");
+  await label.waitFor();
+  assert.equal(await label.textContent(), "Diagram");
+  assert.equal(await row.locator(".diagram").count(), 0);
+  assert.ok(
+    !(await row.locator(".body").textContent()).includes("flowchart"),
+    "half a diagram's source is not shown",
+  );
+  await row.getByRole("button", { name: "Show more" }).click();
+  await pictureOf(row.locator(".diagram"));
+  assert.equal(await label.count(), 0);
+});
+
+test("DIAGRAMS: an agent's answer shows as the word Diagram in the reply preview and fits the thread pane as a drawing", async (t) => {
+  const value = replyRows();
+  value.frame.messages[1].body.text = fenced(chain(2), "Here is the plan.");
+  const ui = await open(t, (client) => replay(client, [value]), undefined, {
+    inlineStyles: true,
+  });
+  await ui.live();
+  const preview = ui.page.locator(
+    '.timeline [data-message-id="parent"] .reply-preview',
+  );
+  await preview.locator(".md-diagram").waitFor();
+  assert.equal(await preview.locator(".md-diagram").textContent(), "Diagram");
+  assert.ok(
+    !(await preview.textContent()).includes("flowchart"),
+    "the preview holds none of the diagram's source",
+  );
+  assert.equal(await ui.page.locator(".timeline .diagram").count(), 0);
+
+  await preview.click();
+  const pane = ui.page.locator("aside.thread");
+  const diagram = pane.locator('[data-message-id="answer"] .diagram');
+  const image = await pictureOf(diagram);
+  assert.ok((await drawn(image)) > 50);
+  const fit = await fitOf(diagram.locator(".diagram-box"));
+  assert.ok(
+    fit.naturalWidth > fit.box,
+    `the diagram is wider than the thread column: ${fit.naturalWidth} > ${fit.box}`,
+  );
+  assertFits(fit, "in the thread pane");
+  const sizes = await pane.evaluate((thread) => ({
+    pane: thread.clientWidth,
+    content: thread.scrollWidth,
+  }));
+  assert.ok(
+    sizes.content <= sizes.pane,
+    "the thread pane does not scroll sideways",
+  );
+  await diagramShots(ui, "thread-fitted");
+});
+
+test("DIAGRAMS: a diagram too wide to read when fitted keeps a readable size and scrolls sideways inside its box, never the page", async (t) => {
+  const value = replyRows();
+  value.frame.messages[1].body.text = fenced(
+    REVIEW_FLOW,
+    "A pull request is opened, checked, reviewed, then merged.",
+  );
+  const ui = await open(t, (client) => replay(client, [value]), undefined, {
+    inlineStyles: true,
+  });
+  await ui.live();
+  await ui.page
+    .locator('.timeline [data-message-id="parent"] .reply-preview')
+    .click();
+  const pane = ui.page.locator("aside.thread");
+  const diagram = pane.locator('[data-message-id="answer"] .diagram');
+  const box = diagram.locator(".diagram-box");
+  await pictureOf(diagram);
+  for (const [width, what, shot] of [
+    [1280, "in the thread pane", "thread"],
+    [390, "at 390 px", "phone"],
+  ]) {
+    await ui.page.setViewportSize({ width, height: 800 });
+    const fit = await fitOf(box);
+    assert.ok(
+      fit.naturalWidth * SMALLEST_SCALE > fit.box,
+      `${what}: fitted, the diagram would be too small to read: ${fit.naturalWidth} in ${fit.box}`,
+    );
+    assertReadable(fit, what);
+    assert.ok(
+      fit.height >= 120,
+      `${what}: it is tall enough to read: ${fit.height}`,
+    );
+    const sizes = await pane.evaluate((thread) => ({
+      pane: thread.clientWidth,
+      content: thread.scrollWidth,
+    }));
+    assert.ok(
+      sizes.content <= sizes.pane,
+      `${what}: the thread pane does not scroll sideways`,
+    );
+    await diagramShots(ui, shot);
+    const end = await box.evaluate((element) => {
+      element.scrollLeft = element.scrollWidth;
+      const shown = element.querySelector("img").getBoundingClientRect();
+      const frame = element.getBoundingClientRect();
+      const reached = {
+        scrolled: element.scrollLeft,
+        inside: shown.right <= frame.right + 0.5,
+        page: document.scrollingElement.scrollLeft,
+      };
+      element.scrollLeft = 0;
+      return reached;
+    });
+    assert.ok(end.scrolled > 0, `${what}: the box scrolls`);
+    assert.ok(end.inside, `${what}: scrolling it shows the picture's far end`);
+    assert.equal(end.page, 0, `${what}: the page stays where it was`);
+  }
+
+  await diagram.locator(".diagram-view").focus();
+  await ui.page.keyboard.press("ArrowRight");
+  await eventually(
+    () => box.evaluate((element) => element.scrollLeft > 0),
+    "the arrow keys scroll the box from the keyboard",
+  );
+  const full = diagram.locator("dialog.diagram-full");
+  await diagram
+    .getByRole("button", { name: "Open the diagram full size" })
+    .click();
+  await eventually(() => full.evaluate((dialog) => dialog.open), "full size");
+  const image = full.locator("img");
+  assert.equal(
+    await image.evaluate((element) => element.getBoundingClientRect().width),
+    await image.evaluate((element) => element.naturalWidth),
+    "a tap still opens it full size",
+  );
+});
+const newChannelButton = (ui) =>
+  ui.page.getByRole("button", { name: "New channel", exact: true });
+const newChannelForm = (ui) =>
+  ui.page.getByRole("form", { name: "New channel" });
+const addAgentButton = (ui) =>
+  ui.page.locator(".member-row").getByRole("button", { name: "Add agent" });
+const addAgentForm = (ui) => ui.page.getByRole("form", { name: "Add agent" });
+const activeIs = (locator) =>
+  locator.evaluate((element) => element === document.activeElement);
+const fitsWidth = (page) =>
+  page.evaluate(() => document.documentElement.scrollWidth <= innerWidth);
+const createPosts = (ui, path) =>
+  ui.posts.creates.filter((request) => request.path === path);
+const HERDR_DOWN =
+  "Herdr isn't reachable. Check that Herdr is running, then try again.";
+function refusal(status, error) {
+  return () => ({ status, body: { error } });
+}
+
+test("CREATE: + opens the New channel form in place with focus on Name, and Escape or Cancel closes it with focus back on +", async (t) => {
+  const ui = await open(t, (client) => replay(client, [frame(1, "alpha")]));
+  await ui.live();
+  const plus = newChannelButton(ui);
+  assert.equal(await plus.getAttribute("aria-expanded"), "false");
+  await plus.click();
+  const form = newChannelForm(ui);
+  await form.waitFor();
+  assert.equal(await plus.getAttribute("aria-expanded"), "true");
+  assert.equal(
+    await ui.page.locator(".sidebar .channels-section form").count(),
+    1,
+    "the form sits in the Channels section",
+  );
+  assert.equal(
+    await ui.channels.getByRole("button").count(),
+    1,
+    "the Channel list holds only channel rows",
+  );
+  assert.ok(await activeIs(form.getByLabel("Name", { exact: true })));
+  await form.getByLabel("Name", { exact: true }).fill("half typed");
+  await ui.page.keyboard.press("Escape");
+  await form.waitFor({ state: "detached" });
+  assert.ok(await activeIs(plus));
+  await plus.press("Enter");
+  await form.waitFor();
+  assert.equal(
+    await form.getByLabel("Name", { exact: true }).inputValue(),
+    "",
+    "a reopened form starts empty",
+  );
+  await form.getByRole("button", { name: "Cancel" }).click();
+  await form.waitFor({ state: "detached" });
+  assert.ok(await activeIs(plus));
+  assert.equal(createPosts(ui, `/w/${key(1)}/channels`).length, 0);
+});
+
+test("CREATE: a recent folder fills the field, Create posts to the channel in view, and the new channel opens once it reaches the index", async (t) => {
+  let sse;
+  const ui = await open(
+    t,
+    (client) => {
+      sse = client;
+      replay(client, [frame(1, "alpha"), frame(2, "beta")]);
+    },
+    () => [],
+    {
+      onFolders: () => ({
+        status: 200,
+        body: {
+          folders: [
+            "/home/person/projects/namedrop",
+            "/home/person/.herdr/worktrees/namedrop/a-very-long-worktree-name-here",
+          ],
+        },
+      }),
+      onCreateChannel: () => ({
+        status: 201,
+        body: { key: key(7), workspace_id: "w7", label: "Proto Chan" },
+      }),
+    },
+  );
+  await ui.live();
+  await ui.row(2).click();
+  await newChannelButton(ui).click();
+  const form = newChannelForm(ui);
+  const recent = form.getByRole("list", { name: "Recent folders" });
+  await recent.getByRole("button").first().waitFor();
+  assert.deepEqual(ui.folderRequests, [key(2)]);
+  await recent
+    .getByRole("button", { name: "/home/person/projects/namedrop" })
+    .click();
+  assert.equal(
+    await form.getByLabel("Folder", { exact: true }).inputValue(),
+    "/home/person/projects/namedrop",
+  );
+  const long = recent.getByRole("button").nth(1);
+  assert.ok(
+    await long.evaluate(
+      (element) =>
+        element.scrollWidth > element.clientWidth &&
+        getComputedStyle(element).direction === "rtl",
+    ),
+    "a long path is cut on the left, so its last folder stays in view",
+  );
+  await form.getByLabel("Name", { exact: true }).fill("Proto Chan");
+  await form.getByLabel("Name", { exact: true }).press("Enter");
+  await form.waitFor({ state: "detached" });
+  const [posted] = createPosts(ui, `/w/${key(2)}/channels`);
+  assert.deepEqual(posted.body, {
+    name: "Proto Chan",
+    folder: "/home/person/projects/namedrop",
+  });
+  assert.equal(posted.type, "application/json");
+  assert.equal(posted.csrf, ui.posts.session.csrf);
+  assert.equal(await ui.row(2).getAttribute("aria-current"), "page");
+  sse.send("space", frame(7, "Proto Chan"));
+  await eventually(
+    async () => (await ui.row(7).getAttribute("aria-current")) === "page",
+    "the new channel is selected",
+  );
+  assert.equal(
+    await ui.page.locator("main h1").first().textContent(),
+    "Proto Chan",
+  );
+  assert.ok(await activeIs(ui.row(7)), "focus lands on the new row");
+  assert.match(ui.page.url(), new RegExp(`/w/${key(7)}$`));
+});
+
+test("CREATE: the page's own checks block the POST with the server's sentences, and the form keeps what was typed", async (t) => {
+  const ui = await open(t, (client) => replay(client, [frame(1, "alpha")]));
+  await ui.live();
+  await newChannelButton(ui).click();
+  const form = newChannelForm(ui);
+  const alert = form.getByRole("alert");
+  await form.getByRole("button", { name: "Create" }).click();
+  assert.equal(await alert.textContent(), "Give the channel a name.");
+  await form.getByLabel("Name", { exact: true }).fill("all");
+  assert.equal(await alert.count(), 0, "editing clears the old message");
+  await form.getByLabel("Folder", { exact: true }).fill("/srv");
+  await form.getByLabel("Folder", { exact: true }).press("Enter");
+  assert.equal(
+    await alert.textContent(),
+    'A channel name needs a letter or a digit, and it can\'t be "all".',
+  );
+  await form.getByLabel("Name", { exact: true }).fill("web");
+  await form.getByLabel("Folder", { exact: true }).fill("projects/web");
+  await form.getByLabel("Folder", { exact: true }).press("Enter");
+  assert.equal(
+    await alert.textContent(),
+    "Type the folder's full path, starting with / or ~.",
+  );
+  assert.equal(
+    await form.getByLabel("Name", { exact: true }).inputValue(),
+    "web",
+  );
+  assert.equal(ui.posts.creates.length, 0, "nothing reached the server");
+});
+
+test("CREATE: each server refusal reads inside the New channel form, the button is busy while waiting, and two 403s read as an expired session", async (t) => {
+  const answers = [
+    refusal(
+      409,
+      "Another channel is already named #proto-chan. Pick a different name.",
+    ),
+    refusal(400, "That folder doesn't exist. Namedrop never creates folders."),
+    refusal(503, HERDR_DOWN),
+  ];
+  let release;
+  const held = new Promise((resolve) => {
+    release = resolve;
+  });
+  const ui = await open(
+    t,
+    (client) => replay(client, [frame(1, "alpha")]),
+    undefined,
+    {
+      onCreateChannel: async () => {
+        const next = answers.shift();
+        if (next) return next();
+        await held;
+        return refusal(503, HERDR_DOWN)();
+      },
+    },
+  );
+  await ui.live();
+  await newChannelButton(ui).click();
+  const form = newChannelForm(ui);
+  const alert = form.getByRole("alert");
+  await form.getByLabel("Name", { exact: true }).fill("Proto Chan");
+  await form.getByLabel("Folder", { exact: true }).fill("~/missing");
+  for (const sentence of [
+    "Another channel is already named #proto-chan. Pick a different name.",
+    "That folder doesn't exist. Namedrop never creates folders.",
+    HERDR_DOWN,
+  ]) {
+    await form.getByRole("button", { name: "Create" }).click();
+    await eventually(
+      async () =>
+        (await alert.count()) === 1 && (await alert.textContent()) === sentence,
+      sentence,
+    );
+  }
+  await form.getByRole("button", { name: "Create" }).click();
+  const busy = form.getByRole("button", { name: "Creating…" });
+  await busy.waitFor();
+  assert.equal(await busy.getAttribute("aria-disabled"), "true");
+  await busy.click({ force: true });
+  release();
+  await alert.waitFor();
+  assert.equal(await alert.textContent(), HERDR_DOWN);
+  assert.equal(
+    createPosts(ui, `/w/${key(1)}/channels`).length,
+    4,
+    "a press while waiting sends nothing",
+  );
+  assert.equal(
+    await form.getByLabel("Name", { exact: true }).inputValue(),
+    "Proto Chan",
+  );
+  assert.equal(
+    await form.getByLabel("Folder", { exact: true }).inputValue(),
+    "~/missing",
+  );
+  answers.push(
+    () => ({ status: 403, body: {} }),
+    () => ({ status: 403, body: {} }),
+  );
+  await form.getByRole("button", { name: "Create" }).click();
+  await eventually(
+    async () =>
+      (await alert.textContent()) ===
+      "Your session expired. Reload the page to keep posting.",
+    "the expired session",
+  );
+  const refused = createPosts(ui, `/w/${key(1)}/channels`).slice(-2);
+  assert.deepEqual(
+    refused.map((request) => request.status),
+    [403, 403],
+    "the page retries once with a fresh token, then gives up",
+  );
+});
+
+test("CREATE: with no channel known, + is disabled and says to activate Namedrop first", async (t) => {
+  const ui = await open(t, (client) => replay(client, []));
+  await ui.live();
+  const plus = newChannelButton(ui);
+  assert.equal(await plus.getAttribute("aria-disabled"), "true");
+  assert.equal(
+    await plus.getAttribute("title"),
+    "Activate Namedrop in one Herdr workspace first.",
+  );
+  assert.equal(
+    await plus.evaluate(
+      (element) =>
+        document.getElementById(element.getAttribute("aria-describedby"))
+          ?.textContent,
+    ),
+    "Activate Namedrop in one Herdr workspace first.",
+  );
+  await plus.click({ force: true });
+  assert.equal(await newChannelForm(ui).count(), 0);
+  assert.equal(ui.folderRequests.length, 0);
+});
+
+function agentRoom(state = "active") {
+  const value = frame(1, "alpha");
+  value.frame.space.state = state;
+  if (state === "paused") value.frame.health = { level: "paused" };
+  return value;
+}
+
+test("ADD AGENT: the members row ends in Add agent, which opens the form in place; Escape and Cancel close it with focus back on the button", async (t) => {
+  const ui = await open(t, (client) => replay(client, [agentRoom()]));
+  await ui.live();
+  const button = addAgentButton(ui);
+  await button.click();
+  const form = addAgentForm(ui);
+  await form.waitFor();
+  assert.equal(await button.getAttribute("aria-expanded"), "true");
+  const kinds = form.getByRole("group", { name: "Kind" });
+  assert.deepEqual(
+    await kinds
+      .getByRole("radio")
+      .evaluateAll((radios) =>
+        radios.map(
+          (radio) => `${radio.labels[0].textContent}:${radio.checked}`,
+        ),
+      ),
+    ["Claude Code:true", "Codex:false", "Terminal:false"],
+  );
+  assert.ok(await activeIs(form.getByLabel("Name", { exact: true })));
+  await ui.page.keyboard.press("Escape");
+  await form.waitFor({ state: "detached" });
+  assert.ok(await activeIs(button));
+  await button.click();
+  await form.getByRole("button", { name: "Cancel" }).click();
+  await form.waitFor({ state: "detached" });
+  assert.ok(await activeIs(button));
+});
+
+test("ADD AGENT: Add posts the kind, bare name and persona, the form closes, and the agent arrives through the event stream", async (t) => {
+  let sse;
+  const ui = await open(
+    t,
+    (client) => {
+      sse = client;
+      replay(client, [agentRoom()]);
+    },
+    () => [],
+    {
+      onAddAgent: () => ({
+        status: 201,
+        body: { address_id: "pane-address-new", alias: "reviewer" },
+      }),
+      onFolder: (asked) => ({
+        status: 200,
+        body: {
+          folder:
+            asked === key(1) ? "/home/person/projects/a-long-name/alpha" : null,
+        },
+      }),
+    },
+  );
+  await ui.live();
+  await addAgentButton(ui).click();
+  const form = addAgentForm(ui);
+  const opensIn = form.locator(".create-opens-in");
+  await opensIn.waitFor();
+  assert.equal(
+    (await opensIn.innerText()).replace(/\s+/g, " "),
+    "Opens in /home/person/projects/a-long-name/alpha",
+    "the form says where the agent will open",
+  );
+  assert.equal(
+    await opensIn.locator(".create-folder").getAttribute("title"),
+    "/home/person/projects/a-long-name/alpha",
+  );
+  await form.getByRole("radio", { name: "Codex" }).check();
+  await form.getByLabel("Name", { exact: true }).fill("@reviewer");
+  assert.equal(
+    await form.getByLabel("Name", { exact: true }).inputValue(),
+    "reviewer",
+    "a typed @ stays outside the field, which already shows one",
+  );
+  await form.getByLabel("Persona").fill("  Reviews changes  ");
+  await form.getByLabel("Persona").press("Enter");
+  await form.waitFor({ state: "detached" });
+  assert.ok(await activeIs(addAgentButton(ui)));
+  const [posted] = createPosts(ui, `/w/${key(1)}/agents`);
+  assert.deepEqual(posted.body, {
+    kind: "codex",
+    name: "reviewer",
+    persona: "Reviews changes",
+  });
+  assert.equal(posted.csrf, ui.posts.session.csrf);
+  const arrived = agentRoom();
+  arrived.frame.participants.push({
+    ...arrived.frame.participants[0],
+    address_id: "pane-address-new",
+    alias: "@reviewer",
+    kind: { type: "agent", runtime: "codex" },
+    activity: "idle",
+  });
+  sse.send("space", arrived);
+  await ui.page
+    .locator('.members li[data-address-id="pane-address-new"]')
+    .waitFor();
+  await addAgentButton(ui).click();
+  await form.getByRole("radio", { name: "Terminal" }).check();
+  await form.getByLabel("Name", { exact: true }).fill("shell");
+  await form.getByRole("button", { name: "Add" }).click();
+  await form.waitFor({ state: "detached" });
+  assert.deepEqual(createPosts(ui, `/w/${key(1)}/agents`)[1].body, {
+    kind: "terminal",
+    name: "shell",
+    persona: null,
+  });
+});
+
+test("ADD AGENT: the name is checked as it's typed and blocks the POST, and server refusals read inside the form", async (t) => {
+  const answers = [
+    refusal(
+      409,
+      "@helper is already in use in this channel. Pick a different name.",
+    ),
+    refusal(503, HERDR_DOWN),
+  ];
+  const ui = await open(
+    t,
+    (client) => replay(client, [agentRoom()]),
+    undefined,
+    {
+      onAddAgent: () => answers.shift()(),
+    },
+  );
+  await ui.live();
+  await addAgentButton(ui).click();
+  const form = addAgentForm(ui);
+  const name = form.getByLabel("Name", { exact: true });
+  const alert = form.getByRole("alert");
+  await name.fill("code-");
+  assert.equal(await alert.count(), 0, "a name on its way is not wrong yet");
+  await name.press("Enter");
+  assert.equal(
+    await alert.textContent(),
+    "A name uses lowercase letters, digits and single hyphens, like code-reviewer.",
+  );
+  await name.fill("Code");
+  assert.equal(
+    await alert.textContent(),
+    "A name uses lowercase letters, digits and single hyphens, like code-reviewer.",
+  );
+  assert.equal(await name.getAttribute("aria-invalid"), "true");
+  await name.fill("codex");
+  assert.equal(
+    await alert.textContent(),
+    "@codex is already in use in this channel. Pick a different name.",
+  );
+  await form.getByRole("button", { name: "Add" }).click();
+  await form.getByLabel("Persona").fill("x".repeat(1_001));
+  await name.fill("helper");
+  await form.getByRole("button", { name: "Add" }).click();
+  assert.equal(
+    await alert.textContent(),
+    "A persona can be up to 1,000 characters.",
+  );
+  assert.equal(ui.posts.creates.length, 0, "nothing reached the server");
+  await form.getByLabel("Persona").fill("");
+  for (const sentence of [
+    "@helper is already in use in this channel. Pick a different name.",
+    HERDR_DOWN,
+  ]) {
+    await form.getByRole("button", { name: "Add" }).click();
+    await eventually(
+      async () =>
+        (await alert.count()) === 1 && (await alert.textContent()) === sentence,
+      sentence,
+    );
+  }
+  assert.equal(await name.inputValue(), "helper");
+});
+
+test("ADD AGENT: a paused or inactive channel shows no Add agent, and one that pauses closes the open form", async (t) => {
+  let sse;
+  const ui = await open(t, (client) => {
+    sse = client;
+    replay(client, [agentRoom()]);
+  });
+  await ui.live();
+  await addAgentButton(ui).click();
+  await addAgentForm(ui).waitFor();
+  sse.send("space", agentRoom("paused"));
+  await addAgentForm(ui).waitFor({ state: "detached" });
+  assert.equal(await addAgentButton(ui).count(), 0);
+  sse.send("space", agentRoom("not_activated"));
+  await ui.page.locator(".members").waitFor();
+  assert.equal(await addAgentButton(ui).count(), 0);
+  const empty = agentRoom();
+  empty.frame.participants = [];
+  sse.send("space", empty);
+  await ui.page.getByText("No members yet").waitFor();
+  await addAgentButton(ui).waitFor();
+});
+
+test("ADD AGENT: a new agent that hasn't connected shows a needs-you card that names it and opens its pane", async (t) => {
+  const value = frame(1, "alpha", "needs_you");
+  value.frame.participants[0].activity = "idle";
+  value.frame.attention = [
+    {
+      attention_id: `agent-start-${CODEX}`,
+      source_id: CODEX,
+      source_kind: "agent_start",
+      summary: {
+        text: "Send @codex its first message in its pane",
+        truncated: false,
+      },
+      subject_alias: "codex",
+      opened_at_ms: Date.now() - 30_000,
+      response: { kind: "pane", address_id: CODEX },
+    },
+  ];
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.live();
+  const card = ui.page.getByRole("region", { name: "Attention needed" });
+  await card.getByText("Send @codex its first message in its pane").waitFor();
+  await card
+    .getByText(
+      "Open its pane. It may first ask you to trust the folder or to log in.",
+    )
+    .waitFor();
+  await card.getByRole("button", { name: "See @codex's screen" }).click();
+  await drawer(ui).waitFor();
+  assert.equal(
+    await ui.page
+      .getByRole("navigation", { name: "Needs you" })
+      .locator(".row-reason")
+      .textContent(),
+    "Send @codex its first message in its pane",
+  );
+});
+
+test("CREATE and ADD AGENT at 390x844: the New channel form works inside the drawer, Escape cancels it before the drawer, and both forms fit with 16px fields and 44px targets", async (t) => {
+  const ui = await open(
+    t,
+    (client) => replay(client, [agentRoom()]),
+    undefined,
+    {
+      onFolders: () => ({
+        status: 200,
+        body: {
+          folders: [
+            "/home/person/.herdr/worktrees/namedrop/a-very-long-worktree-name-here",
+          ],
+        },
+      }),
+      onCreateChannel: refusal(503, HERDR_DOWN),
+    },
+  );
+  await ui.page.setViewportSize({ width: 390, height: 844 });
+  await ui.live();
+  await ui.page.locator(".channels-toggle").click();
+  const drawerPanel = ui.page.getByRole("dialog", { name: "Channels" });
+  await drawerPanel.waitFor();
+  const plus = drawerPanel.getByRole("button", { name: "New channel" });
+  await plus.click();
+  const form = newChannelForm(ui);
+  await form.waitFor();
+  assert.ok(
+    await drawerPanel.locator("form").count(),
+    "the form is in the drawer",
+  );
+  const sizes = async (locator) =>
+    locator.evaluateAll((elements) =>
+      elements.map((element) => {
+        const box = element.getBoundingClientRect();
+        return {
+          height: Math.round(box.height),
+          width: Math.round(box.width),
+          font: Number.parseFloat(getComputedStyle(element).fontSize),
+          right: Math.round(box.right),
+        };
+      }),
+    );
+  for (const field of await sizes(form.locator("input")))
+    assert.ok(field.font >= 16 && field.height >= 44, JSON.stringify(field));
+  for (const target of await sizes(form.getByRole("button")))
+    assert.ok(
+      target.height >= 44 && target.right <= 390,
+      JSON.stringify(target),
+    );
+  const [plusBox] = await sizes(plus);
+  assert.ok(
+    plusBox.height >= 44 && plusBox.width >= 44,
+    JSON.stringify(plusBox),
+  );
+  const nameBox = await form.getByLabel("Name", { exact: true }).boundingBox();
+  assert.ok(
+    nameBox.y + nameBox.height < 844 / 2,
+    `the Name field sits high, at ${nameBox.y}`,
+  );
+  await form.getByLabel("Name", { exact: true }).fill("web");
+  await form.getByLabel("Folder", { exact: true }).fill("/srv/web");
+  await form.getByRole("button", { name: "Create" }).click();
+  await form.getByRole("alert").getByText(HERDR_DOWN).waitFor();
+  assert.ok(
+    await fitsWidth(ui.page),
+    "no horizontal scroll with the New channel form open",
+  );
+  await form.getByLabel("Name", { exact: true }).focus();
+  await ui.page.keyboard.press("Escape");
+  await form.waitFor({ state: "detached" });
+  assert.ok(await drawerPanel.isVisible(), "the drawer stays open");
+  assert.ok(await activeIs(plus));
+  await ui.page.keyboard.press("Escape");
+  await drawerPanel.waitFor({ state: "hidden" });
+
+  await addAgentButton(ui).click();
+  const add = addAgentForm(ui);
+  await add.waitFor();
+  for (const field of await sizes(add.locator('input[type="text"]')))
+    assert.ok(field.font >= 16 && field.height >= 44, JSON.stringify(field));
+  for (const target of await sizes(add.locator(".create-kind, button")))
+    assert.ok(
+      target.height >= 44 && target.right <= 390,
+      JSON.stringify(target),
+    );
+  const hit = await addAgentButton(ui).evaluate((element) => {
+    const after = getComputedStyle(element, "::after");
+    const box = element.getBoundingClientRect();
+    return {
+      height: box.height - 2 * Number.parseFloat(after.top),
+      width: box.width - 2 * Number.parseFloat(after.left),
+    };
+  });
+  assert.ok(
+    hit.height >= 44 && hit.width >= 44,
+    `Add agent's touch area is ${JSON.stringify(hit)}`,
+  );
+  await add.getByLabel("Name", { exact: true }).fill("Bad Name");
+  await add.getByRole("alert").waitFor();
+  assert.ok(
+    await fitsWidth(ui.page),
+    "no horizontal scroll with the Add agent form open",
   );
 });

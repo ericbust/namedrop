@@ -1,4 +1,6 @@
+import type { AddedAgent, CreatedChannel } from "./create.ts";
 import type { DirectHistory, DirectPeer } from "./direct-messages.ts";
+import { type AttachedImage, isImageName, splitImages } from "./images.ts";
 import type {
   Activity,
   AddressId,
@@ -260,6 +262,7 @@ function attention(
     case "coordination":
     case "agent_status":
     case "terminal_relay":
+    case "agent_start":
       source = kind;
       break;
     default:
@@ -280,6 +283,7 @@ function attention(
     rowKey:
       optionalIdentity(item.attention_id) ??
       JSON.stringify([fingerprint, occurrence]),
+    attentionId: optionalIdentity(item.attention_id),
     sourceId: optionalIdentity(item.source_id),
     coordinationId: optionalIdentity(item.coordination_id),
     conversation: anchor,
@@ -547,6 +551,13 @@ function aliases(value: unknown): readonly Alias[] {
   }
   return found.size === 0 ? noAliases : [...found];
 }
+const noImages: readonly string[] = [];
+// A name that is not a stored image's is dropped, so it never drops the frame.
+function imageNames(value: unknown): readonly string[] {
+  if (!Array.isArray(value)) return noImages;
+  const names = value.filter(isImageName);
+  return names.length === 0 ? noImages : names;
+}
 function message(value: unknown): Message {
   const item = record(value);
   return {
@@ -558,6 +569,7 @@ function message(value: unknown): Message {
     kind: messageKind(item.kind),
     progressNote: item.progress_note === true,
     body: safeText(item.body),
+    images: imageNames(item.images),
     legs: array(item.legs).map((raw) => {
       const leg = record(raw);
       return { to: addressId(leg.to), stage: deliveryStage(leg.stage) };
@@ -764,6 +776,45 @@ export function parseFullBody(raw: unknown, messageId: string): SafeText {
   if (identity(body.message_id) !== messageId)
     throw new Error("Full body does not match the message");
   return safeText(body.body);
+}
+// The server's answer to an upload: the stored name and the line for it.
+export function parseImageUpload(raw: unknown): AttachedImage {
+  const item = record(raw);
+  const { text: rest, images } = splitImages(text(item.line));
+  const image = images[0];
+  if (
+    image === undefined ||
+    rest !== "" ||
+    images.length !== 1 ||
+    image.name !== item.name
+  )
+    throw new Error("Upload answer does not name one stored image");
+  return image;
+}
+export function parseFolders(raw: unknown): readonly string[] {
+  return array(record(raw).folders).filter(
+    (folder): folder is string => typeof folder === "string" && folder !== "",
+  );
+}
+// A channel whose folder isn't known answers null.
+export function parseChannelFolder(raw: unknown): string | null {
+  const folder = record(raw).folder;
+  return typeof folder === "string" && folder !== "" ? folder : null;
+}
+export function parseCreatedChannel(raw: unknown): CreatedChannel {
+  const item = record(raw);
+  return {
+    key: spaceKey(item.key),
+    workspaceId: identity(item.workspace_id),
+    label: text(item.label),
+  };
+}
+export function parseAddedAgent(raw: unknown): AddedAgent {
+  const item = record(raw);
+  return {
+    addressId: addressId(item.address_id),
+    alias: identity(item.alias).replace(/^@/, ""),
+  };
 }
 export function parseSessionToken(raw: unknown): string {
   return identity(record(raw).csrf_token);

@@ -41,14 +41,16 @@ const source = [
   "pub(super) fn get(path: &str) -> Option<&'static [u8]> {",
   "    match path {",
   ...names.flatMap((name) => {
-    const arm = `${JSON.stringify(`/${name}`)} => Some(include_bytes!(${JSON.stringify(`channels/${name}`)}).as_slice()),`;
-    return arm.length <= 92
-      ? [`        ${arm}`]
-      : [
-          `        ${JSON.stringify(`/${name}`)} => {`,
-          `            Some(include_bytes!(${JSON.stringify(`channels/${name}`)}).as_slice())`,
-          "        }",
-        ];
+    // The three shapes rustfmt gives an arm as its file name grows, so the
+    // generated table passes `cargo fmt --check` as written.
+    const path = JSON.stringify(`/${name}`);
+    const bytes = `include_bytes!(${JSON.stringify(`channels/${name}`)}).as_slice()`;
+    const arm = `${path} => Some(${bytes}),`;
+    if (arm.length <= 92) return [`        ${arm}`];
+    const body = `            Some(${bytes})`;
+    return body.length <= 100
+      ? [`        ${path} => {`, body, "        }"]
+      : [`        ${path} => Some(`, `            ${bytes},`, "        ),"];
   }),
   "        _ => None,",
   "    }",

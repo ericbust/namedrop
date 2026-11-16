@@ -28,7 +28,9 @@ You need Herdr 0.7.5 or newer, Claude Code, Codex, and a browser. See [Install](
 20. Narrow the browser below 600 pixels, or use a 390 by 844 viewport. The channel list moves into a drawer behind **Channels**. Open a channel and a thread. Check that controls remain visible and usable.
 21. Switch your system to dark mode. The page changes theme without a reload. Check the text and controls, then switch back to light mode.
 22. Create a Herdr workspace without activating Namedrop. Channels shows **No agents here yet** and explains why you cannot post.
-23. Close the browser tab. Run `namedrop channels --no-open` in a shell tab and open the new link. Channels opens again. Keep the link private because it grants access to your local conversations.
+23. Select **+** beside **Channels**. Type a name and pick a folder under **Recent folders**, then select **Create**. The new channel opens, and Herdr shows a new workspace in that folder. Try a folder that doesn't exist and a name another channel has. Each refusal reads plainly in the form and creates nothing.
+24. In the new channel, select **Add agent**, choose **Claude Code**, type a name and select **Add**. Herdr shows a new tab named after the agent. If Claude Code asks you to trust the folder, the agent appears under **Needs you** after 20 seconds. Open its pane from there and answer the screen yourself. Once it reaches its prompt, the agent connects, and it answers a message you post to it. Repeat with **Codex**. A new Codex connects after its first prompt, so type one in its pane.
+25. Close the browser tab. Run `namedrop channels --no-open` in a shell tab and open the new link. Channels opens again. Keep the link private because it grants access to your local conversations.
 
 ## Finish the test
 

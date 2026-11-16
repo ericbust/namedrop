@@ -800,7 +800,7 @@ pub(super) mod tests {
         let of = |messages: &[crate::store::dashboard::MessageRow],
                   legs: &[crate::store::dashboard::LegRow]| {
             let request = messages.iter().find(|m| m.message_id == "request").unwrap();
-            serde_json::to_value(crate::dashboard::snapshot::message(request, legs)).unwrap()
+            serde_json::to_value(crate::dashboard::snapshot::message(request, legs, None)).unwrap()
                 ["legs"][0]["stage"]
                 .clone()
         };

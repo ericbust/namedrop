@@ -366,9 +366,20 @@ namedrop channels --tailscale --no-open
 
 In a terminal, the command draws the one-time HTTPS link as a QR code and prints the link under it. Scan the code with your phone, or open the link on your other device. Namedrop configures `tailscale serve` and keeps the Channels server on loopback. It chooses another HTTPS port if 443 is already in use and leaves other Serve handlers alone. Your tailnet must have HTTPS enabled. Doctor reports the configured URL and any handler that no longer points at Channels.
 
-Only devices signed in as this machine's Tailscale owner can use this link. Channels checks the identity supplied by Serve on every request, then requires its usual browser session and CSRF checks. Shared-device users and tagged devices cannot sign in. This uses private Serve, never public Funnel. Local programs on the server remain trusted. **Type to agent** from your phone sends real input to the agent's pane.
+Only devices signed in as this machine's Tailscale owner can use this link. Channels checks the identity supplied by Serve on every request, then requires its usual browser session and CSRF checks. Shared-device users and tagged devices cannot sign in. This uses private Serve, never public Funnel. Local programs on the server remain trusted. **Type to agent** from your phone sends real input to the agent's pane. **+** and **Add agent** from your phone create real Herdr workspaces and start real agents on this machine.
 
 The browser keeps its tailnet sign-in cookie for seven days after you last opened or reconnected Channels, including across browser restarts. While Namedrop owns the Serve handler, Channels stays running without open tabs. If the browser loses its sign-in or the cookie expires, run `namedrop channels --tailscale --no-open` in the workspace on the Channels machine, then scan the new code or open the new HTTPS link on your device.
+
+While tailnet access is on, the Channels server never stops for having no tab open, so the link on your phone keeps working. It stops when you turn tailnet access off, and it restarts on the same port during an update. If the machine restarts or the server is killed, Herdr starts the server again when Herdr next starts, and when a pane opens, moves or closes. Devices that are signed in stay signed in. Until then the link fails, and `namedrop doctor` reports that the Channels server is not running. To start it yourself, run `namedrop channels --no-open`. If another program has taken the server's port meanwhile, Doctor names the port and says how to free it or move Channels. Herdr has to be running: after a restart with nobody logged in, the link stays down until you open Herdr.
+
+Without tailnet access, the server stops 10 minutes after the last tab closes. To change that, pass `--idle` with a number of minutes, or `never`:
+
+```sh
+namedrop channels --idle 60
+namedrop channels --idle never
+```
+
+The setting is saved in Namedrop's state directory and applies until you change it, across restarts and updates. It has no effect while tailnet access is on. `namedrop channels` prints the rule in force each time, and Doctor reports it when tailnet access is on or a setting is saved.
 
 To remove Namedrop's handler and disable tailnet access, run:
 
@@ -382,6 +393,8 @@ The ordinary `namedrop channels` command and Herdr action still open the local p
 
 ### What to try
 
+- Select **+** beside **Channels** to make a new channel. Give it a name and a working folder: type the folder's full path, or pick one of the folders your other workspaces use. Channels creates the Herdr workspace in that folder, activates Namedrop there and opens the channel. The folder must already exist. Namedrop never creates folders.
+- Select **Add agent** in a channel's member row to start Claude Code, Codex or a plain terminal. Give it a name and, if you like, a persona. Channels opens a new tab in that workspace, in the channel's folder, names the pane and runs plain `claude` or `codex` there, as you would by hand. The form shows the folder. It stays the channel's folder wherever you `cd` in its panes. If the agent stops at a first-run screen, such as trusting the folder or logging in, it shows under **Needs you** after 20 seconds. Open its pane from there and answer the screen yourself. Channels never answers it for you. A new Codex connects after its first prompt, so type one in its pane.
 - Post `@name` and a request in a channel, and watch the reply arrive. Replies stay in their thread. The channel shows the top message, reply count, and latest reply.
 - Open a thread with one agent and send a follow-up without `@`. With several agents, pick who receives it with `@name`. Channels keeps the reply unsent until you choose.
 - Post a note without a mention. It stays in the channel and wakes nobody. Embedded agent mentions go through the router described in [Examples](#examples).
@@ -390,6 +403,9 @@ The ordinary `namedrop channels` command and Herdr action still open the local p
 - Select an agent's name to open **Peek**. **Live** shows its terminal, keeps output that scrolls by while you watch, and offers **Expand**. **Text snapshot** gives you a sanitized text view with manual refresh.
 - Use **Type to agent** in Live Peek to submit a prompt or send keys such as Esc and Ctrl-C. This sends input to the real pane. Live Peek keeps streaming through the agent's reply. If Namedrop is typing into that pane at the same moment, for example to deliver a message, nothing is sent and your text stays in the box to send again. Watching, scrolling, and resizing Peek do not send input or resize that pane.
 - Type `/` or `$` in a message box or **Type to agent** to see skills for the addressed agent. Claude Code and Codex have separate lists.
+- Paste a screenshot into a message box, drop an image on it, or use the image button beside Send. The agent gets the image with your message and can open it. A message takes up to 4 images of up to 10 MB each.
+- Hear a sound when an agent messages you, in any open Channels tab. Pick a sound for each agent with the speaker button in its direct message header or its Peek panel, set the Default sound, or mute them all from **Sounds** in the sidebar.
+- Ask an agent for a diagram. A fenced code block tagged `mermaid` in any message is drawn as a diagram in the thread, in the page's light or dark colors. **Show source** and **Copy** sit under it, and a click or tap opens it full size.
 - See how many subagents an agent runs on its member chip and Peek header.
 - Ask for a reminder. Pending reminders in the thread or DM have **Cancel** buttons. One-time reminders show no repeat count.
 
@@ -399,7 +415,7 @@ An agent's final message is its answer to your Channels message. It appears in t
 
 Beta means the interface and workflows may still change. Status for Codex agents is limited compared with Claude Code. A name created before its session starts can look like an offline agent. A workspace where Namedrop was never activated shows **No agents here yet**.
 
-Channels listens on `127.0.0.1`. Use `--tailscale` to open it from your other devices. Any process running as your user that can open the page can post as you. Live Peek shows terminal content that can contain secrets. **Text snapshot** redacts recognized secrets, but redaction cannot catch every secret. See [Channels operations](docs/operations.md#channels) for authentication and server details.
+Channels listens on `127.0.0.1`. Use `--tailscale` to open it from your other devices. Any process running as your user that can open the page can post as you. It can also create channels and start agents, as you can from the page. Live Peek shows terminal content that can contain secrets. **Text snapshot** redacts recognized secrets, but redaction cannot catch every secret. See [Channels operations](docs/operations.md#channels) for authentication and server details.
 
 [Report a problem](https://github.com/ericbust/namedrop/issues) with your platform, Herdr and agent versions, steps to reproduce, and any errors. Remove credentials and private conversation text from screenshots and logs. The `experimental` branch remains available for trying upcoming features.
 

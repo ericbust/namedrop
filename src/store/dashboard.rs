@@ -16,8 +16,15 @@ fn public_sql(sql: &str) -> String {
 pub const MESSAGE_WINDOW: i64 = 150;
 pub const TERMINAL_RUN_WINDOW: i64 = 20;
 pub const COORDINATION_WINDOW: i64 = 20;
+/// How long Channels shows a stored warning as needing the person. One still
+/// open after a week is not something they will act on, so it stops being
+/// red. Doctor still reports it.
+pub const ATTENTION_SHOWN_FOR_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
 
 pub struct DashboardRows {
+    /// Where this state keeps the images sent from Channels. A message line
+    /// that names a file there is an image; with `None` every line is text.
+    pub image_directory: Option<std::path::PathBuf>,
     pub namespace: StateNamespace,
     pub worktree: Option<crate::WorktreeState>,
     /// Includes retired addresses, so old messages keep their author's lane.
@@ -34,6 +41,8 @@ pub struct DashboardRows {
     pub assignments: Vec<AssignmentRow>,
     pub terminal_runs: Vec<TerminalRunRow>,
     pub attention: Vec<AttentionRow>,
+    /// When the person last dismissed each attention item, by its id.
+    pub dismissals: HashMap<String, u64>,
     pub coordination_warnings: Vec<super::coordination_review::CoordinationWarning>,
     pub review_grants: Vec<super::coordination_review::OpenReviewGrant>,
     pub granted_clears: Vec<super::coordination_review::GrantedClear>,
@@ -322,7 +331,12 @@ impl StateStore {
         &mut self,
         namespace: &StateNamespace,
     ) -> Result<DashboardRows, StoreError> {
-        self.transaction(|transaction| transaction.dashboard_rows(namespace))
+        let mut rows = self.transaction(|transaction| transaction.dashboard_rows(namespace))?;
+        rows.image_directory = Some(
+            self.state_directory
+                .join(crate::dashboard::CHANNEL_IMAGES_DIRECTORY),
+        );
+        Ok(rows)
     }
 
     pub fn dashboard_spaces(&mut self) -> Result<Vec<SpaceRow>, StoreError> {
@@ -1329,6 +1343,7 @@ impl StateTransaction<'_> {
                 ))
         });
         let mut rows = DashboardRows {
+            image_directory: None,
             namespace: namespace.clone(),
             worktree: self.worktree_state(namespace)?,
             addresses,
@@ -1341,6 +1356,7 @@ impl StateTransaction<'_> {
             assignments,
             terminal_runs,
             attention,
+            dismissals: self.attention_dismissals(namespace)?,
             coordination_warnings: self.coordination_warnings(namespace)?,
             review_grants: self.open_review_grants(namespace)?,
             granted_clears: self.granted_clears(namespace)?,

@@ -6,10 +6,11 @@
 //! `namedrop::mux::fake::FakeMux` and a release build leaves it out.
 
 use super::{
-    AgentIdentity, AgentKind, AgentState, Allowance, Applied, Budget, Checkout, Depth, Effect,
-    Endpoint, Incarnation, InputKind, InputOutcome, Key, MuxAct, MuxConnector, MuxError, MuxInput,
-    MuxKind, MuxRead, PaneFacts, PaneId, PaneInput, PaneProcess, Recipient, Retry, Scope, Screen,
-    ScreenRequest, SessionClaim, SpaceView, Style, Survey, TabId, TerminalId, Wrap,
+    AgentIdentity, AgentKind, AgentState, Allowance, Applied, Budget, Checkout, Closing, Depth,
+    Effect, Endpoint, Incarnation, InputKind, InputOutcome, Key, MuxAct, MuxConnector, MuxError,
+    MuxInput, MuxKind, MuxRead, NewPane, NewSpace, NewTab, PaneFacts, PaneId, PaneInput,
+    PaneProcess, Recipient, Retry, Scope, Screen, ScreenRequest, SessionClaim, SpaceView, Style,
+    Survey, TabId, TerminalId, Wrap,
     gate::{self, ChannelError, RawChannel, StatusTap, TapChange},
 };
 use crate::{AgentRuntime, AgentSessionId, SpaceId, WorktreeId};
@@ -252,6 +253,9 @@ pub(crate) struct World {
     strict_reads: bool,
     /// `None` answers every survey.
     surveys: Option<Vec<(ScopeKind, Depth)>>,
+    /// How many spaces and tabs `open_space` and `open_tab` made, which
+    /// numbers the next one.
+    opened: u32,
 }
 
 fn gone(what: super::Gone, id: &str) -> MuxError {
@@ -271,6 +275,35 @@ impl World {
             .iter_mut()
             .flat_map(|space| &mut space.panes)
             .find(|candidate| &candidate.facts.id == pane)
+    }
+
+    /// A free terminal pane in `cwd`, alone in a new tab, numbered as the
+    /// world's next opening.
+    fn opened_pane(&mut self, space: &SpaceId, cwd: &str) -> (TabId, FakePane) {
+        self.opened += 1;
+        let tab = TabId::new(format!("opened-tab-{}", self.opened));
+        let id = format!("opened-pane-{}", self.opened);
+        let facts = PaneFacts {
+            id: PaneId::new(&id),
+            terminal: TerminalId::new(format!("terminal-{id}")),
+            tab: tab.clone(),
+            space: space.clone(),
+            cwd: Some(cwd.to_owned()),
+            title: None,
+            agent: None,
+            state: None,
+            idle_label: None,
+            viewport_rows: None,
+            reports_session: true,
+        };
+        let pane = FakePane {
+            facts,
+            screen: None,
+            screen_shape: None,
+            process: None,
+            hidden: false,
+        };
+        (tab, pane)
     }
 
     fn take_failure(&mut self, op: Op) -> Result<(), MuxError> {
@@ -1417,6 +1450,68 @@ impl MuxAct for FakeMux {
         }
         world.effects.push(effect.clone());
         Ok(applied)
+    }
+
+    /// An `Op::Apply` failure fails the next opening or closing as well.
+    fn open_space(&self, cwd: &str, label: &str) -> Result<NewSpace, MuxError> {
+        let mut world = self.lock();
+        world.take_failure(Op::Apply)?;
+        let space = SpaceId::new(format!("opened-space-{}", world.opened + 1));
+        let (_, pane) = world.opened_pane(&space, cwd);
+        let new = NewSpace {
+            space: space.clone(),
+            pane: NewPane {
+                id: pane.facts.id.clone(),
+                cwd: pane.facts.cwd.clone(),
+            },
+        };
+        let number = u32::try_from(world.spaces.len() + 1).ok();
+        world.spaces.push(FakeSpace {
+            id: space,
+            label: Some(label.to_owned()),
+            number,
+            checkout: None,
+            stamp: Stamp::Checkout,
+            listed: true,
+            panes: vec![pane],
+        });
+        Ok(new)
+    }
+
+    fn open_tab(&self, space: &SpaceId, cwd: &str, label: &str) -> Result<NewTab, MuxError> {
+        let mut world = self.lock();
+        world.take_failure(Op::Apply)?;
+        if !world.spaces.iter().any(|known| known.id == *space) {
+            return Err(gone(super::Gone::Space, space.as_str()));
+        }
+        let (tab, pane) = world.opened_pane(space, cwd);
+        let new = NewTab {
+            tab: tab.clone(),
+            pane: NewPane {
+                id: pane.facts.id.clone(),
+                cwd: pane.facts.cwd.clone(),
+            },
+        };
+        world.tab_labels.insert(tab, label.to_owned());
+        if let Some(known) = world.spaces.iter_mut().find(|known| known.id == *space) {
+            known.panes.push(pane);
+        }
+        Ok(new)
+    }
+
+    fn close(&self, closing: &Closing) -> Result<(), MuxError> {
+        let mut world = self.lock();
+        world.take_failure(Op::Apply)?;
+        match closing {
+            Closing::Space(space) => world.spaces.retain(|known| known.id != *space),
+            Closing::Tab(tab) => {
+                for space in &mut world.spaces {
+                    space.panes.retain(|pane| pane.facts.tab != *tab);
+                }
+                world.tab_labels.remove(tab);
+            }
+        }
+        Ok(())
     }
 }
 

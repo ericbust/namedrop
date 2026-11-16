@@ -208,14 +208,18 @@ test("control: posts a thread action with the session token and an empty body, s
   );
 });
 
-test("control: a dismiss posts the person's confirmation to the attempt", async () => {
+test("control: a dismiss posts the person's confirmation and the cards' ids", async () => {
   const server = fakeServer(({ url }) =>
     url === "/api/session" ? json(200, { csrf_token: "t" }) : json(200, {}),
   );
   assert.deepEqual(
     await createPoster(server.fetcher).control(
       key,
-      { kind: "attempt", attemptId: "attempt 1/a", action: "dismiss" },
+      {
+        kind: "attention",
+        ids: ["attention-agent-disposition-attempt 1/a", "agent-status-a1"],
+        action: "dismiss",
+      },
       press,
     ),
     { kind: "done" },
@@ -229,10 +233,13 @@ test("control: a dismiss posts the person's confirmation to the attempt", async 
     ]),
     [
       [
-        `/w/${key}/attempts/attempt%201%2Fa/dismiss`,
+        `/w/${key}/attention/dismiss`,
         "t",
         "application/json",
-        { confirmed: true },
+        {
+          confirmed: true,
+          ids: ["attention-agent-disposition-attempt 1/a", "agent-status-a1"],
+        },
       ],
     ],
   );
@@ -518,4 +525,203 @@ test("reminder Cancel sends the scoped id with CSRF and retries an expired token
       },
     ],
   );
+});
+
+test("uploadImage: posts the file's bytes with the session token, refreshes a stale token once, and says why an upload was refused", async () => {
+  const name = `${"a".repeat(64)}.png`;
+  const line = `Image: /state/channel-images/${name}`;
+  let token = "t1";
+  let answer: () => Response = () => json(200, { name, line });
+  const server = fakeServer(({ url, init }) => {
+    if (url === "/api/session") return json(200, { csrf_token: token });
+    const csrf = new Headers(init?.headers).get("X-Namedrop-Csrf");
+    return csrf === "t2"
+      ? answer()
+      : new Response("Forbidden.\n", { status: 403 });
+  });
+  const poster = createPoster(server.fetcher);
+  poster.prepare();
+  token = "t2";
+  const file = new Blob(["png bytes"], { type: "image/png" });
+  assert.deepEqual(await poster.uploadImage(file), {
+    kind: "stored",
+    image: { name, line },
+  });
+  const uploads = server.seen.filter(
+    (exchange) => exchange.url === "/api/images",
+  );
+  assert.equal(uploads.length, 2, "one refused try, then the fresh token");
+  assert.equal(uploads[1]?.init?.method, "POST");
+  assert.equal(uploads[1]?.init?.body, file, "the bytes go up as they are");
+
+  for (const [status, why] of [
+    [415, "type"],
+    [413, "size"],
+    [429, "failed"],
+    [503, "failed"],
+  ] as const) {
+    answer = () => new Response("", { status });
+    assert.deepEqual(await poster.uploadImage(file), { kind: "refused", why });
+  }
+  for (const wrong of [
+    { name, line: `Image: /state/channel-images/${"b".repeat(64)}.png` },
+    { name, line: `text first\n${line}` },
+    { name: "../session", line: "Image: /state/dashboard/session" },
+    { name },
+  ]) {
+    answer = () => json(200, wrong);
+    assert.deepEqual(
+      await poster.uploadImage(file),
+      { kind: "refused", why: "failed" },
+      JSON.stringify(wrong),
+    );
+  }
+  const offline = createPoster(async (input) => {
+    if (String(input) === "/api/session") return json(200, { csrf_token: "t" });
+    throw new TypeError("Failed to fetch");
+  });
+  assert.deepEqual(await offline.uploadImage(file), {
+    kind: "refused",
+    why: "failed",
+  });
+});
+
+test("createChannel: posts the name and folder with the session token and reads the new channel's key", async () => {
+  const made = "b".repeat(20);
+  const server = fakeServer(({ url }, index) =>
+    url === "/api/session"
+      ? json(200, { csrf_token: `t${index}` })
+      : index === 1
+        ? json(403, {})
+        : json(201, { key: made, workspace_id: "w7", label: "Proto Chan" }),
+  );
+  const poster = createPoster(server.fetcher);
+  assert.deepEqual(
+    await poster.createChannel(key, { name: "Proto Chan", folder: "~/proj" }),
+    {
+      kind: "created",
+      channel: { key: made, workspaceId: "w7", label: "Proto Chan" },
+    },
+  );
+  assert.deepEqual(posts(server.seen), [
+    {
+      url: `/w/${key}/channels`,
+      csrf: "t0",
+      type: "application/json",
+      body: { name: "Proto Chan", folder: "~/proj" },
+    },
+    {
+      url: `/w/${key}/channels`,
+      csrf: "t2",
+      type: "application/json",
+      body: { name: "Proto Chan", folder: "~/proj" },
+    },
+  ]);
+});
+
+test("addAgent: posts the kind, bare name and persona and reads the new address", async () => {
+  const server = fakeServer(({ url }) =>
+    url === "/api/session"
+      ? json(200, { csrf_token: "t1" })
+      : json(201, { address_id: "pane-address-9", alias: "reviewer" }),
+  );
+  const poster = createPoster(server.fetcher);
+  assert.deepEqual(
+    await poster.addAgent(key, {
+      kind: "codex",
+      name: "reviewer",
+      persona: null,
+    }),
+    {
+      kind: "created",
+      agent: { addressId: "pane-address-9", alias: "reviewer" },
+    },
+  );
+  assert.deepEqual(posts(server.seen), [
+    {
+      url: `/w/${key}/agents`,
+      csrf: "t1",
+      type: "application/json",
+      body: { kind: "codex", name: "reviewer", persona: null },
+    },
+  ]);
+});
+
+test("createChannel and addAgent: a refusal carries the server's sentence and status, and a broken answer reads status 0", async () => {
+  const answers = [
+    json(409, {
+      error: "Another channel is already named #web. Pick a different name.",
+    }),
+    new Response("Forbidden.\n", { status: 403 }),
+    new Response("Forbidden.\n", { status: 403 }),
+    json(201, { key: "not-a-key" }),
+  ];
+  const server = fakeServer(({ url }) =>
+    url === "/api/session"
+      ? json(200, { csrf_token: "t1" })
+      : (answers.shift() ?? json(500, {})),
+  );
+  const poster = createPoster(server.fetcher);
+  const request = { name: "web", folder: "/srv" };
+  assert.deepEqual(await poster.createChannel(key, request), {
+    kind: "refused",
+    status: 409,
+    message: "Another channel is already named #web. Pick a different name.",
+  });
+  assert.deepEqual(await poster.createChannel(key, request), {
+    kind: "refused",
+    status: 403,
+    message: "Forbidden.",
+  });
+  assert.deepEqual(await poster.createChannel(key, request), {
+    kind: "refused",
+    status: 0,
+    message: "",
+  });
+  const offline = createPoster(async () => {
+    throw new TypeError("Failed to fetch");
+  });
+  assert.deepEqual(
+    await offline.addAgent(key, { kind: "claude", name: "x", persona: null }),
+    { kind: "refused", status: 0, message: "" },
+  );
+});
+
+test("folders: reads the recent folders, and any failure is an empty list", async () => {
+  const answers = [
+    json(200, { folders: ["/home/x/proj", "", 7, "/srv/web"] }),
+    json(503, {
+      error:
+        "Herdr isn't reachable. Check that Herdr is running, then try again.",
+    }),
+    json(200, { nope: true }),
+  ];
+  const server = fakeServer(() => answers.shift() ?? json(404, {}));
+  const poster = createPoster(server.fetcher);
+  assert.deepEqual(await poster.folders(key, press), [
+    "/home/x/proj",
+    "/srv/web",
+  ]);
+  assert.deepEqual(await poster.folders(key, press), []);
+  assert.deepEqual(await poster.folders(key, press), []);
+  assert.equal(server.seen[0]?.url, `/w/${key}/folders`);
+});
+
+test("channelFolder: reads where the next agent opens, and any failure is no folder", async () => {
+  const answers = [
+    json(200, { folder: "/home/x/proj" }),
+    json(200, { folder: null }),
+    json(404, { error: "This channel's workspace is closed." }),
+    json(200, { folder: 7 }),
+  ];
+  const server = fakeServer(() => answers.shift() ?? json(404, {}));
+  const poster = createPoster(server.fetcher);
+  assert.equal(await poster.channelFolder(key, press), "/home/x/proj");
+  assert.equal(await poster.channelFolder(key, press), null);
+  assert.equal(await poster.channelFolder(key, press), null);
+  assert.equal(await poster.channelFolder(key, press), null);
+  assert.equal(server.seen[0]?.url, `/w/${key}/folder`);
+  assert.equal(server.seen[0]?.init?.method ?? "GET", "GET");
+  assert.equal(server.seen[0]?.init?.credentials, "same-origin");
+  assert.equal(server.seen[0]?.init?.method, undefined);
 });

@@ -7,8 +7,8 @@ use super::{
 use crate::{
     StateStore, StoreError, StoreErrorKind,
     mux::{
-        AgentState, Budget, Depth, Endpoint, InputOutcome, Key, MuxConnector, MuxKind, PaneId,
-        Scope, ScreenRequest, Style, Wrap,
+        AgentKind, AgentState, Budget, Depth, Endpoint, InputOutcome, Key, MuxConnector, MuxKind,
+        PaneFacts, PaneId, Scope, ScreenRequest, Style, Wrap,
     },
     pane_effects::{AcquireError, DashboardInput, DashboardPane},
     store::dashboard::{LiveBinding, LiveMember},
@@ -271,6 +271,8 @@ struct NativeIdentity {
     terminal: String,
     session: Option<String>,
     status: Option<AgentState>,
+    /// The multiplexer sees an agent program in the pane, connected or not.
+    runs_agent: bool,
 }
 impl PartialEq for NativeIdentity {
     fn eq(&self, other: &Self) -> bool {
@@ -279,11 +281,18 @@ impl PartialEq for NativeIdentity {
 }
 impl Eq for NativeIdentity {}
 impl NativeIdentity {
-    fn accepts_input(&self) -> bool {
-        !self
-            .status
-            .as_ref()
-            .is_some_and(|status| matches!(status.as_str(), "offline" | "disconnected" | "unknown"))
+    /// Input goes to an agent, never to a pane that was only named: a pane
+    /// with no session takes it while the multiplexer sees an agent there,
+    /// as on a first-run screen. `launched` is a pane Channels started an
+    /// agent in and still waits on. Its card sends the person there, so it
+    /// takes input whatever the multiplexer makes of it, also when the agent
+    /// exited and the person starts it again.
+    fn accepts_input(&self, launched: bool) -> bool {
+        launched
+            || (self.session.is_some() || self.runs_agent)
+                && !self.status.as_ref().is_some_and(|status| {
+                    matches!(status.as_str(), "offline" | "disconnected" | "unknown")
+                })
     }
 }
 
@@ -505,6 +514,7 @@ fn native(
             .map(|session| session.as_str().to_owned())
             .filter(|s| !s.is_empty()),
         status: pane.state.clone(),
+        runs_agent: runs_agent(&pane),
     };
     if binding
         .agent_session_id
@@ -517,6 +527,16 @@ fn native(
     Ok(NativePane {
         identity,
         source_rows: pane.viewport_rows,
+    })
+}
+
+/// Whether the multiplexer names an agent program in the pane, with a
+/// session or not, as Herdr's `agent` field does.
+fn runs_agent(pane: &PaneFacts) -> bool {
+    pane.agent.as_ref().is_some_and(|agent| match &agent.kind {
+        AgentKind::Known(_) => true,
+        AgentKind::Other(name) => !name.is_empty(),
+        AgentKind::Unreported => false,
     })
 }
 
@@ -1016,9 +1036,14 @@ impl LivePeeks {
             .set_busy_timeout(Duration::from_millis(100))
             .map_err(store_status)?;
         let binding = recorded(&mut store, key, address)?;
-        if binding.pane_type != crate::PaneType::Agent || binding.agent_session_id.is_none() {
+        // An agent that hasn't connected has no session on either side; its
+        // first-run screens are answered here, so it takes input too
+        // (`accepts_input`).
+        if binding.pane_type != crate::PaneType::Agent {
             return Err(Status::Gone);
         }
+        let launched = binding.agent_session_id.is_none()
+            && front.launches.remembers(&binding.namespace, address);
         // The lock is tried before the identity survey, so a delivery that
         // holds it now cannot release it during the survey and have this
         // input land just after its prompt. Waiting would land it there too,
@@ -1030,7 +1055,7 @@ impl LivePeeks {
         );
         let mux = &*front.mux;
         let identity = native(mux, &binding, Duration::from_millis(500))?.identity;
-        if !identity.accepts_input() {
+        if !identity.accepts_input(launched) {
             return Err(Status::Gone);
         }
         if identity.session.as_deref() != binding.agent_session_id.as_ref().map(|id| id.as_str()) {
@@ -1055,7 +1080,7 @@ impl LivePeeks {
             InputPost::Text { text, .. } => {
                 let current = recorded(&mut store, key, address)?;
                 let updated = native(mux, &binding, Duration::from_millis(500))?.identity;
-                if current != binding || updated != identity || !updated.accepts_input() {
+                if current != binding || updated != identity || !updated.accepts_input(launched) {
                     return Err(Status::Gone);
                 }
                 effects.input(
@@ -1521,6 +1546,7 @@ mod tests {
             terminal: "block:b".into(),
             session: None,
             status: None,
+            runs_agent: false,
         };
         let refused = Observer::open(&binding, &identity, SourceViewport::default())
             .err()
@@ -1722,6 +1748,34 @@ mod tests {
                 }
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn a_pane_takes_input_for_an_agent_herdr_sees_or_one_channels_started() {
+        let pane = |session: Option<&str>, status: &str, runs_agent: bool| NativeIdentity {
+            terminal: "term".into(),
+            session: session.map(str::to_owned),
+            status: Some(AgentState::parse(status)),
+            runs_agent,
+        };
+        assert!(pane(Some("s"), "idle", true).accepts_input(false));
+        assert!(
+            pane(None, "blocked", true).accepts_input(false),
+            "a first-run screen"
+        );
+        assert!(
+            !pane(None, "idle", false).accepts_input(false),
+            "a pane that was only named"
+        );
+        assert!(
+            !pane(None, "unknown", false).accepts_input(false),
+            "a shell"
+        );
+        assert!(!pane(Some("s"), "offline", true).accepts_input(false));
+        assert!(
+            pane(None, "unknown", false).accepts_input(true),
+            "a pane Channels started an agent in takes input whatever Herdr reports"
         );
     }
 

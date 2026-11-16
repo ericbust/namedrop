@@ -551,6 +551,24 @@ impl DashboardPane {
             )),
         }
     }
+
+    /// The lock of a pane the dashboard just opened to start an agent in.
+    /// Nothing else types into a pane that new, so this waits for the lock
+    /// as a delivery does instead of answering busy.
+    pub(crate) fn acquire_new(
+        state: &Path,
+        socket: &str,
+        pane: &str,
+    ) -> Result<Self, AcquireError> {
+        PaneEffects::acquire(state, socket, pane).map(Self)
+    }
+
+    /// Starts an agent in the pane just opened for it. Nothing has typed into
+    /// that pane yet, so its input has no owner to record. The command is
+    /// static text, never anything a request carried.
+    pub(crate) fn start_agent(&self, mux: &impl MuxInput, command: &'static str) -> InputOutcome {
+        mux.deliver(PaneInput::new(&self.0, InputKind::Line(command)))
+    }
 }
 
 #[derive(Default)]
@@ -1767,7 +1785,7 @@ mod tests {
         let raw = dashboard_bypasses(&src);
         assert!(
             raw.is_empty(),
-            "Dashboard code reaches Herdr only through `Front.mux`, a `MuxConnector`, starts Herdr only in the observer guard, and types into a pane only through `DashboardPane::input` or `interrupt_if_current` on that connection:\n{}",
+            "Dashboard code reaches Herdr only through `Front.mux`, a `MuxConnector`, starts Herdr only in the observer guard, and types into a pane only through `DashboardPane::input`, `DashboardPane::start_agent` or `interrupt_if_current` on that connection:\n{}",
             raw.join("\n")
         );
     }

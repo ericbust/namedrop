@@ -1,4 +1,12 @@
 import type {
+  AgentRequest,
+  AgentResult,
+  ChannelRequest,
+  ChannelResult,
+  Refusal,
+} from "./create.ts";
+import type { ImageUpload } from "./images.ts";
+import type {
   AddressId,
   Alias,
   ControlTarget,
@@ -11,8 +19,19 @@ import type {
 } from "./model.ts";
 import { type ReminderConversation, reminderPath } from "./reminders.ts";
 import {
+  parseSoundSettings,
+  type SaveResult,
+  type SoundSave,
+  type SoundSettings,
+} from "./sounds.ts";
+import {
+  parseAddedAgent,
+  parseChannelFolder,
+  parseCreatedChannel,
   parseDeliverAnswer,
+  parseFolders,
   parseFullBody,
+  parseImageUpload,
   parseReceipt,
   parseRefusal,
   parseReminders,
@@ -106,7 +125,86 @@ export function createPoster(fetcher: typeof fetch = fetch, bodyWait = 5_000) {
       headers: csrf === null ? {} : { "X-Namedrop-Csrf": csrf },
     });
   }
+  // A refusal's sentence comes from the server's body; a 2xx whose body can't
+  // be read is no answer the page can act on.
+  async function create<T>(
+    path: string,
+    body: object,
+    parse: (raw: unknown) => T,
+  ): Promise<{ kind: "created"; value: T } | Refusal> {
+    try {
+      const response = await postWithTokenRetry(path, body);
+      const answer = await response.text();
+      if (!response.ok)
+        return {
+          kind: "refused",
+          status: response.status,
+          message: parseRefusal(answer),
+        };
+      try {
+        return { kind: "created", value: parse(JSON.parse(answer)) };
+      } catch {
+        return { kind: "refused", status: 0, message: "" };
+      }
+    } catch {
+      return { kind: "refused", status: 0, message: "" };
+    }
+  }
   return {
+    // Recent folders are a shortcut, so a list that can't load is an empty one.
+    async folders(
+      key: SpaceKey,
+      signal: AbortSignal,
+    ): Promise<readonly string[]> {
+      try {
+        const response = await fetcher(`/w/${key}/folders`, {
+          credentials: "same-origin",
+          signal,
+        });
+        return response.ok ? parseFolders(await response.json()) : [];
+      } catch {
+        return [];
+      }
+    },
+    // Where the channel's next agent opens. The form only shows it, so a
+    // folder that can't be read is no folder to show.
+    async channelFolder(
+      key: SpaceKey,
+      signal: AbortSignal,
+    ): Promise<string | null> {
+      try {
+        const response = await fetcher(`/w/${key}/folder`, {
+          credentials: "same-origin",
+          signal,
+        });
+        return response.ok ? parseChannelFolder(await response.json()) : null;
+      } catch {
+        return null;
+      }
+    },
+    async createChannel(
+      key: SpaceKey,
+      request: ChannelRequest,
+    ): Promise<ChannelResult> {
+      const result = await create(
+        `/w/${key}/channels`,
+        { name: request.name, folder: request.folder },
+        parseCreatedChannel,
+      );
+      return result.kind === "created"
+        ? { kind: "created", channel: result.value }
+        : result;
+    },
+    async addAgent(key: SpaceKey, request: AgentRequest): Promise<AgentResult> {
+      const result = await create(
+        `/w/${key}/agents`,
+        { kind: request.kind, name: request.name, persona: request.persona },
+        parseAddedAgent,
+      );
+      return result.kind === "created"
+        ? { kind: "created", agent: result.value }
+        : result;
+    },
     async reminders(target: ReminderConversation, signal: AbortSignal) {
       const response = await fetcher(reminderPath(target), {
         credentials: "same-origin",
@@ -136,6 +234,33 @@ export function createPoster(fetcher: typeof fetch = fetch, bodyWait = 5_000) {
     prepare(): void {
       void token();
     },
+    async sounds(signal: AbortSignal): Promise<SoundSettings | null> {
+      try {
+        const response = await fetcher("/api/sounds", {
+          credentials: "same-origin",
+          signal,
+        });
+        return response.ok ? parseSoundSettings(await response.json()) : null;
+      } catch {
+        return null;
+      }
+    },
+    async changeSound(save: SoundSave): Promise<SaveResult> {
+      try {
+        const response = await postWithTokenRetry("/api/sounds", save);
+        if (response.status === 400) return { kind: "full" };
+        const settings =
+          response.ok || response.status === 409
+            ? parseSoundSettings(await response.json())
+            : null;
+        if (settings === null) return { kind: "failed" };
+        return response.ok
+          ? { kind: "saved", settings }
+          : { kind: "conflict", settings };
+      } catch {
+        return { kind: "failed" };
+      }
+    },
     async fullBody(
       key: SpaceKey,
       messageId: string,
@@ -158,6 +283,44 @@ export function createPoster(fetcher: typeof fetch = fetch, bodyWait = 5_000) {
           : null;
       } catch {
         return null;
+      }
+    },
+    // Stores one image for a message to name. The server reads the type from
+    // the bytes, so the body goes up as it is.
+    async uploadImage(file: Blob): Promise<ImageUpload> {
+      const send = (csrf: string | null) =>
+        fetcher("/api/images", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: {
+            "Content-Type": "application/octet-stream",
+            ...(csrf === null ? {} : { "X-Namedrop-Csrf": csrf }),
+          },
+          body: file,
+        });
+      try {
+        const used = token();
+        let response = await send(await used);
+        if (response.status === 403) {
+          if (session === used) session = null;
+          response = await send(await token());
+        }
+        if (response.ok)
+          return {
+            kind: "stored",
+            image: parseImageUpload(await response.json()),
+          };
+        return {
+          kind: "refused",
+          why:
+            response.status === 415
+              ? "type"
+              : response.status === 413
+                ? "size"
+                : "failed",
+        };
+      } catch {
+        return { kind: "refused", why: "failed" };
       }
     },
     async post(post: Post): Promise<PostResult> {
@@ -201,8 +364,8 @@ export function createPoster(fetcher: typeof fetch = fetch, bodyWait = 5_000) {
         const response = await postWithTokenRetry(
           target.kind === "thread"
             ? `/w/${key}/threads/${encodeURIComponent(target.threadId)}/${target.action}`
-            : `/w/${key}/attempts/${encodeURIComponent(target.attemptId)}/dismiss`,
-          target.kind === "thread" ? {} : { confirmed: true },
+            : `/w/${key}/attention/dismiss`,
+          target.kind === "thread" ? {} : { confirmed: true, ids: target.ids },
           signal,
         );
         return response.ok

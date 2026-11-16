@@ -1,7 +1,8 @@
 use super::{
-    Allowance, Applied, Budget, Depth, Effect, Endpoint, InputOutcome, PaneId, PaneProcess, Scope,
-    Screen, ScreenRequest, Survey, TabId,
+    Allowance, Applied, Budget, Closing, Depth, Effect, Endpoint, InputOutcome, NewSpace, NewTab,
+    PaneId, PaneProcess, Scope, Screen, ScreenRequest, Survey, TabId,
 };
+use crate::SpaceId;
 pub use crate::pane_effects::PaneInput;
 use std::{
     path::PathBuf,
@@ -55,6 +56,16 @@ pub trait MuxRead: Send + Sync {
 
 pub trait MuxAct: MuxRead {
     fn apply(&self, effect: &Effect) -> Result<Applied, MuxError>;
+
+    /// Opens a space labelled `label`, with one pane in `cwd`, and leaves the
+    /// person's focus where it is. Unlike an effect, each call opens another
+    /// space, so a caller never repeats one.
+    fn open_space(&self, cwd: &str, label: &str) -> Result<NewSpace, MuxError>;
+
+    /// Opens a tab labelled `label` in `space`, as `open_space` opens a space.
+    fn open_tab(&self, space: &SpaceId, cwd: &str, label: &str) -> Result<NewTab, MuxError>;
+
+    fn close(&self, closing: &Closing) -> Result<(), MuxError>;
 }
 
 /// Every implementation sends a prompt only if the pane is admitted at send
@@ -104,6 +115,18 @@ impl MuxRead for Arc<dyn Mux> {
 impl MuxAct for Arc<dyn Mux> {
     fn apply(&self, effect: &Effect) -> Result<Applied, MuxError> {
         (**self).apply(effect)
+    }
+
+    fn open_space(&self, cwd: &str, label: &str) -> Result<NewSpace, MuxError> {
+        (**self).open_space(cwd, label)
+    }
+
+    fn open_tab(&self, space: &SpaceId, cwd: &str, label: &str) -> Result<NewTab, MuxError> {
+        (**self).open_tab(space, cwd, label)
+    }
+
+    fn close(&self, closing: &Closing) -> Result<(), MuxError> {
+        (**self).close(closing)
     }
 }
 

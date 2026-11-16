@@ -19,6 +19,7 @@ import {
 } from "./MessageActions.tsx";
 import { PeekControl } from "./PeekContext.tsx";
 import { Reminders } from "./Reminders.tsx";
+import { SoundPicker } from "./SoundPicker.tsx";
 import type { DirectMessages } from "./useDirectMessages.ts";
 
 export function DirectConversation({
@@ -124,6 +125,7 @@ export function DirectConversation({
             directory={directory}
           />
         )}
+        <SoundPicker agent={peer.addressId} alias={peer.alias} />
         {!peer.closed && (
           <PeekControl
             target={peekTarget(peer.spaceKey, member)}

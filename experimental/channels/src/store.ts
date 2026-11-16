@@ -32,6 +32,7 @@ import type {
   TerminalRun,
 } from "./model.ts";
 import { samePeek } from "./peek.ts";
+import { type Arrival, agentKey, type Heard, nothingHeard } from "./sounds.ts";
 import { ENVOY } from "./wire.ts";
 
 export const channelCollator = new Intl.Collator();
@@ -61,6 +62,8 @@ export function initialState({
     nextRequestId: 1,
     outbox: new Map(),
     drafts: new Map(),
+    heard: nothingHeard,
+    loadedAt: null,
   };
 }
 export function bootState({
@@ -379,6 +382,50 @@ function hasActivity(a: Channel, b: Channel): boolean {
     )
   );
 }
+// New messages in `next` from agents to the person, oldest first. With no
+// `previous` snapshot, only messages newer than `loadedAt` are new.
+export function heardIn(
+  previous: Pick<Channel, "messages" | "latestMessages"> | undefined,
+  next: Pick<Channel, "latestMessages" | "members">,
+  loadedAt: number | null,
+): Arrival[] {
+  const arrivals: Arrival[] = [];
+  const person = (id: AddressId | "human") =>
+    id === "human" || next.members.get(id)?.kind.type === "human";
+  const fresh = (row: Message) =>
+    previous === undefined
+      ? loadedAt !== null && row.at > loadedAt
+      : !previous.latestMessages.has(row.id) && !previous.messages.has(row.id);
+  for (const row of next.latestMessages.values()) {
+    if (
+      !fresh(row) ||
+      row.progressNote ||
+      isSystem(row) ||
+      !agentAuthor(row.author, next.members) ||
+      !row.legs.some((leg) => person(leg.to))
+    )
+      continue;
+    const agent = agentKey(row.author);
+    if (agent !== null) arrivals.push({ agent, id: row.id });
+  }
+  return arrivals;
+}
+function hear(heard: Heard, arrivals: Arrival[]): Heard {
+  return arrivals.length === 0 ? heard : { seq: heard.seq + 1, arrivals };
+}
+// The newest message time at the first load, in the server's clock. A load
+// with no messages has none, so it falls back to this browser's clock.
+function loadPoint(channels: Iterable<Channel>): number {
+  const newest = newestAt(channels);
+  return newest === Number.NEGATIVE_INFINITY ? Date.now() : newest;
+}
+function newestAt(channels: Iterable<Channel>): number {
+  let newest = Number.NEGATIVE_INFINITY;
+  for (const channel of channels)
+    for (const rows of [channel.messages, channel.latestMessages])
+      for (const row of rows.values()) newest = Math.max(newest, row.at);
+  return newest;
+}
 function clearUnread(
   unread: ReadonlySet<SpaceKey>,
   key: SpaceKey | null,
@@ -408,6 +455,13 @@ function finishReplay(state: State, keys: ReadonlySet<SpaceKey> | null): State {
   const arrived = [...channels.keys()].some((key) => !state.channels.has(key));
   const selection = settle(state, channels, arrived);
   const unread = new Set([...state.unread].filter((key) => channels.has(key)));
+  // Messages that arrived while the stream was down ring once it is back.
+  const arrivals = [...pending.keys()].flatMap((key) => {
+    const channel = channels.get(key);
+    return channel === undefined
+      ? []
+      : heardIn(state.channels.get(key), channel, state.loadedAt);
+  });
   for (const [key, channel] of channels) {
     const previous = state.channels.get(key);
     if (
@@ -424,6 +478,8 @@ function finishReplay(state: State, keys: ReadonlySet<SpaceKey> | null): State {
     unread,
     outbox: settleOutbox(state.outbox, [...channels.values()]),
     viewKnown: state.viewKnown || channels.size > 0 || keys !== null,
+    heard: hear(state.heard, arrivals),
+    loadedAt: state.loadedAt ?? loadPoint(channels.values()),
     sync: { kind: keys === null ? "fallback" : "live" },
     landing:
       keys !== null && state.landing.kind === "discovering"
@@ -567,6 +623,7 @@ function step(state: State, event: Event): State {
       const channels = new Map(state.channels);
       channels.set(channel.key, accumulated);
       const selection = settle(state, channels, previous === undefined);
+      const arrivals = heardIn(previous, accumulated, state.loadedAt);
       let unread = state.unread;
       if (
         previous &&
@@ -581,6 +638,7 @@ function step(state: State, event: Event): State {
         unread,
         outbox: settleOutbox(state.outbox, [accumulated]),
         viewKnown: true,
+        heard: hear(state.heard, arrivals),
       };
     }
     case "older":
