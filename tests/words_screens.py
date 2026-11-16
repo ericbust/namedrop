@@ -169,6 +169,28 @@ with tempfile.TemporaryDirectory(prefix="nd-words-", dir="/tmp") as folder:
         print("retired state passed")
     finally:
         server.close()
+    # The installer report has its own app-server advice call site.
+    place = root / "install-daemon"
+    install_home, install_state = place / "home", place / "state"
+    (install_home / ".codex/app-server-daemon").mkdir(parents=True)
+    (install_state / "runtime").mkdir(parents=True)
+    (install_state / "runtime/owner").write_text("standalone\n")
+    config = install_home / ".config/rex/init.lua"
+    config.parent.mkdir(parents=True)
+    install_server = scripted.InstallServer(place, config)
+    try:
+        install_env = {"HOME": str(install_home), "PATH": "/usr/bin:/bin",
+                       "NAMEDROP_STATE_DIR": str(install_state), "SHELL": "/bin/none",
+                       "REX_SERVER": "unix://" + str(install_server.socket)}
+        out = run([str(BINARY), "--endpoint", "rex:" + str(install_server.socket),
+                   "--json", "install", "--input-json", '{"confirmed":true}'], env=install_env)
+        assert out.returncode == 0, out
+        report = json.loads(out.stdout)
+        advice = report["data"]["agent_integration_hook_activation"]["codex"]
+        assert advice and "Rex pane" in json.dumps(advice), advice
+        capture("install report (Codex daemon)", json.dumps(advice))
+    finally:
+        install_server.close()
     # runtime.py's failures on a standalone state, and its busy gate.
     out = run([*python, str(root), "--state-dir", str(root / "missing"), "--verify", "install"], env=env, timeout=10)
     assert out.returncode == 2, out

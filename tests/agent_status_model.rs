@@ -62,6 +62,10 @@ case "$mode" in
   slow_cancel|slow_big|persona_slow) sleep 30 ;;
   slow_success) sleep 11 ;;
   fail|persona_fail) printf 'worker exploded\n' >&2; exit 3 ;;
+  persona_warned)
+    printf 'WARNING: proceeding, even though we could not create PATH aliases: failed to canonicalize CODEX_HOME "%s": Operation not permitted (os error 1)\n' "$dir/codex-home" >&2
+    printf 'Error finding codex home: failed to canonicalize CODEX_HOME "%s": Operation not permitted (os error 1)\n\n' "$dir/codex-home" >&2
+    exit 1 ;;
   flood) head -c 200000 /dev/zero | tr '\0' 'x'; sleep 30 ;;
 esac
 if [ -f "$dir/response-$mode.json" ]; then cat "$dir/response-$mode.json"; fi
@@ -1430,6 +1434,25 @@ fn a_failing_persona_worker_is_reported_without_retrying() {
         "the failure must be reported, got {error:?}"
     );
     assert_eq!(calls("persona_fail"), 1, "there is no automatic retry");
+}
+
+/// Codex prints a warning before the line that says why it stopped.
+#[test]
+fn a_failing_worker_is_reported_by_its_last_line() {
+    let error = suggest_agent_persona(&persona_alias("persona_warned"), "draft", "claude", &idle())
+        .expect_err("a failing worker must not succeed");
+
+    let prefix = "the model worker failed: ";
+    assert!(
+        error.starts_with(&format!("{prefix}Error finding codex home: "))
+            && error.ends_with(": Operation not permitted (os error 1)")
+            && error.chars().count() <= prefix.len() + 200,
+        "the line that says why the worker stopped must be shown, got {error:?}"
+    );
+    assert!(
+        !error.contains("WARNING") && !error.contains('\u{fffd}'),
+        "the warning before it must not be shown, got {error:?}"
+    );
 }
 
 #[test]

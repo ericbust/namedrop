@@ -262,6 +262,7 @@ where
     I: IdGenerator,
 {
     execute_context_operation_as(ContextInvocation::AgentSession, operation, input, runtime)
+        .map_err(|error| runtime.mux.endpoint().kind.authored_error(error))
 }
 
 pub fn execute_human_context_operation<M, C, I>(
@@ -275,6 +276,7 @@ where
     I: IdGenerator,
 {
     execute_context_operation_as(ContextInvocation::Human, operation, input, runtime)
+        .map_err(|error| runtime.mux.endpoint().kind.authored_error(error))
 }
 
 fn execute_context_operation_as<M, C, I>(

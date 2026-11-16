@@ -1799,10 +1799,10 @@ mod permission_tests {
             "{herdr}"
         );
         assert!(
-            rex.contains("so Namedrop cannot tell which Rex block this session is in")
-                && rex.contains("restart Codex in each of its Rex blocks")
+            rex.contains("so Namedrop cannot tell which Rex pane this session is in")
+                && rex.contains("restart Codex in each of its Rex panes")
                 && !rex.contains("Herdr")
-                && !rex.contains("pane"),
+                && !rex.contains("block"),
             "{rex}"
         );
         let root = std::env::temp_dir().join(format!("namedrop-notice-{}", std::process::id()));

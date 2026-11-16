@@ -141,7 +141,13 @@ where
         read_state(runtime, &discovered, origin, &collection, &mut warnings);
     let handoffs_available = handoffs.is_some();
     let waits = handoffs.map_or_else(Vec::new, |reports| {
-        collect_waits(&reports, &addresses, &visible, &mut warnings)
+        collect_waits(
+            &reports,
+            &addresses,
+            &visible,
+            &mut warnings,
+            runtime.mux.endpoint().kind,
+        )
     });
 
     let ordered = wait_first_order(&visible, origin, &waits);
@@ -435,6 +441,7 @@ fn collect_waits(
     addresses: &[PaneAddressRecord],
     visible: &[&DiscoveredPane],
     warnings: &mut Vec<String>,
+    kind: crate::mux::MuxKind,
 ) -> Vec<Value> {
     let mut waits = Vec::new();
     for report in reports {
@@ -471,7 +478,7 @@ fn collect_waits(
                 "alias": alias,
                 "description": format!("@{alias} · {request}"),
                 "state": recipient["state"],
-                "reason": wait_reason(state, result_status, recipient),
+                "reason": wait_reason(state, result_status, recipient, kind),
             }));
         }
     }
@@ -501,7 +508,12 @@ fn wait_rank(wait: &Value) -> u8 {
 /// recorded receipt, which is not proof it acted on it. Held can follow a
 /// submission whose outcome was never established, so it is described as
 /// uncertain rather than as undelivered.
-fn wait_reason(state: DeliveryState, result_status: Option<&str>, recipient: &Value) -> String {
+fn wait_reason(
+    state: DeliveryState,
+    result_status: Option<&str>,
+    recipient: &Value,
+    kind: crate::mux::MuxKind,
+) -> String {
     match state {
         DeliveryState::Held => {
             "held; whether it reached the recipient was never established, so it needs a decision \
@@ -523,7 +535,9 @@ fn wait_reason(state: DeliveryState, result_status: Option<&str>, recipient: &Va
                 .and_then(|constraints| constraints.first())
                 .and_then(Value::as_str);
             match constraint {
-                Some(constraint) => format!("not submitted yet: {}", constraint_reason(constraint)),
+                Some(constraint) => {
+                    format!("not submitted yet: {}", constraint_reason(constraint, kind))
+                }
                 None => "queued; not submitted to the recipient yet".to_owned(),
             }
         }
@@ -533,7 +547,7 @@ fn wait_reason(state: DeliveryState, result_status: Option<&str>, recipient: &Va
 
 /// The store's outlook vocabulary, in the panel's words. An unrecognized
 /// constraint is shown verbatim rather than dropped.
-fn constraint_reason(constraint: &str) -> String {
+fn constraint_reason(constraint: &str, kind: crate::mux::MuxKind) -> String {
     match constraint {
         "earlier_delivery_pending" => "an earlier delivery to that recipient is still ahead of it",
         "recipient_busy_or_unknown" => "the recipient is not idle",
@@ -544,9 +558,15 @@ fn constraint_reason(constraint: &str) -> String {
         "registration_required" => "the recipient has no active Namedrop registration",
         "integration_repair_required" => "the recipient's Namedrop integration needs repair",
         "terminal_contains_agent" => "that terminal now holds an agent",
-        "space_paused" => "this space is paused",
-        "space_inactive" => "Namedrop is not active in this space",
-        "reconciliation_required" => "this space needs reconciliation",
+        "space_paused" => kind.text("this space is paused", "this Rex session is paused"),
+        "space_inactive" => kind.text(
+            "Namedrop is not active in this space",
+            "Namedrop is not active in this Rex session",
+        ),
+        "reconciliation_required" => kind.text(
+            "this space needs reconciliation",
+            "this Rex session needs reconciliation",
+        ),
         "thread_paused" => "the thread is paused",
         "thread_stopped" => "the thread is stopped",
         other => return other.to_owned(),

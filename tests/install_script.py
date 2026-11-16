@@ -6,12 +6,14 @@ from pathlib import Path
 import pty
 import select
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 REPO = Path(__file__).resolve().parents[1]
 VERSION = (REPO / 'Cargo.toml').read_text().split('version = "', 1)[1].split('"', 1)[0]
@@ -530,12 +532,22 @@ class Installer(unittest.TestCase):
         before = self.snapshot(self.root)
         pid, terminal = pty.fork()
         if pid == 0:
+            # A terminal's session starts with SIGINT at its default. A test
+            # run from a background job inherits it ignored, and then no
+            # Ctrl-C reaches the installer.
+            signal.signal(signal.SIGINT, signal.SIG_DFL)
             os.execve('/bin/sh', ['/bin/sh', str(self.checkout / 'scripts/install.sh')], self.env)
         output = b''
         deadline = time.monotonic() + 30
         sent = False
+        # Python acts on a SIGINT only between steps of its own: one that
+        # lands after the prompt is written and before the installer's read
+        # starts waits until the read returns. So the Ctrl-C comes once the
+        # prompt has been still for a moment, as a person's does, and once
+        # more if nothing answers it, when the read is surely waiting.
+        quiet = None
         while time.monotonic() < deadline:
-            if select.select([terminal], [], [], 0.2)[0]:
+            if select.select([terminal], [], [], 0.05)[0]:
                 try:
                     data = os.read(terminal, 4096)
                 except OSError:
@@ -543,9 +555,15 @@ class Installer(unittest.TestCase):
                 if not data:
                     break
                 output += data
-            if not sent and b'[y/N]' in output:
+                quiet = time.monotonic()
+            if not sent and b'[y/N]' in output and time.monotonic() - quiet >= 0.2:
                 os.write(terminal, b'\x03')
-                sent = True
+                sent = time.monotonic()
+                # Cancellation gets its own observation window after startup.
+                deadline = time.monotonic() + 30
+            elif sent and output.endswith(b'^C') and time.monotonic() - sent >= 5:
+                os.write(terminal, b'\x03')
+                sent = time.monotonic()
         os.close(terminal)
         os.waitpid(pid, 0)
         text = output.decode(errors='replace')
@@ -553,6 +571,23 @@ class Installer(unittest.TestCase):
         self.assertIn('Installation cancelled; no files changed.', text)
         self.assertNotIn('Traceback', text)
         self.unchanged(before)
+
+    def test_interrupt_near_startup_deadline(self):
+        monotonic, write = time.monotonic, os.write
+        elapsed = 0
+
+        def clock():
+            return monotonic() + elapsed
+
+        def interrupt(terminal, data):
+            nonlocal elapsed
+            result = write(terminal, data)
+            if data == b'\x03':
+                elapsed += 31
+            return result
+
+        with patch.object(time, 'monotonic', clock), patch.object(os, 'write', interrupt):
+            self.test_interrupt_at_the_prompt()
 
     def test_archive_new_install_stale_record_and_rex_bin_dir(self):
         package = self.archive()

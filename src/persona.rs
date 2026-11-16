@@ -49,6 +49,13 @@ pub(crate) fn session_policy_text(kind: crate::mux::MuxKind) -> String {
         crate::mux::MuxKind::Rex => text
             .replace("this Herdr space", "this Rex session")
             .replace("address Herdr panes", "address Rex panes")
+            .replace("other-workspaces line", "other-Rex-sessions line")
+            .replace("the space is paused", "the Rex session is paused")
+            .replace("Other workspaces:", "Other Rex sessions:")
+            .replace("names a workspace", "names a Rex session")
+            .replace("the workspace question", "the Rex session question")
+            .replace("each workspace's", "each Rex session's")
+            .replace("every workspace", "every Rex session")
             .replace(
                 "other Herdr workspaces of this session",
                 "other Rex sessions on this server",
@@ -293,9 +300,9 @@ where
     );
     if paused {
         rows.push_str(
-            ". This space is paused: automatic collaborator selection is unavailable and \
+            runtime.mux.endpoint().kind.text(". This space is paused: automatic collaborator selection is unavailable and \
              nothing dispatches until the person resumes collaboration, so do this work \
-             locally and say so",
+             locally and say so", ". This Rex session is paused: automatic collaborator selection is unavailable and nothing dispatches until the person resumes collaboration, so do this work locally and say so"),
         );
     }
     rows.push_str(":\n");
@@ -390,8 +397,9 @@ fn other_workspaces(kind: crate::mux::MuxKind, workspaces: usize, aliases: &[Str
     // that has no other copy, so this line keeps the rule and the address form
     // in brief each time it is shown.
     format!(
-        "Other workspaces: {count} named agents ({names}). A bare @name never reaches them; \
-         reach one only when the person asks, with `#label @name` or `#all @name`."
+        "{} {count} named agents ({names}). A bare @name never reaches them; \
+         reach one only when the person asks, with `#label @name` or `#all @name`.",
+        kind.text("Other workspaces:", "Other Rex sessions:")
     )
 }
 

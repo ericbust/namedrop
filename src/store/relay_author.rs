@@ -285,9 +285,65 @@ impl StateTransaction<'_> {
         )?)
     }
 
+    /// Whether the message at `rowid`, of any endpoint, is still
+    /// `message_id`, as `message_at` says for one endpoint's.
+    pub(crate) fn message_is(&self, rowid: i64, message_id: &str) -> Result<bool, StoreError> {
+        Ok(self.transaction.query_row(
+            "SELECT EXISTS (SELECT 1 FROM collaboration_messages
+                WHERE rowid = ?1 AND message_id = ?2)",
+            params![rowid, message_id],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// The id and creation time of the message at `rowid`, of
+    /// `session_socket_id` when one is given and of any endpoint when not.
+    pub(crate) fn message_made(
+        &self,
+        session_socket_id: Option<&str>,
+        rowid: i64,
+    ) -> Result<Option<(String, i64)>, StoreError> {
+        Ok(self
+            .transaction
+            .query_row(
+                "SELECT message_id, created_at_ms FROM collaboration_messages
+                 WHERE rowid = ?2 AND (?1 IS NULL OR session_socket_id = ?1)",
+                params![session_socket_id, rowid],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?)
+    }
+
+    /// The rowid and id of the last message of `session_socket_id` before
+    /// its first one made after `created_at_ms`, when there is one. A new
+    /// message takes the rowid after the highest, so the messages there
+    /// are, in rowid order, in the order they were made: each one after
+    /// this was made after `created_at_ms`, and none before it was.
+    pub(crate) fn last_made_by(
+        &self,
+        session_socket_id: &str,
+        created_at_ms: i64,
+    ) -> Result<Option<(i64, String)>, StoreError> {
+        Ok(self
+            .transaction
+            .query_row(
+                "SELECT rowid, message_id FROM collaboration_messages
+                 WHERE +session_socket_id = ?1 AND rowid < COALESCE(
+                    (SELECT MIN(rowid) FROM collaboration_messages
+                     WHERE +session_socket_id = ?1 AND created_at_ms > ?2),
+                    9223372036854775807)
+                 ORDER BY rowid DESC LIMIT 1",
+                params![session_socket_id, created_at_ms],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?)
+    }
+
     /// What a message to `author` in `thread`, before `rowid`, answers of
-    /// that author's: `preferred` when `author` wrote it there, and
-    /// otherwise the latest message `author` wrote there.
+    /// that author's: `preferred` when `author` wrote it there, the message
+    /// the relay's notice `preferred` told about, and otherwise the latest
+    /// message `author` wrote there. A notice asked nothing, so a message
+    /// answers none.
     pub(crate) fn relay_answered(
         &self,
         namespace: &StateNamespace,
@@ -295,14 +351,14 @@ impl StateTransaction<'_> {
         before: i64,
         author: &str,
         preferred: Option<&str>,
-    ) -> Result<Option<Answered>, StoreError> {
+    ) -> Result<Option<String>, StoreError> {
         Ok(self
             .transaction
             .query_row(
-                "SELECT message_id, grammar_version = ?7 FROM collaboration_messages
+                "SELECT message_id FROM collaboration_messages
                  WHERE session_socket_id = ?1 AND worktree_id = ?2 AND thread_id = ?3
-                   AND rowid < ?4 AND author_address_id = ?5
-                 ORDER BY message_id = ?6 DESC, rowid DESC LIMIT 1",
+                   AND rowid < ?4 AND author_address_id = ?5 AND grammar_version <> ?7
+                 ORDER BY message_id = ?6 OR message_id || ?8 = ?6 DESC, rowid DESC LIMIT 1",
                 params![
                     namespace.session_socket_id,
                     namespace.space_id.as_str(),
@@ -310,14 +366,10 @@ impl StateTransaction<'_> {
                     before,
                     author,
                     preferred,
-                    NOTICE_GRAMMAR
+                    NOTICE_GRAMMAR,
+                    HOST_NOTICE
                 ],
-                |row| {
-                    Ok(Answered {
-                        message_id: row.get(0)?,
-                        notice: row.get(1)?,
-                    })
-                },
+                |row| row.get(0),
             )
             .optional()?)
     }
@@ -412,7 +464,7 @@ impl StateTransaction<'_> {
                     request_id: format!("{}:host-notice", relayed.request_id),
                     thread: relayed.thread,
                     message_id: MessageId::new(format!(
-                        "{}-host-notice",
+                        "{}{HOST_NOTICE}",
                         relayed.message_id.as_str()
                     )),
                     delivery_id: crate::DeliveryId::new(format!(
@@ -456,6 +508,9 @@ impl StateTransaction<'_> {
 /// so the Automatic Reply Limit neither counts nor refuses it.
 pub(crate) const NOTICE_GRAMMAR: &str = "relay-notice/v1";
 
+/// What the id of a relayed message's host notice adds to the message's.
+const HOST_NOTICE: &str = "-host-notice";
+
 /// A remote agent's message as B stores it, or the relay's notice about
 /// one.
 pub(crate) struct Relayed<'a> {
@@ -478,13 +533,6 @@ pub(crate) struct Relayed<'a> {
 
 /// A main-database message by its rowid and id.
 pub(crate) type MessageAt = (i64, String);
-
-/// The message of a relay author's that a message to it answers, and
-/// whether it is the relay's own notice, which no agent wrote.
-pub(crate) struct Answered {
-    pub message_id: String,
-    pub notice: bool,
-}
 
 /// A message one relay author receives.
 pub(crate) struct ToRelayAuthor {

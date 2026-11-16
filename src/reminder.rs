@@ -284,6 +284,7 @@ pub fn execute_reminder_operation<M: crate::mux::Mux, C: crate::Clock, I: crate:
     runtime: &crate::LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String> {
     execute_with_caller(operation, input, runtime, None)
+        .map_err(|error| runtime.mux.endpoint().kind.authored_error(error))
 }
 
 pub(crate) fn execute_with_caller<M: crate::mux::Mux, C: crate::Clock, I: crate::IdGenerator>(

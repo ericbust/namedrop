@@ -137,6 +137,32 @@ fn truncate_chars(value: &str, limit: usize) -> String {
     out
 }
 
+/// What a failed worker's error output says: its last line that starts with
+/// "error", as a CLI states why it stopped before a usage hint, else its last
+/// line, which a CLI prints after its warnings. A line too long to show keeps
+/// its start and its end, where the cause is.
+fn failure_detail(stderr: &str) -> String {
+    const LIMIT: usize = 200;
+    let lines: Vec<String> = stderr
+        .split(['\n', '\r'])
+        .map(sanitize_text)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let line = lines
+        .iter()
+        .rfind(|line| line.trim_start().to_ascii_lowercase().starts_with("error"))
+        .or_else(|| lines.last())
+        .cloned()
+        .unwrap_or_default();
+    let length = line.chars().count();
+    if length <= LIMIT {
+        return line;
+    }
+    let head = truncate_chars(&line, LIMIT / 2 - 1);
+    let tail: String = line.chars().skip(length - LIMIT / 2).collect();
+    format!("{head}…{tail}")
+}
+
 fn string_field(object: &Map<String, Value>, key: &str) -> Option<String> {
     object.get(key).and_then(Value::as_str).map(str::to_owned)
 }
@@ -559,7 +585,11 @@ pub(crate) fn codex_worker_support() -> Result<(), String> {
 }
 
 #[cfg(target_os = "macos")]
-fn deny_exec_profile(allowed: &Path, directory: &WorkerDirectory) -> Result<String, String> {
+fn deny_exec_profile(
+    allowed: &Path,
+    directory: &WorkerDirectory,
+    codex_home: &Path,
+) -> Result<String, String> {
     let executable = sandbox_literal(allowed)?;
 
     let mut readable: Vec<String> = PLATFORM_READS
@@ -574,9 +604,6 @@ fn deny_exec_profile(allowed: &Path, directory: &WorkerDirectory) -> Result<Stri
     readable.push(sandbox_literal(&directory.0)?.to_owned());
 
     let home = env::var_os("HOME").map(PathBuf::from);
-    // Fail closed: without a credential home the worker cannot be contained
-    // and authenticated at the same time, so it is not run at all.
-    let codex_home = codex_home()?;
     for entry in CODEX_HOME_READS {
         readable.push(sandbox_literal(&codex_home.join(entry))?.to_owned());
     }
@@ -597,7 +624,7 @@ fn deny_exec_profile(allowed: &Path, directory: &WorkerDirectory) -> Result<Stri
     let mut traversal = vec![
         "/".to_owned(),
         "/var".to_owned(),
-        sandbox_literal(&codex_home)?.to_owned(),
+        sandbox_literal(codex_home)?.to_owned(),
     ];
     for credential in ["auth.json", "auth.lock"] {
         traversal.push(sandbox_literal(&codex_home.join(credential))?.to_owned());
@@ -608,11 +635,45 @@ fn deny_exec_profile(allowed: &Path, directory: &WorkerDirectory) -> Result<Stri
             traversal.push(sandbox_literal(parent)?.to_owned());
         }
     }
+    // A path the worker is given through a link, as macOS gives `/tmp`, is
+    // looked up through the link, which the sandbox checks by the link's
+    // own path, as it checks `/var`. Each link on the way to the temporary
+    // directory, `HOME` and `CODEX_HOME` as given is named, and only the
+    // link: what is behind it stays as the rules above allow.
+    let given = [
+        Some(env::temp_dir()),
+        home.clone(),
+        env::var_os("CODEX_HOME").map(PathBuf::from),
+    ];
+    for path in given.into_iter().flatten() {
+        for link in links_on_the_way(&path) {
+            let link = sandbox_literal(&link)?.to_owned();
+            if !traversal.contains(&link) {
+                traversal.push(link);
+            }
+        }
+    }
     let traversal = traversal
         .iter()
         .map(|path| format!("  (literal \"{path}\")"))
         .collect::<Vec<_>>()
         .join("\n");
+
+    // Codex resolves a `CODEX_HOME` it was given before it starts, and stops
+    // when it cannot, which looks up each directory above it. Their metadata
+    // is readable, never what they list.
+    let ancestors = codex_home
+        .ancestors()
+        .skip(1)
+        .filter(|path| path.is_absolute())
+        .map(|path| sandbox_literal(path).map(|path| format!("  (literal \"{path}\")")))
+        .collect::<Result<Vec<_>, _>>()?;
+    // An allowance that names no path would allow every one.
+    let ancestors = if ancestors.is_empty() {
+        String::new()
+    } else {
+        format!("(allow file-read-metadata\n{})\n", ancestors.join("\n"))
+    };
 
     Ok(format!(
         "(version 1)\n\
@@ -620,8 +681,28 @@ fn deny_exec_profile(allowed: &Path, directory: &WorkerDirectory) -> Result<Stri
          (deny process-exec*)\n\
          (allow process-exec (literal \"{executable}\"))\n\
          (deny file-read*)\n\
-         (allow file-read*\n{subpaths}\n{traversal})\n"
+         (allow file-read*\n{subpaths}\n{traversal})\n\
+         {ancestors}"
     ))
+}
+
+/// Each symbolic link a lookup of `path` passes through, by the path that
+/// reaches it, in order, following each link to what it names.
+#[cfg(target_os = "macos")]
+fn links_on_the_way(path: &Path) -> Vec<PathBuf> {
+    let mut links = Vec::new();
+    let mut walked = PathBuf::new();
+    for component in path.components() {
+        walked.push(component);
+        if fs::symlink_metadata(&walked).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            links.push(walked.clone());
+            match walked.canonicalize() {
+                Ok(real) => walked = real,
+                Err(_) => break,
+            }
+        }
+    }
+    links
 }
 
 /// The fixed question one kind of worker asks. Only the payload varies per call.
@@ -675,10 +756,20 @@ fn codex_plan(
     let output_path = reserve_scratch(&directory, "message.txt")?;
     #[cfg(target_os = "macos")]
     let mut command = {
+        // Fail closed: without a credential home the worker cannot be
+        // contained and authenticated at the same time, so it is not run.
+        let given = codex_home()?;
+        // The sandbox matches real paths, so the profile names the real
+        // home. A home Codex was given reaches it by that path too, so
+        // Codex resolves no link the profile does not name.
+        let codex_home = given.canonicalize().unwrap_or(given);
         let mut command = Command::new(sandbox_binary());
         command
-            .args(["-p", &deny_exec_profile(&binary, &directory)?])
+            .args(["-p", &deny_exec_profile(&binary, &directory, &codex_home)?])
             .arg(&binary);
+        if env::var_os("CODEX_HOME").is_some() {
+            command.env("CODEX_HOME", &codex_home);
+        }
         command
     };
     #[cfg(target_os = "linux")]
@@ -896,9 +987,7 @@ fn capture_worker(
                 Ok(Some(status)) => {
                     stop_process_group(&mut child);
                     if !status.success() {
-                        let detail = read_capture(stderr).unwrap_or_default();
-                        let detail = sanitize_text(&detail);
-                        let detail = truncate_chars(&detail, 200);
+                        let detail = failure_detail(&read_capture(stderr).unwrap_or_default());
                         return Err(if detail.is_empty() {
                             "the model worker failed".to_owned()
                         } else {
@@ -1328,6 +1417,38 @@ fn store(key: String, summary: &Value) {
 #[cfg(test)]
 mod response_tests {
     use super::*;
+
+    #[test]
+    fn a_failure_is_told_by_its_last_line() {
+        assert_eq!(
+            failure_detail("WARNING: proceeding\nError: stopped here\n\n"),
+            "Error: stopped here"
+        );
+        assert_eq!(
+            failure_detail("loading 10%\rloading 90%\rError:\tno\u{1b}[31m model\r\n"),
+            "Error: no\u{fffd}[31m model"
+        );
+        assert_eq!(failure_detail("\n \n"), "");
+        assert_eq!(
+            failure_detail(
+                "error: unexpected argument '--ignore-rules' found\n\nUsage: codex exec [OPTIONS]\n\nFor more information, try '--help'.\n"
+            ),
+            "error: unexpected argument '--ignore-rules' found"
+        );
+        assert_eq!(
+            failure_detail("warming up\nstill warming\n"),
+            "still warming"
+        );
+        let long = format!("Error: {}: Operation not permitted", "x".repeat(300));
+        let detail = failure_detail(&long);
+        assert_eq!(detail.chars().count(), 200);
+        assert!(detail.starts_with("Error: xxx"), "{detail}");
+        assert!(detail.ends_with(": Operation not permitted"), "{detail}");
+        assert_eq!(
+            detail.chars().filter(|character| *character == '…').count(),
+            1
+        );
+    }
 
     #[test]
     fn json_fenced_model_response_is_extracted() {

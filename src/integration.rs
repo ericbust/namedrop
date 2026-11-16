@@ -323,6 +323,16 @@ pub fn complete_capability_profile() -> &'static [String] {
 
 pub(crate) fn rex_catalog_prose(text: &str) -> String {
     text.replace("this Herdr session", "this Rex server")
+        .replace("this workspace", "this Rex session")
+        .replace("this space", "this Rex session")
+        .replace("this Space", "this Rex session")
+        .replace("the Space", "the Rex session")
+        .replace("a Space", "a Rex session")
+        .replace("with workspaces", "with the `workspaces` input set to")
+        .replace("activated workspace", "activated Rex session")
+        .replace("which workspaces", "which Rex sessions")
+        .replace("#label workspace tokens", "#label Rex session tokens")
+        .replace("other workspaces", "other Rex sessions")
         .replace(
             "the pin writes one ref under refs/herdr-context/",
             "the pin writes one git ref that keeps the pinned objects",
@@ -1139,6 +1149,20 @@ fn shell_argument(value: &str) -> String {
 }
 
 pub fn execute_integration_operation<M, C, I>(
+    operation: &str,
+    input: Value,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
+) -> Result<Value, String>
+where
+    M: crate::mux::Mux,
+    C: crate::Clock,
+    I: crate::IdGenerator,
+{
+    execute_integration_operation_inner(operation, input, runtime)
+        .map_err(|error| runtime.mux.endpoint().kind.authored_error(error))
+}
+
+fn execute_integration_operation_inner<M, C, I>(
     operation: &str,
     input: Value,
     runtime: &LifecycleRuntime<'_, M, C, I>,

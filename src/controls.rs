@@ -56,6 +56,20 @@ where
     C: crate::Clock,
     I: crate::IdGenerator,
 {
+    execute_control_operation_inner(operation, input, runtime)
+        .map_err(|error| runtime.mux.endpoint().kind.authored_error(error))
+}
+
+fn execute_control_operation_inner<M, C, I>(
+    operation: &str,
+    input: Value,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
+) -> Result<Value, String>
+where
+    M: crate::mux::Mux,
+    C: crate::Clock,
+    I: crate::IdGenerator,
+{
     let discovered = match runtime.workspace_id {
         Some(workspace_id) => discover_worktree_for_workspace(runtime.mux, workspace_id)?,
         None => discover_worktree(runtime.mux, runtime.cwd)?,
@@ -159,7 +173,7 @@ where
                 .and_then(|id| discovered.panes.iter().find(|pane| pane.pane_id == id))
                 .ok_or(runtime.mux.endpoint().kind.text(
                     "allow-remote must run from a Herdr pane in this workspace",
-                    "allow-remote must run from a Rex pane in this workspace",
+                    "allow-remote must run from a Rex pane in this Rex session",
                 ))?;
             let record = store
                 .transaction(|transaction| {

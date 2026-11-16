@@ -1875,3 +1875,52 @@ mod rex_name_prompt_tests {
         assert!(!shown.contains("needs attention"), "{shown}");
     }
 }
+
+#[cfg(all(test, feature = "test-support"))]
+mod words_host_tests {
+    use super::*;
+
+    #[test]
+    fn target_errors_keep_the_invoking_hosts_words() {
+        for (endpoint, missing, closed) in [
+            (
+                "/tmp/words-naming.sock",
+                "This popup is missing its invoking space",
+                "The invoking pane has closed. Open the popup again from your pane.",
+            ),
+            (
+                "rex:/tmp/words-naming.sock",
+                "This screen is missing its invoking session",
+                "The invoking pane has closed. Open the screen again from your pane.",
+            ),
+        ] {
+            let mux: Arc<dyn namedrop::mux::Mux> = Arc::new(
+                namedrop::mux::fake::FakeMux::world()
+                    .endpoint(endpoint)
+                    .space("s1")
+                    .pane("p1")
+                    .build(),
+            );
+            let clock = SystemClock;
+            let ids = ProcessIds::default();
+            let runtime = LifecycleRuntime {
+                state_directory: Path::new("/unused"),
+                home_directory: None,
+                agent_config: namedrop::AgentConfigDirectories::default(),
+                cwd: Path::new("/unused"),
+                workspace_id: None,
+                current_pane_id: Some("p9"),
+                session_socket_id: endpoint,
+                mux: &mux,
+                clock: &clock,
+                ids: &ids,
+            };
+            assert_eq!(target_pane(&runtime).unwrap_err(), missing);
+            let runtime = LifecycleRuntime {
+                workspace_id: Some("s1"),
+                ..runtime
+            };
+            assert_eq!(target_pane(&runtime).unwrap_err(), closed);
+        }
+    }
+}

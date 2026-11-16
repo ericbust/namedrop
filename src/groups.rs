@@ -27,6 +27,20 @@ where
     C: crate::Clock,
     I: crate::IdGenerator,
 {
+    execute_group_operation_inner(operation, input, runtime)
+        .map_err(|error| runtime.mux.endpoint().kind.authored_error(error))
+}
+
+fn execute_group_operation_inner<M, C, I>(
+    operation: &str,
+    input: Value,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
+) -> Result<Value, String>
+where
+    M: crate::mux::Mux,
+    C: crate::Clock,
+    I: crate::IdGenerator,
+{
     let discovered = match runtime.workspace_id {
         Some(workspace) => discover_worktree_for_workspace(runtime.mux, workspace)?,
         None => discover_worktree(runtime.mux, runtime.cwd)?,

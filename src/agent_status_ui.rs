@@ -1049,11 +1049,20 @@ fn sections(state: &State, width: usize) -> Vec<Line> {
         separate(&mut peers, &mut previous, entry.len());
         peers.extend(entry);
     }
-    lines.push(heading("Elsewhere in this workspace"));
+    lines.push(heading(super::popup_input::host().text(
+        "Elsewhere in this workspace",
+        "Elsewhere in this Rex session",
+    )));
     if peers.is_empty() {
         lines.extend(toned(
             Tone::Muted,
-            indented("No other agents in this workspace.", width),
+            indented(
+                super::popup_input::host().text(
+                    "No other agents in this workspace.",
+                    "No other agents in this Rex session.",
+                ),
+                width,
+            ),
         ));
     } else {
         lines.extend(peers);
