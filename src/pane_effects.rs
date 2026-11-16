@@ -1658,6 +1658,8 @@ mod tests {
         ("dashboard/server_files.rs", "Command::new(executable)"),
         ("dashboard/tailscale.rs", "Command::new(self.0)"),
         ("dashboard/tailscale.rs", "Command::new(&executable)"),
+        // A test's pid of a program that has exited.
+        ("dashboard/tailscale.rs", r#"Command::new("true")"#),
     ];
 
     /// Every line of dashboard code that names `Command` other than in a

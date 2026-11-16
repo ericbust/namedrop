@@ -691,7 +691,7 @@ fn with_tailscale_access_on_another_ui_restarts_the_server_and_a_killed_server_r
             .success()
     );
     let returned = eventually(|| {
-        let _ = Command::new(env!("CARGO_BIN_EXE_namedrop"))
+        let _ = crate::binary::namedrop()
             .arg("--plugin-state")
             .arg(dashboard.state())
             .args(["--herdr-socket", "assets-test", "--herdr-workspace", "w1"])

@@ -1,3 +1,5 @@
+#[path = "support/binary.rs"]
+mod binary;
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/delivered.rs"]
@@ -14,7 +16,7 @@ use std::{
     io::{Read, Write},
     net::{Shutdown, TcpStream},
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Child, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -252,7 +254,7 @@ impl Server {
         executable::write_executable(&shim, FAKE_HERDR);
         let home = f.root.join("home");
         let stderr = fs::File::create(f.root.join("dashboard.stderr")).unwrap();
-        let child = Command::new(env!("CARGO_BIN_EXE_namedrop"))
+        let child = crate::binary::namedrop()
             .arg("--plugin-state")
             .arg(&f.state)
             .arg("dashboard-server")

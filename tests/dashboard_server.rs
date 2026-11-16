@@ -1033,7 +1033,7 @@ fn a_server_with_tailscale_access_outlives_the_idle_limit_and_a_local_one_stops(
 }
 
 fn channels(root: &Path, extra: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_namedrop"))
+    crate::binary::namedrop()
         .args(["--json", "--plugin-state"])
         .arg(root.join("state"))
         .args(["--herdr-socket", SOCKET, "--herdr-workspace", "w1"])
@@ -1125,7 +1125,7 @@ fn port_of_server(state: &Path) -> u16 {
 
 /// The command Herdr runs each time it starts.
 fn herdr_startup(root: &Path) {
-    let output = Command::new(env!("CARGO_BIN_EXE_namedrop"))
+    let output = crate::binary::namedrop()
         .arg("--plugin-state")
         .arg(root.join("state"))
         .args(["--herdr-socket", SOCKET, "--herdr-workspace", "w1"])
