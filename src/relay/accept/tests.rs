@@ -719,9 +719,22 @@ fn tries_as(
     in_reply_to: &str,
     source: &str,
 ) -> Result<Value, String> {
-    bound(b, space, alias);
+    tries_on(b, REX, space, alias, in_reply_to, source)
+}
+
+/// The reply of `alias` in `session:<space>` of `endpoint`.
+fn tries_on(
+    b: &B,
+    endpoint: &str,
+    space: &str,
+    alias: &str,
+    in_reply_to: &str,
+    source: &str,
+) -> Result<Value, String> {
+    bound_on(b, endpoint, space, alias);
     let (block, space) = (format!("block:{space}"), format!("session:{space}"));
     let mux = crate::mux::fake::FakeMux::world()
+        .endpoint(endpoint)
         .space(&space)
         .checkout("/repo-b")
         .pane(&block)
@@ -737,7 +750,7 @@ fn tries_as(
         cwd: Path::new("/repo-b"),
         workspace_id: Some(&space),
         current_pane_id: Some(&block),
-        session_socket_id: REX,
+        session_socket_id: endpoint,
         mux: &mux,
         clock: &crate::SystemClock,
         ids: &ids,
@@ -752,8 +765,12 @@ fn tries_as(
 
 /// Binds `alias` in `session:<space>` to block `block:<space>`, once.
 fn bound(b: &B, space: &str, alias: &str) {
+    bound_on(b, REX, space, alias);
+}
+
+fn bound_on(b: &B, endpoint: &str, space: &str, alias: &str) {
     let (block, space) = (format!("block:{space}"), format!("session:{space}"));
-    let namespace = StateNamespace::for_space(REX, &space);
+    let namespace = StateNamespace::for_space(endpoint, &space);
     let attribution = MutationAttribution::new(ActorKind::Human, "test", 3);
     StateStore::open(&b.0)
         .unwrap()
@@ -1648,8 +1665,12 @@ fn relayed_id(b: &B, item: &str) -> String {
 
 /// Purges `session:<space>`, as a person does with a space they closed.
 fn purge(b: &B, space: &str) {
+    purge_on(b, REX, space);
+}
+
+fn purge_on(b: &B, endpoint: &str, space: &str) {
     let space = format!("session:{space}");
-    let namespace = StateNamespace::for_space(REX, &space);
+    let namespace = StateNamespace::for_space(endpoint, &space);
     let attribution = MutationAttribution::new(ActorKind::Human, "test", 5);
     let mut main = StateStore::open(&b.0).unwrap();
     main.transaction(|transaction| transaction.deactivate_worktree(&namespace, &attribution))
@@ -1874,11 +1895,15 @@ fn an_acknowledgement_of_the_host_notice_is_neither_kept_nor_counted() {
 
 /// Activates `session:<space>` on B with an agent of each alias.
 fn space(b: &B, space: &str, aliases: &[&str]) {
+    space_on(b, REX, space, aliases);
+}
+
+fn space_on(b: &B, endpoint: &str, space: &str, aliases: &[&str]) {
     let attribution = MutationAttribution::new(ActorKind::Human, "test", 7);
     StateStore::open(&b.0)
         .unwrap()
         .transaction(|transaction| {
-            let namespace = StateNamespace::for_space(REX, space);
+            let namespace = StateNamespace::for_space(endpoint, space);
             transaction.activate_worktree(&namespace, &attribution)?;
             for alias in aliases {
                 let id = format!("address-{space}-{alias}");
@@ -2000,6 +2025,135 @@ fn replies_made_below_a_purged_floor_are_kept() {
         ]
         .map(|text| json!(text))
     );
+    assert!(super::super::expired_replies(&b.0).is_empty());
+}
+
+/// Below a floor whose message is gone, the history ends at the endpoint's
+/// last message made at or before the floor's millisecond. A reply made in
+/// that millisecond before the floor was there when the relay database was
+/// made, so it is history: B neither reads it again nor counts it, and
+/// keeps the reply made after (round B's review, F3).
+#[test]
+fn a_reply_made_in_the_floor_s_millisecond_is_history() {
+    let b = B::new();
+    space(&b, "session:b4", &["dave"]);
+    b.call(&deliver("d0", "dave", "td0", "an old question"));
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    tries_as(
+        &b,
+        "b4",
+        "dave",
+        &relayed_id(&b, "d0"),
+        "@alice@laptop from before",
+    )
+    .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    b.call(&deliver("c1", "carol", "tc", "history"));
+    made_again(&b);
+    // As if the floor's message had been made in the reply's millisecond.
+    Connection::open(b.0.join("relay.sqlite3"))
+        .unwrap()
+        .execute(
+            "UPDATE capture_start SET created_at_ms = ?1",
+            [made_at(&b, "from before")],
+        )
+        .unwrap();
+    b.call(&deliver("m1", "bob", "tb", "please answer"));
+    purge(&b, "b2");
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    bob_answers(&b, &relayed_id(&b, "m1"), "@alice@laptop after");
+    super::super::capture::capture(&b.0, &Endpoint::parse(REX), &mut |_| {}).unwrap();
+    assert_eq!(outbox_texts(&b), [[json!("after")]]);
+    assert!(super::super::expired_replies(&b.0).is_empty());
+}
+
+/// A second Rex server whose spaces share this state.
+const REX2: &str = "rex:/tmp/namedrop-relay-accept-2.sock";
+
+/// Two servers' spaces in one state, and a relay database made in the
+/// middle of their history, so its floor is a message of the first. The
+/// second endpoint's capture reads none of its history before the floor,
+/// and keeps each of its replies once when the floor's space and then its
+/// own newest space are purged. The first endpoint's own first capture
+/// after both reads only its new reply (round B's review, F3).
+#[test]
+fn two_endpoints_in_one_state_share_the_floor() {
+    let b = B::new();
+    let call_on = |endpoint: &str, args: &Value| {
+        accept(
+            &b.0,
+            &Endpoint::parse(endpoint),
+            HOST_B,
+            None,
+            args.to_string().as_bytes(),
+            &mut |_| {},
+        )
+    };
+    let pause = || std::thread::sleep(std::time::Duration::from_millis(3));
+    space_on(&b, REX2, "session:x1", &["xena"]);
+    space_on(&b, REX2, "session:x2", &["yan"]);
+    call_on(REX2, &deliver("h1", "xena", "th", "old question"));
+    tries_on(
+        &b,
+        REX2,
+        "x1",
+        "xena",
+        &relayed_id(&b, "h1"),
+        "@alice@laptop xena old",
+    )
+    .unwrap();
+    for n in 1..=3 {
+        b.call(&deliver(&format!("c{n}"), "carol", "tc", "history"));
+    }
+    made_again(&b);
+    let second = Endpoint::parse(REX2);
+    let capture_second = || super::super::capture::capture(&b.0, &second, &mut |_| {}).unwrap();
+    capture_second();
+    assert!(outbox_texts(&b).is_empty(), "the second endpoint's history");
+    call_on(REX2, &deliver("y1", "yan", "ty", "new question"));
+    let to_yan = relayed_id(&b, "y1");
+    pause();
+    tries_on(&b, REX2, "x2", "yan", &to_yan, "@alice@laptop yan 1").unwrap();
+    capture_second();
+    assert_eq!(outbox_texts(&b), [[json!("yan 1")]]);
+    acked(&b);
+    // The floor's space, of the first endpoint, goes.
+    purge(&b, "b2");
+    pause();
+    tries_on(&b, REX2, "x2", "yan", &to_yan, "@alice@laptop yan 2").unwrap();
+    capture_second();
+    assert_eq!(outbox_texts(&b), [[json!("yan 2")]]);
+    acked(&b);
+    // Then the second endpoint's own newest space: its cursor and mark go.
+    purge_on(&b, REX2, "x2");
+    space_on(&b, REX2, "session:x2", &["yan"]);
+    pause();
+    call_on(REX2, &deliver("y2", "yan", "ty2", "again"));
+    let to_yan = relayed_id(&b, "y2");
+    for n in 3..=5 {
+        pause();
+        tries_on(
+            &b,
+            REX2,
+            "x2",
+            "yan",
+            &to_yan,
+            &format!("@alice@laptop yan {n}"),
+        )
+        .unwrap();
+        capture_second();
+    }
+    assert_eq!(
+        outbox_texts(&b),
+        [[json!("yan 3")], [json!("yan 4")], [json!("yan 5")]]
+    );
+    acked(&b);
+    b.call(&deliver("m1", "bob", "tb", "please"));
+    pause();
+    bob_answers(&b, &relayed_id(&b, "m1"), "@alice@laptop bob 1");
+    super::super::capture::capture(&b.0, &Endpoint::parse(REX), &mut |_| {}).unwrap();
+    capture_second();
+    assert_eq!(outbox_texts(&b), [[json!("bob 1")]]);
     assert!(super::super::expired_replies(&b.0).is_empty());
 }
 
