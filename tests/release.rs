@@ -467,6 +467,9 @@ fn setup_shows_what_a_handoff_from_rex_did() {
                 .output()
                 .unwrap(),
         );
+        // The hint is the move's, once however many states moved (round A's
+        // review, F5).
+        let moves = usize::from(!shows.is_empty());
         for text in shows {
             assert!(
                 output.lines().any(|line| line.contains(&text)),
@@ -476,6 +479,11 @@ fn setup_shows_what_a_handoff_from_rex_did() {
         for text in hides {
             assert!(!output.contains(text), "{handoff}: {text:?} in {output}");
         }
+        assert_eq!(
+            output.matches("may show Hook failed").count(),
+            moves,
+            "{handoff}: {output}"
+        );
     }
     let plain = success(
         fixture
