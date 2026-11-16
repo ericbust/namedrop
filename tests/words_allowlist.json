@@ -64,9 +64,9 @@
       ],
       "sources": [
         {"file": "src/installed_runtime/packages.rs", "line": 123, "source": "ND-INSTALL-002: Namedrop's shared agent packages belong to Herdr's install in {}. Run Activate Namedrop in Herdr to update them."},
-        {"file": "scripts/install.sh", "line": 149, "source": "ND-INSTALL-002: Namedrop's shared agent packages belong to Herdr's install in "},
+        {"file": "scripts/install.sh", "line": 165, "source": "ND-INSTALL-002: Namedrop's shared agent packages belong to Herdr's install in "},
         {"file": "scripts/runtime_install.py", "line": 23, "source": "ND-INSTALL-002: Namedrop's shared agent packages belong to Herdr's install in "},
-        {"file": "scripts/install.sh", "line": 150, "source": "{state}. Run Activate Namedrop in Herdr to update them."},
+        {"file": "scripts/install.sh", "line": 166, "source": "{state}. Run Activate Namedrop in Herdr to update them."},
         {"file": "scripts/runtime_install.py", "line": 24, "source": "{self.state}. Run Activate Namedrop in Herdr to update them."}
       ],
       "reason": "ND-INSTALL-002's Herdr form: a Rex install's writer refuses packages that Herdr's install owns. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
@@ -94,7 +94,7 @@
         "doctor text (Herdr took the state over)"
       ],
       "sources": [
-        {"file": "src/rex_ui/handoff.rs", "line": 285, "source": "Namedrop on Rex moved to Herdr's install in {}. {count} not run its hooks since the move from {}, and the names made there were not carried over. In each Rex session, run Activate Namedrop again and name the panes again. An agent runs the new hooks at its next turn. Restart one that shows Hook failed or does not answer a mention. This warning clears as each of them takes a turn or ends.\n{blocks}"}
+        {"file": "src/rex_ui/handoff.rs", "line": 287, "source": "Namedrop on Rex moved to Herdr's install in {}. {count} not run its hooks since the move from {}, and the names made there were not carried over. In each Rex session, run Activate Namedrop again and name the panes again. An agent runs the new hooks at its next turn. Restart one that shows Hook failed or does not answer a mention. This warning clears as each of them takes a turn or ends.\n{blocks}"}
       ],
       "reason": "ND-INSTALL-001 in Doctor of the state that took over, read from a Rex block whose agent has not run that state's hooks yet. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
     },
@@ -130,7 +130,7 @@
       ],
       "sources": [
         {"file": "scripts/runtime.py", "line": 881, "source": "Namedrop is moving to Herdr. Run Activate Namedrop in Herdr again."},
-        {"file": "scripts/install.sh", "line": 145, "source": "Namedrop is moving to Herdr. Run Activate Namedrop in Herdr again."}
+        {"file": "scripts/install.sh", "line": 161, "source": "Namedrop is moving to Herdr. Run Activate Namedrop in Herdr again."}
       ],
       "reason": "A Rex state that Herdr is taking over refuses the install. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
     },
@@ -152,8 +152,8 @@
         "install.sh"
       ],
       "sources": [
-        {"file": "scripts/install.sh", "line": 167, "source": "Namedrop is already installed in Herdr ({herdr}). "},
-        {"file": "scripts/install.sh", "line": 168, "source": "Update Namedrop in Herdr first, then run sh scripts/install.sh again."}
+        {"file": "scripts/install.sh", "line": 183, "source": "Namedrop is already installed in Herdr ({herdr}). "},
+        {"file": "scripts/install.sh", "line": 184, "source": "Update Namedrop in Herdr first, then run sh scripts/install.sh again."}
       ],
       "reason": "A Herdr release from before step 6 owns this HOME's Namedrop. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
     },
@@ -164,22 +164,72 @@
         "install.sh"
       ],
       "sources": [
-        {"file": "scripts/install.sh", "line": 165, "source": "Namedrop is already installed in Herdr ({herdr}). "},
-        {"file": "scripts/install.sh", "line": 166, "source": "Run Activate Namedrop in Herdr first, then run sh scripts/install.sh again."}
+        {"file": "scripts/install.sh", "line": 181, "source": "Namedrop is already installed in Herdr ({herdr}). "},
+        {"file": "scripts/install.sh", "line": 182, "source": "Run Activate Namedrop in Herdr first, then run sh scripts/install.sh again."}
       ],
       "reason": "A current Herdr release owns this HOME's Namedrop and lost its install record, which its activation writes again. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
     },
     {
       "kind": "shared-home",
-      "text": "Namedrop cannot read Herdr's plugin list in <path>, so it cannot tell whether Namedrop is still installed in Herdr (<path>). If it is not, move that directory away, then run sh scripts/install.sh again.",
+      "text": "Namedrop cannot read Herdr's plugin list in <path>, so it cannot tell whether Namedrop is still installed in Herdr (<path>). If Herdr uses another config directory, run sh scripts/install.sh again with Herdr's XDG_CONFIG_HOME. Otherwise, if Namedrop is not installed in Herdr, move that state directory away, then run sh scripts/install.sh again.",
       "surfaces": [
         "install.sh"
       ],
       "sources": [
-        {"file": "scripts/install.sh", "line": 81, "source": "Namedrop cannot read Herdr's plugin list in {registry}, so it cannot tell whether "},
-        {"file": "scripts/install.sh", "line": 82, "source": "Namedrop is still installed in Herdr ({herdr}). If it is not, move that directory "}
+        {"file": "scripts/install.sh", "line": 93, "source": " If Herdr uses another config directory, run sh scripts/install.sh again with "},
+        {"file": "scripts/install.sh", "line": 94, "source": "Herdr's XDG_CONFIG_HOME."},
+        {"file": "scripts/install.sh", "line": 96, "source": "Namedrop cannot read Herdr's plugin list in {registry}, so it cannot tell whether "},
+        {"file": "scripts/install.sh", "line": 97, "source": "Namedrop is still installed in Herdr ({herdr}).{elsewhere} Otherwise, if Namedrop is not "},
+        {"file": "scripts/install.sh", "line": 98, "source": "installed in Herdr, move that state directory away, then run sh scripts/install.sh again."}
       ],
-      "reason": "Herdr's state for Namedrop outlives `herdr plugin uninstall`, so install.sh refuses beside it only while Herdr's plugin list names Namedrop, and names the way out when it cannot read that list. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
+      "reason": "Herdr's state for Namedrop outlives `herdr plugin uninstall`, so install.sh refuses beside it only while Herdr's plugin list names Namedrop, and names the list and the ways out when it cannot read it, first that Herdr may read another list (round C's review, F2 and F3). It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
+    },
+    {
+      "kind": "shared-home",
+      "text": "Namedrop cannot read Herdr's plugin list in <path>, so it cannot tell whether Namedrop is still installed in Herdr (<path>). XDG_CONFIG_HOME is relative, so Namedrop read that list from this working directory, which may not be Herdr's. If Herdr uses another config directory, run sh scripts/install.sh again with Herdr's XDG_CONFIG_HOME. Otherwise, if Namedrop is not installed in Herdr, move that state directory away, then run sh scripts/install.sh again.",
+      "surfaces": [
+        "install.sh"
+      ],
+      "sources": [
+        {"file": "scripts/install.sh", "line": 92, "source": "directory, which may not be Herdr's."},
+        {"file": "scripts/install.sh", "line": 93, "source": " If Herdr uses another config directory, run sh scripts/install.sh again with "},
+        {"file": "scripts/install.sh", "line": 94, "source": "Herdr's XDG_CONFIG_HOME."},
+        {"file": "scripts/install.sh", "line": 96, "source": "Namedrop cannot read Herdr's plugin list in {registry}, so it cannot tell whether "},
+        {"file": "scripts/install.sh", "line": 97, "source": "Namedrop is still installed in Herdr ({herdr}).{elsewhere} Otherwise, if Namedrop is not "},
+        {"file": "scripts/install.sh", "line": 98, "source": "installed in Herdr, move that state directory away, then run sh scripts/install.sh again."}
+      ],
+      "reason": "Herdr's state for Namedrop outlives `herdr plugin uninstall`, so install.sh refuses beside it only while Herdr's plugin list names Namedrop, and names the list and the ways out when it cannot read it, first that Herdr may read another list (round C's review, F2 and F3). Here XDG_CONFIG_HOME is relative, and Herdr reads it from its own working directory. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
+    },
+    {
+      "kind": "shared-home",
+      "text": "Namedrop's install record names Herdr's Namedrop state (<path>), but Herdr's plugin list in <path> does not name Namedrop. If Herdr uses another config directory, run sh scripts/install.sh again with Herdr's XDG_CONFIG_HOME. Otherwise install Namedrop in Herdr again, or move that state directory away, then run sh scripts/install.sh again.",
+      "surfaces": [
+        "install.sh"
+      ],
+      "sources": [
+        {"file": "scripts/install.sh", "line": 93, "source": " If Herdr uses another config directory, run sh scripts/install.sh again with "},
+        {"file": "scripts/install.sh", "line": 94, "source": "Herdr's XDG_CONFIG_HOME."},
+        {"file": "scripts/install.sh", "line": 100, "source": "Herdr's plugin list in {registry} does not name Namedrop.{elsewhere}"},
+        {"file": "scripts/install.sh", "line": 192, "source": "Namedrop's install record names Herdr's Namedrop state ({state}), but {unlisted} "},
+        {"file": "scripts/install.sh", "line": 193, "source": "Otherwise install Namedrop in Herdr again, or move that state directory away, "}
+      ],
+      "reason": "The install record names Herdr's Namedrop state after `herdr plugin uninstall`, which keeps both, so install.sh adopts that state only while Herdr's plugin list names Namedrop. It names the list it read, and first the way out for a Herdr that reads another one (round C's review, F2). It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
+    },
+    {
+      "kind": "shared-home",
+      "text": "Namedrop's install record names Herdr's Namedrop state (<path>), but Herdr's plugin list in <path> does not name Namedrop. XDG_CONFIG_HOME is relative, so Namedrop read that list from this working directory, which may not be Herdr's. If Herdr uses another config directory, run sh scripts/install.sh again with Herdr's XDG_CONFIG_HOME. Otherwise install Namedrop in Herdr again, or move that state directory away, then run sh scripts/install.sh again.",
+      "surfaces": [
+        "install.sh"
+      ],
+      "sources": [
+        {"file": "scripts/install.sh", "line": 92, "source": "directory, which may not be Herdr's."},
+        {"file": "scripts/install.sh", "line": 93, "source": " If Herdr uses another config directory, run sh scripts/install.sh again with "},
+        {"file": "scripts/install.sh", "line": 94, "source": "Herdr's XDG_CONFIG_HOME."},
+        {"file": "scripts/install.sh", "line": 100, "source": "Herdr's plugin list in {registry} does not name Namedrop.{elsewhere}"},
+        {"file": "scripts/install.sh", "line": 192, "source": "Namedrop's install record names Herdr's Namedrop state ({state}), but {unlisted} "},
+        {"file": "scripts/install.sh", "line": 193, "source": "Otherwise install Namedrop in Herdr again, or move that state directory away, "}
+      ],
+      "reason": "The install record names Herdr's Namedrop state after `herdr plugin uninstall`, which keeps both, so install.sh adopts that state only while Herdr's plugin list names Namedrop. It names the list it read, and first the way out for a Herdr that reads another one (round C's review, F2). Here XDG_CONFIG_HOME is relative, and Herdr reads it from its own working directory. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
     },
     {
       "kind": "shared-home",
@@ -188,7 +238,7 @@
         "install.sh"
       ],
       "sources": [
-        {"file": "scripts/install.sh", "line": 161, "source": "Herdr's Namedrop state"}
+        {"file": "scripts/install.sh", "line": 177, "source": "Herdr's Namedrop state"}
       ],
       "reason": "Herdr's Namedrop state still listed by Herdr, with an owner file install.sh cannot read. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
     },
@@ -199,7 +249,7 @@
         "install.sh"
       ],
       "sources": [
-        {"file": "scripts/install.sh", "line": 172, "source": "Update Namedrop in Herdr first, then run sh scripts/install.sh again."}
+        {"file": "scripts/install.sh", "line": 195, "source": "Update Namedrop in Herdr first, then run sh scripts/install.sh again."}
       ],
       "reason": "Herdr's runtime cannot install the Rex module yet. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
     },
@@ -210,7 +260,7 @@
         "install.sh"
       ],
       "sources": [
-        {"file": "scripts/install.sh", "line": 191, "source": "Herdr keeps its runtime and updates it. This archive publishes no runtime."}
+        {"file": "scripts/install.sh", "line": 214, "source": "Herdr keeps its runtime and updates it. This archive publishes no runtime."}
       ],
       "reason": "install.sh adopts Herdr's runtime. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
     },
@@ -221,7 +271,7 @@
         "install.sh"
       ],
       "sources": [
-        {"file": "scripts/install.sh", "line": 203, "source": "Installing the Rex module and agent packages with Herdr's runtime…"}
+        {"file": "scripts/install.sh", "line": 226, "source": "Installing the Rex module and agent packages with Herdr's runtime…"}
       ],
       "reason": "install.sh adopts Herdr's runtime. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
     },
@@ -471,7 +521,7 @@
       "file": "scripts/install.sh",
       "reason": "A file or directory name of the agent packages, read and written, never printed as text.",
       "literals": [
-        [159, "herdr/plugins/namedrop"]
+        [175, "herdr/plugins/namedrop"]
       ]
     },
     {
@@ -479,8 +529,8 @@
       "file": "scripts/install.sh",
       "reason": "Herdr's plugin list, its file and the key that names a plugin, read to tell whether Herdr still lists Namedrop. The file shows only inside its path.",
       "literals": [
-        [73, "herdr/plugins.json"],
-        [84, "plugin_id"]
+        [76, "herdr/plugins.json"],
+        [99, "plugin_id"]
       ]
     },
     {
@@ -490,10 +540,10 @@
       "literals": [
         [60, "herdr"],
         [64, "herdr"],
-        [145, "herdr_handoff"],
-        [148, "herdr"],
-        [161, "herdr"],
-        [170, "herdr"]
+        [161, "herdr_handoff"],
+        [164, "herdr"],
+        [177, "herdr"],
+        [186, "herdr"]
       ]
     },
     {
@@ -737,7 +787,7 @@
       "file": "src/agent_status_model.rs",
       "reason": "An environment or config name read or set, never printed.",
       "literals": [
-        [933, "HERDR_"]
+        [930, "HERDR_"]
       ]
     },
     {
@@ -841,7 +891,7 @@
       "file": "src/health.rs",
       "reason": "Codex's or Claude Code's own plugin, or Namedrop's --plugin-state flag, which a Rex home uses as a Herdr home does.",
       "literals": [
-        [759, "The Namedrop plugin changed after this session started, and a running session doesn't pick up the change. An answer it gives as its final message won't reach anyone."]
+        [760, "The Namedrop plugin changed after this session started, and a running session doesn't pick up the change. An answer it gives as its final message won't reach anyone."]
       ]
     },
     {
@@ -849,7 +899,7 @@
       "file": "src/health.rs",
       "reason": "ND-SESSION-002's Herdr repair; a Rex home's repair is Activate Namedrop.",
       "literals": [
-        [601, "herdr.integration.install"]
+        [602, "herdr.integration.install"]
       ]
     },
     {
@@ -857,8 +907,8 @@
       "file": "src/health.rs",
       "reason": "The stale-build notice of a Herdr plugin root, which only Herdr's reinstall leaves.",
       "literals": [
-        [1588, "A reinstall rebuilt Namedrop but did not switch to the new build, so every command still runs the earlier release. Update Namedrop switches builds for you on GitHub installs; a bare `herdr plugin install` does not."],
-        [1590, "Switch to the new build? Run the command in this Herdr workspace."]
+        [1589, "A reinstall rebuilt Namedrop but did not switch to the new build, so every command still runs the earlier release. Update Namedrop switches builds for you on GitHub installs; a bare `herdr plugin install` does not."],
+        [1591, "Switch to the new build? Run the command in this Herdr workspace."]
       ]
     },
     {
@@ -866,7 +916,7 @@
       "file": "src/health.rs",
       "reason": "A key of the JSON interface, which stays one for both hosts.",
       "literals": [
-        [1594, "plugin_root"]
+        [1595, "plugin_root"]
       ]
     },
     {
@@ -1343,13 +1393,13 @@
     },
     {
       "file": "src/health.rs",
-      "line": 399,
+      "line": 400,
       "text": "Namedrop is paused in this Rex session.",
       "reason": "Paused health issue is not staged by the Words homes."
     },
     {
       "file": "src/health.rs",
-      "line": 1310,
+      "line": 1311,
       "text": "Namedrop could not inspect this Rex session safely.",
       "reason": "Requires a failed host discovery; not staged by the Words homes."
     },

@@ -636,8 +636,6 @@ def scenario_rex_first(run, args, request):
     run.observe("standalone helpers before the handoff", old_helpers)
     cache = sorted(str(path) for path in (profile.dir / "codex/plugins/cache/namedrop/namedrop").glob("*"))
     run.observe("Codex plugin cache before the handoff", cache)
-    old_runs = hook_runs(old)
-    run.observe("standalone hook runs before the handoff", old_runs)
     # `rex_live.up` returns once Codex's warm-up turn ran its first hook. The
     # handoff's `codex plugin add` replaces the package copy that a running
     # turn's later hooks still name, so a turn in flight ends with Hook failed
@@ -645,6 +643,10 @@ def scenario_rex_first(run, args, request):
     done = wait(lambda: turns(profile), lambda counts: counts[1] >= 1 and counts[0] == counts[1],
                 "Codex's warm-up turn to complete", 300, 1)
     run.observe("Codex turns (started, completed) before the handoff", done)
+    # Read once the warm-up's later hooks wrote theirs, so only a run after
+    # the handoff changes them.
+    old_runs = hook_runs(old)
+    run.observe("standalone hook runs before the handoff", old_runs)
 
     add_herdr(profile, agents)
     pane = herdr_up(run, profile)

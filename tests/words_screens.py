@@ -141,6 +141,26 @@ with tempfile.TemporaryDirectory(prefix="nd-words-", dir="/tmp") as folder:
             capture(f"ui launch {mode} (Herdr in the foreground)", out.stdout + out.stderr)
             print(refusal)
         foreground_herdr = False
+        # Ordinary commands write their results and errors in the words of
+        # the home their runtime resolved (main.rs's WORDING_HOST, round B's
+        # review, F3), in a home and state of their own.
+        words_home, words_state = root / "words-home", root / "words-state"
+        words_home.mkdir()
+        (words_state / "runtime").mkdir(parents=True)
+        (words_state / "runtime/owner").write_text("standalone\n")
+        hold_bridge(words_state)
+        words_env = dict(env, HOME=str(words_home), NAMEDROP_STATE_DIR=str(words_state))
+        inactive = "Error: Namedrop is not activated for this Rex session"
+        for args, expected in ((["address", "list"], inactive),
+                               (["activate", "--input-json", '{"confirmed":true}'], "Namedrop activated in Rex session s1."),
+                               (["address", "list"], "No names in this Rex session."),
+                               (["group", "list"], "No saved groups in this Rex session."),
+                               (["deactivate"], "Namedrop deactivated in this Rex session."),
+                               (["address", "list"], inactive)):
+            out = run([str(BINARY), *endpoint, "--human", *args], env=words_env, timeout=20)
+            assert expected in out.stdout + out.stderr, (args, out)
+            capture(" ".join(args[:2]) + " (human)", out.stdout + out.stderr)
+        print("command results passed")
         # An installed Rex runtime under a HOME whose packages Herdr's install owns.
         herdr_state, rex_state = root / "herdr-state", root / "rex-state"
         installed(herdr_state, "herdr")

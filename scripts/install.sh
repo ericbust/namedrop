@@ -66,22 +66,38 @@ def owner(state, which='this Namedrop state'):
 
 
 def herdr_lists_namedrop(home, herdr):
-    """Whether Herdr's plugin registry still lists Namedrop. Herdr keeps it in
-    $XDG_CONFIG_HOME/herdr/plugins.json, else ~/.config/herdr/plugins.json
-    (herdr's config::config_dir), and reads a missing file as no plugins."""
-    base = Path(os.environ.get('XDG_CONFIG_HOME') or '')
-    registry = (base if base.is_absolute() else home / '.config') / 'herdr/plugins.json'
+    """Whether Herdr's plugin registry still lists Namedrop, and what a
+    refusal says when it does not: the list read, and the way out for a
+    Herdr that reads another. Herdr keeps it in
+    $XDG_CONFIG_HOME/herdr/plugins.json whenever that is set, even empty or
+    relative, else in ~/.config/herdr/plugins.json (herdr's
+    config::config_dir), and reads a missing file as no plugins."""
+    config = os.environ.get('XDG_CONFIG_HOME')
+    registry = (home / '.config' if config is None else Path(config)) / 'herdr/plugins.json'
+    # Herdr reads a relative directory from its own working directory, which
+    # may not be this one, so a list missing here says nothing.
+    relative = not registry.is_absolute()
     try:
+        registry = registry.absolute()
         plugins = json.loads(registry.read_bytes())
     except FileNotFoundError:
-        return False
-    except (OSError, ValueError):
+        plugins = None if relative else []
+    except (OSError, ValueError, RecursionError):
+        # Python 3.9, macOS's own, parses deep nesting by recursion.
         plugins = None
+    # A debug Herdr, or a Herdr server started with another XDG_CONFIG_HOME,
+    # reads another list, so a refusal names this one, and that way out
+    # before moving a live state away (round C's review, F2 and F3).
+    elsewhere = (" XDG_CONFIG_HOME is relative, so Namedrop read that list from this working "
+                 "directory, which may not be Herdr's." if relative else '')
+    elsewhere += (" If Herdr uses another config directory, run sh scripts/install.sh again with "
+                  "Herdr's XDG_CONFIG_HOME.")
     require(isinstance(plugins, list),
             f"Namedrop cannot read Herdr's plugin list in {registry}, so it cannot tell whether "
-            f'Namedrop is still installed in Herdr ({herdr}). If it is not, move that directory '
-            'away, then run sh scripts/install.sh again.')
-    return any(isinstance(plugin, dict) and plugin.get('plugin_id') == 'namedrop' for plugin in plugins)
+            f'Namedrop is still installed in Herdr ({herdr}).{elsewhere} Otherwise, if Namedrop is not '
+            'installed in Herdr, move that state directory away, then run sh scripts/install.sh again.')
+    listed = any(isinstance(plugin, dict) and plugin.get('plugin_id') == 'namedrop' for plugin in plugins)
+    return listed, f"Herdr's plugin list in {registry} does not name Namedrop.{elsewhere}"
 
 
 def supports_rex(launcher):
@@ -158,7 +174,7 @@ try:
         base = Path(os.environ.get('XDG_STATE_HOME') or '')
         herdr = (base if base.is_absolute() else home / '.local/state') / 'herdr/plugins/namedrop'
         published = any(os.path.lexists(herdr / 'runtime' / name) for name in ('owner', 'current'))
-        if published and herdr_lists_namedrop(home, herdr) and owner(herdr, "Herdr's Namedrop state") == 'herdr':
+        if published and herdr_lists_namedrop(home, herdr)[0] and owner(herdr, "Herdr's Namedrop state") == 'herdr':
             # A Herdr release with the Rex module writes the record when it
             # activates; an older one must be updated first.
             if supports_rex(herdr / 'runtime/namedrop'):
@@ -169,6 +185,13 @@ try:
     launcher = state / 'runtime/namedrop'
     decision = 'adopt' if recorded and selected_owner == 'herdr' else 'update' if recorded else 'new'
     if decision == 'adopt':
+        # `herdr plugin uninstall` keeps the state and the record that names
+        # it, and nothing updates a runtime that Herdr no longer lists.
+        listed, unlisted = herdr_lists_namedrop(home, state)
+        require(listed,
+                f"Namedrop's install record names Herdr's Namedrop state ({state}), but {unlisted} "
+                'Otherwise install Namedrop in Herdr again, or move that state directory away, '
+                'then run sh scripts/install.sh again.')
         require(supports_rex(launcher), 'Update Namedrop in Herdr first, then run sh scripts/install.sh again.')
     # The archive's own binary finds the Rex server as `namedrop install`
     # does, and names what that install writes. It writes nothing.
