@@ -205,7 +205,7 @@ pub(crate) fn claim_for(
         other_line: crate::integration::line_tokens(control)?
             .iter()
             .any(|token| !matches!(*token, "reply" | "complete.no-reply")),
-        answers_own: delivery.answers_own,
+        answers_own: delivery.answers.is_some(),
         relayed: delivery.relayed,
         leftover,
     }) else {
@@ -227,6 +227,8 @@ pub(crate) fn claim_for(
         paused: Vec::new(),
         first_armed_at_ms: None,
         promised_turn: None,
+        helpers: Vec::new(),
+        answered_turn: None,
     })
 }
 
@@ -529,6 +531,16 @@ pub(crate) struct Claim {
     /// read the notice itself.
     #[serde(default)]
     pub promised_turn: Option<HostTurn>,
+    /// The requests a claim held on a helper waits to have answered: the
+    /// messages its turn sent to someone besides the person. The delivery of
+    /// an answer to one starts the turn whose final message is its answer.
+    #[serde(default)]
+    pub helpers: Vec<crate::MessageId>,
+    /// The turn whose prompt delivered an answer to one of `helpers`, and so
+    /// showed no way back for this claim. That turn's Stop wakes it; a turn
+    /// that never stops leaves it to the next prompt, which warns.
+    #[serde(default)]
+    pub answered_turn: Option<HostTurn>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -995,6 +1007,12 @@ impl Claims {
         })
     }
 
+    /// The held claim whose helper request `answered` is: the oldest still
+    /// outstanding that waits on it.
+    fn answered(&self, state: &Path, answered: &crate::MessageId) -> Option<usize> {
+        self.oldest_outstanding(state, |claim| claim.helpers.contains(answered))
+    }
+
     /// The oldest held claim still outstanding that `matches`, when `turn`
     /// carries no delivery of its own.
     fn oldest_held(
@@ -1008,6 +1026,11 @@ impl Claims {
         {
             return None;
         }
+        self.oldest_outstanding(state, matches)
+    }
+
+    /// The oldest held claim still outstanding that `matches`.
+    fn oldest_outstanding(&self, state: &Path, matches: impl Fn(&Claim) -> bool) -> Option<usize> {
         self.claims
             .iter()
             .enumerate()
@@ -1106,7 +1129,12 @@ impl Claims {
     /// What a claim armed on another turn becomes when this session moves
     /// on: still open while its Stop's worker may settle it, otherwise left.
     fn moved_on(&self, claim: &Claim, now_ms: u64) -> Option<ClaimState> {
-        match self.stopped_at(&claim.turn) {
+        self.moved_on_from(&claim.turn, now_ms)
+    }
+
+    /// What a claim of `turn` becomes once a later turn starts.
+    fn moved_on_from(&self, turn: &HostTurn, now_ms: u64) -> Option<ClaimState> {
+        match self.stopped_at(turn) {
             Some(at) if now_ms < at.saturating_add(STOPPED_GRACE_MS) => None,
             Some(_) => Some(ClaimState::Left(LeaveReason::OperationFailed)),
             None => Some(ClaimState::Left(LeaveReason::Interrupted)),
@@ -1207,8 +1235,8 @@ impl Claim {
         self.first_armed_at_ms.unwrap_or(self.armed_at_ms)
     }
 
-    /// Moves a held claim to the turn a notice of its work reached, so that
-    /// turn's final message is the answer.
+    /// Moves a held claim to the turn a notice of its work, or its helper's
+    /// answer, reached, so that turn's final message is the answer.
     fn wake_on(&mut self, turn: HostTurn, at_ms: u64) {
         self.first_armed_at_ms.get_or_insert(self.armed_at_ms);
         self.turn = turn;
@@ -1364,6 +1392,8 @@ pub(crate) struct PromptFacts<'a> {
     /// The transcript shows this prompt opened its turn: no record of the
     /// turn but the prompt's own comes after an earlier turn's.
     pub opens_turn: bool,
+    /// The message of this session's that the prompt's delivery answers.
+    pub answers: Option<&'a crate::MessageId>,
 }
 
 /// What one prompt found in its session's claims.
@@ -1375,6 +1405,9 @@ pub(crate) struct Observed {
     /// The way back to each delivery a claim left open, so the agent can
     /// still settle it: in its thread, for a reply.
     pub left_open: Vec<WayBack>,
+    /// The held delivery whose helper this prompt's delivery answers: this
+    /// turn's final message is its answer.
+    pub woken: Option<crate::DeliveryAttemptId>,
 }
 
 /// Runs for every prompt of a session that names its turn. It ends claims
@@ -1394,6 +1427,7 @@ pub(crate) fn observe_prompt(
         news,
         delivery,
         opens_turn,
+        answers,
     } = prompt;
     let notified: Vec<String> = news
         .and_then(TaskNews::ended)
@@ -1432,12 +1466,41 @@ pub(crate) fn observe_prompt(
             claim.move_on(state, next, now_ms);
         }
     }
+    // A turn a helper's answer started that ended with no Stop to wake its
+    // claim, or whose Stop's worker was lost, lost that answer.
+    let unanswered: Vec<_> = claims
+        .claims
+        .iter()
+        .map(|claim| {
+            claim
+                .answered_turn
+                .as_ref()
+                .filter(|answered| *answered != turn)
+                .map(|answered| claims.moved_on_from(answered, now_ms))
+        })
+        .collect();
+    for (claim, next) in claims.claims.iter_mut().zip(unanswered) {
+        if let Some(Some(next)) = next {
+            claim.answered_turn = None;
+            claim.move_on(state, next, now_ms);
+        }
+    }
     // A claim whose Stop already ran belongs to that Stop's worker; only one
     // still waiting for its own turn's Stop keeps this delivery explicit.
     let open = claims
         .claims
         .iter()
         .any(|claim| claim.state == ClaimState::Open && claims.stopped_at(&claim.turn).is_none());
+    // Namedrop closes such a delivery without a reply, and its final message
+    // is for whoever asked: the answer a held claim waits for.
+    let closes_for_the_asker = arm.as_ref().is_some_and(|arm| {
+        matches!(
+            arm.plan,
+            Armed::NoReply(
+                NoReplyCase::AnswersOwn | NoReplyCase::ReportToHuman | NoReplyCase::ResultSet
+            )
+        )
+    });
     let armed = match arm {
         Some(arm) if !open => {
             claims
@@ -1448,6 +1511,17 @@ pub(crate) fn observe_prompt(
         }
         _ => false,
     };
+    // An answer to a request a held claim waits on, a helper's reply or a
+    // terminal's result, starts the turn whose final message is that claim's
+    // answer, as its work's notice would. The claim stays held until this
+    // turn's Stop wakes it.
+    let woken = answers
+        .filter(|_| armed && closes_for_the_asker)
+        .and_then(|answered| claims.answered(state, answered))
+        .map(|index| {
+            claims.claims[index].answered_turn = Some(turn.clone());
+            claims.claims[index].attempt_id.clone()
+        });
     // A notice that opens its turn promises its claim that turn's final
     // message. One queued into a turn about something else, a prompt the
     // person typed included, promises nothing, so its claim's way back shows.
@@ -1477,7 +1551,8 @@ pub(crate) fn observe_prompt(
         if !matches!(claim.state, ClaimState::Left(_)) {
             continue;
         }
-        if claim.promised_turn.as_ref() == Some(turn) {
+        if claim.promised_turn.as_ref() == Some(turn) || claim.answered_turn.as_ref() == Some(turn)
+        {
             claim.updated_at_ms = now_ms;
         } else if outstanding(state, claim) == Some(false) {
             claim.set(ClaimState::Done(Done::Superseded), now_ms);
@@ -1490,7 +1565,11 @@ pub(crate) fn observe_prompt(
     // The delivery whose work this notice finished is listed first.
     left_open.sort_by_key(|way_back| !way_back.finished);
     judge_decided(state, &claims.save(now_ms), now_ms, PROMPT_JUDGE_BUDGET);
-    Observed { armed, left_open }
+    Observed {
+        armed,
+        left_open,
+        woken,
+    }
 }
 
 /// Whether the session has any claims at all, read without the lock.
@@ -1519,10 +1598,11 @@ pub fn stop_has_work(
             claim.state == ClaimState::Left(LeaveReason::Held) && !claim.awaits.is_empty()
         })
         .collect();
-    if claims.iter().any(|claim| claim.state == ClaimState::Open)
-        || held
-            .iter()
-            .any(|claim| turn.is_some() && claim.promised_turn.as_ref() == turn)
+    if claims.iter().any(|claim| {
+        claim.state == ClaimState::Open || (turn.is_some() && claim.answered_turn.as_ref() == turn)
+    }) || held
+        .iter()
+        .any(|claim| turn.is_some() && claim.promised_turn.as_ref() == turn)
     {
         return true;
     }
@@ -1632,6 +1712,19 @@ pub fn settle_at_stop(
         }
     }
     if let Some(turn) = &stop.turn {
+        // A held claim whose helper's answer this turn's prompt delivered is
+        // the one this turn's final message answers.
+        let started_at_ms = claims
+            .turn_seen(turn)
+            .map_or(now_ms, |seen| seen.started_at_ms);
+        for claim in &mut claims.claims {
+            if claim.answered_turn.as_ref() == Some(turn) {
+                claim.answered_turn = None;
+                if claim.state == ClaimState::Left(LeaveReason::Held) {
+                    claim.wake_on(turn.clone(), started_at_ms);
+                }
+            }
+        }
         // A claim this turn's prompt promised comes first: the agent was shown
         // no other way to answer it. A read of the turn's own prompt that
         // names none of its tasks overrules the promise, and its way back
@@ -1688,15 +1781,16 @@ pub fn settle_at_stop(
             None => {}
         }
         let current = claim.state == ClaimState::Open && stop.turn.as_ref() == Some(&claim.turn);
-        let facts = if current {
+        let (facts, helpers) = if current {
             settle_facts(state, &stop.session, claim, now_ms)
         } else {
-            SettleFacts::default()
+            (SettleFacts::default(), Vec::new())
         };
         let next = match decide(claim, stop, &facts) {
             Verdict::Ignore => continue,
             Verdict::Leave(LeaveReason::Held) => {
                 claim.awaits = stop.awaited(claim);
+                claim.helpers = helpers;
                 // The person sees what the agent said at once. A failed note
                 // leaves the answer held all the same.
                 if claim.plan == Armed::NoReply(NoReplyCase::Relayed) {
@@ -1751,8 +1845,15 @@ impl Claim {
     }
 }
 
-fn settle_facts(state: &Path, session: &str, claim: &Claim, now_ms: u64) -> SettleFacts {
-    let (disposition, waiting) = crate::StateStore::open_read_only(state)
+/// What the store says about the claim's attempt, and the helper requests its
+/// session still waits to have answered.
+fn settle_facts(
+    state: &Path,
+    session: &str,
+    claim: &Claim,
+    now_ms: u64,
+) -> (SettleFacts, Vec<crate::MessageId>) {
+    let (disposition, helpers) = crate::StateStore::open_read_only(state)
         .ok()
         .flatten()
         .and_then(|mut store| {
@@ -1760,7 +1861,7 @@ fn settle_facts(state: &Path, session: &str, claim: &Claim, now_ms: u64) -> Sett
                 .transaction(|transaction| {
                     Ok((
                         transaction.delivery_disposition(&claim.namespace, &claim.attempt_id)?,
-                        transaction.awaits_helper(
+                        transaction.helper_requests(
                             &claim.namespace,
                             &claim.attempt_id,
                             claim.helpers_since_ms(),
@@ -1771,7 +1872,7 @@ fn settle_facts(state: &Path, session: &str, claim: &Claim, now_ms: u64) -> Sett
                 .ok()
         })
         .unwrap_or_default();
-    SettleFacts {
+    let facts = SettleFacts {
         disposition,
         explicit_pending: crate::deferred_commands::settle_queued(
             state,
@@ -1779,8 +1880,9 @@ fn settle_facts(state: &Path, session: &str, claim: &Claim, now_ms: u64) -> Sett
             session,
             claim.attempt_id.as_str(),
         ),
-        waiting,
-    }
+        waiting: !helpers.is_empty(),
+    };
+    (facts, helpers)
 }
 
 /// Whether the claim's attempt is still in its session's delivery inbox, or

@@ -237,6 +237,8 @@ fn claim(plan: Armed, state: ClaimState) -> Claim {
         paused: Vec::new(),
         first_armed_at_ms: None,
         promised_turn: None,
+        helpers: Vec::new(),
+        answered_turn: None,
     }
 }
 
@@ -673,6 +675,7 @@ fn observe(state: &StateDirectory, prompt: &str, arm: Option<Claim>) -> bool {
             news: None,
             delivery: false,
             opens_turn: false,
+            answers: None,
         },
         10,
     )
@@ -873,6 +876,7 @@ fn background_work_at_the_stop_leaves_a_reply_for_the_agent_to_settle() {
                 news: None,
                 delivery: false,
                 opens_turn: false,
+                answers: None,
             },
             30
         )
@@ -914,6 +918,7 @@ fn finished_claims_are_pruned_after_a_day() {
                 news: None,
                 delivery: false,
                 opens_turn: false,
+                answers: None,
             },
             now_ms,
         );
@@ -988,6 +993,7 @@ fn a_prompt_queued_behind_a_stop_leaves_the_claim_to_that_stops_worker() {
             news: None,
             delivery: false,
             opens_turn: false,
+            answers: None,
         },
         10 + STOPPED_GRACE_MS,
     );
@@ -1017,6 +1023,7 @@ fn a_claim_left_open_stays_while_later_prompts_show_it() {
                 news: None,
                 delivery: false,
                 opens_turn: false,
+                answers: None,
             },
             now_ms,
         )
@@ -1052,6 +1059,7 @@ fn a_late_stop_worker_leaves_the_next_turns_claim_alone() {
                 news: None,
                 delivery: false,
                 opens_turn: false,
+                answers: None,
             },
             now_ms,
         )
@@ -1115,6 +1123,7 @@ fn pruning_stop_markers_spares_one_still_being_written() {
             news: None,
             delivery: false,
             opens_turn: false,
+            answers: None,
         },
         30,
     );
@@ -1204,6 +1213,7 @@ fn a_held_answer_settles_at_the_stop_of_the_turn_its_works_notice_reached() {
             news: Some(TaskNews::Ended("monitor-from-yesterday")),
             delivery: false,
             opens_turn: false,
+            answers: None,
         },
         30,
     );
@@ -1222,6 +1232,7 @@ fn a_held_answer_settles_at_the_stop_of_the_turn_its_works_notice_reached() {
             news: Some(TaskNews::Ended("build-1")),
             delivery: false,
             opens_turn: true,
+            answers: None,
         },
         40,
     );
@@ -1897,6 +1908,7 @@ fn told(state: &StateDirectory, prompt: &str, news: TaskNews<'_>) -> Observed {
             news: Some(news),
             delivery: false,
             opens_turn: true,
+            answers: None,
         },
         20,
     )
@@ -1989,6 +2001,7 @@ fn a_subagent_that_pauses_during_its_own_delivery_turn_holds_the_answer() {
             news: Some(TaskNews::Paused("agent-a")),
             delivery: false,
             opens_turn: false,
+            answers: None,
         },
         20,
     );
@@ -2024,6 +2037,7 @@ fn a_subagent_that_pauses_during_its_own_delivery_turn_holds_the_answer() {
             news: Some(TaskNews::Paused("agent-from-earlier")),
             delivery: false,
             opens_turn: false,
+            answers: None,
         },
         20,
     );
@@ -2063,6 +2077,7 @@ fn a_subagent_that_a_woken_turn_starts_and_that_pauses_in_it_holds_the_answer() 
             news: Some(TaskNews::Paused("agent-a")),
             delivery: false,
             opens_turn: false,
+            answers: None,
         },
         20,
     );
@@ -2149,6 +2164,7 @@ fn a_paused_subagent_whose_end_reached_only_the_queue_or_only_a_prompt_holds_not
                     news: Some(TaskNews::Ended("agent-a")),
                     delivery: false,
                     opens_turn: false,
+                    answers: None,
                 },
                 20,
             );
@@ -2172,4 +2188,132 @@ fn a_paused_subagent_whose_end_reached_only_the_queue_or_only_a_prompt_holds_not
             "an ended subagent kept the answer held (prompt {by_prompt}, queue {by_queue})"
         );
     }
+}
+
+#[test]
+fn a_helpers_answer_holds_its_claim_through_the_turn_and_that_turns_stop_answers() {
+    let held_on = |state: &StateDirectory| {
+        let mut claims = Claims::lock(
+            session_directory(&state.0, "socket", "session"),
+            STOP_LOCK_WAIT,
+        )
+        .unwrap();
+        claims.claims.push(Claim {
+            helpers: vec![crate::MessageId::new("request-1")],
+            ..claim(reply_plan(), ClaimState::Left(LeaveReason::Held))
+        });
+        claims.save(1);
+    };
+    let answer_as = |state: &StateDirectory, answers: &str, plan: Armed| {
+        observe_prompt(
+            &state.0,
+            "socket",
+            "session",
+            &turn("answer-turn"),
+            Some(armed("attempt-2", "answer-turn", plan)),
+            PromptFacts {
+                news: None,
+                delivery: true,
+                opens_turn: false,
+                answers: Some(&crate::MessageId::new(answers)),
+            },
+            30,
+        )
+    };
+    let answer_prompt = |state: &StateDirectory, answers: &str| {
+        answer_as(state, answers, Armed::NoReply(NoReplyCase::AnswersOwn))
+    };
+    let held = |state: &StateDirectory, now_ms: u64| {
+        answer_claim(
+            &state.0,
+            &crate::StateNamespace::for_space("socket", "workspace"),
+            &crate::AgentSessionId::new("session"),
+            &crate::DeliveryAttemptId::new("attempt-1"),
+            || Ok::<_, ()>(2),
+            now_ms,
+        )
+    };
+
+    let state = StateDirectory::new();
+    held_on(&state);
+    let observed = answer_prompt(&state, "request-1");
+    assert!(observed.armed);
+    assert_eq!(
+        observed.woken,
+        Some(crate::DeliveryAttemptId::new("attempt-1"))
+    );
+    assert!(observed.left_open.is_empty(), "{:?}", observed.left_open);
+    // The answer stays held while its turn runs, which may be long after the
+    // held delivery's attempt settled, so nothing judges it unanswered.
+    assert_eq!(held(&state, 60_000), Ok(AnswerClaim::Held));
+    let log = std::cell::RefCell::new(Vec::new());
+    settle(
+        &state,
+        &stop("answer-turn", "The lead says yes."),
+        &mut ran(&log, Ok(json!({}))),
+    );
+    let operations: Vec<_> = log
+        .borrow()
+        .iter()
+        .map(|bound| (bound.operation, bound.input["attempt_id"].clone()))
+        .collect();
+    assert_eq!(
+        operations,
+        [
+            ("reply", json!("attempt-1")),
+            (STOP_NO_REPLY, json!("attempt-2"))
+        ]
+    );
+    let states: Vec<_> = state.claims().iter().map(|claim| claim.state).collect();
+    assert_eq!(
+        states,
+        [
+            ClaimState::Done(Done::Replied),
+            ClaimState::Done(Done::NoReplied)
+        ]
+    );
+
+    // A terminal's result or a result set closes without a reply too, and
+    // its final message is for whoever asked. A delivery whose final message
+    // replies to its own sender takes the turn, and wakes nothing.
+    for (plan, wakes) in [
+        (Armed::NoReply(NoReplyCase::ReportToHuman), true),
+        (Armed::NoReply(NoReplyCase::ResultSet), true),
+        (reply_plan(), false),
+        (Armed::NoReply(NoReplyCase::Relayed), false),
+    ] {
+        let state = StateDirectory::new();
+        held_on(&state);
+        let observed = answer_as(&state, "request-1", plan.clone());
+        assert_eq!(observed.woken.is_some(), wakes, "{plan:?}");
+        assert_eq!(observed.left_open.len(), usize::from(!wakes), "{plan:?}");
+    }
+
+    // An answer to some other request wakes nothing, and the way back shows.
+    let state = StateDirectory::new();
+    held_on(&state);
+    let observed = answer_prompt(&state, "request-2");
+    assert_eq!(observed.woken, None);
+    assert_eq!(observed.left_open.len(), 1);
+
+    // A turn the answer started that never stops leaves the next prompt to
+    // end the claim as interrupted, which warns, and show its way back.
+    let state = StateDirectory::new();
+    held_on(&state);
+    answer_prompt(&state, "request-1");
+    let next = observe_prompt(
+        &state.0,
+        "socket",
+        "session",
+        &turn("next-turn"),
+        None,
+        PromptFacts::default(),
+        40,
+    );
+    assert_eq!(
+        state.claims()[0].state,
+        ClaimState::Left(LeaveReason::Interrupted)
+    );
+    assert_eq!(state.claims()[0].answered_turn, None);
+    assert_eq!(next.left_open.len(), 2, "{:?}", next.left_open);
 }

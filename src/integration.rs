@@ -1509,7 +1509,8 @@ pub(crate) struct AuthenticatedDelivery {
     pub control: Option<DeliveryControl>,
     pub leftover: bool,
     pub kind: DeliveryKind,
-    pub answers_own: bool,
+    /// The message of this agent's that the delivered message answers.
+    pub answers: Option<crate::MessageId>,
     pub relayed: bool,
     pub agent_session_id: AgentSessionId,
     pub namespace: StateNamespace,
@@ -1563,7 +1564,7 @@ where
             }
             return Ok(Some(AuthenticatedDelivery {
                 kind: DeliveryKind::of(&outstanding.control),
-                answers_own: transaction.answers_own_message(namespace, attempt_id)?,
+                answers: transaction.own_message_answered(namespace, attempt_id)?,
                 relayed: transaction.relays_to_person(namespace, attempt_id)?,
                 control: pointer.then(|| outstanding.control.clone()),
                 leftover,
@@ -2179,7 +2180,7 @@ fn rendered_lines(control: &Value) -> Option<(Vec<RenderedLine<'_>>, Vec<&str>)>
 const FINAL_REPLY_DONE: &str =
     "Namedrop sends it when your turn ends, so run no settle command and write no status line.";
 const FINAL_REPLY_OUTCOME: &str = "End it with one line: work_outcome: completed, work_outcome: needs_continuation, or work_outcome: blocked: <reason>. Without one it is needs_continuation.";
-const FINAL_REPLY_WAITING: &str = "If your turn ends while you wait on a helper, Namedrop sends nothing and you reply later. If it ends while background work you started this turn runs, Namedrop holds your final message, and your final message in the turn that work's notice starts is the reply. If the notice arrives during another turn, or another delivery reaches the turn it starts, answer with the line Namedrop shows.";
+const FINAL_REPLY_WAITING: &str = "If your turn ends while you wait on a helper, Namedrop sends nothing, and your final message in the turn that the helper's answer starts is the reply. If it ends while background work you started this turn runs, Namedrop holds your final message, and your final message in the turn that work's notice starts is the reply. If the notice arrives during another turn, or another delivery reaches the turn it starts, answer with the line Namedrop shows.";
 const REPORT_TO_HUMAN_GUIDANCE: &str = "Namedrop commands: none. Namedrop closes this without a reply when your turn ends; show it to the person once in your final message.";
 const RESULT_SET_GUIDANCE: &str = "Namedrop commands: none. Namedrop closes this without a reply when your turn ends; your final message is the non-empty response that fulfills the original user deliverable, synthesizing the message once. Earlier results or progress do not fulfill it.";
 const RELAYED_GUIDANCE: &str = "Namedrop commands: your final message goes to the person when your turn ends, so run no settle command and write no status line.";
@@ -2187,14 +2188,21 @@ const RELAYED_CHANNEL: &str = " To wake a member with @name, run this reply line
 
 /// The context for a delivery whose final message settles it. It says what
 /// the Stop will do and shows only the one line that does the other thing.
+/// `woken` is the held delivery an answer to the agent's own message woke,
+/// whose answer that final message is.
 pub(crate) fn final_reply_guidance(
     control: &Value,
     armed: &crate::final_reply::Armed,
+    woken: Option<&crate::DeliveryAttemptId>,
 ) -> Option<String> {
     use crate::final_reply::{Armed, NoReplyCase};
     let (opposite, lead) = match armed {
-        Armed::NoReply(NoReplyCase::ReportToHuman) => return Some(REPORT_TO_HUMAN_GUIDANCE.into()),
-        Armed::NoReply(NoReplyCase::ResultSet) => return Some(RESULT_SET_GUIDANCE.into()),
+        Armed::NoReply(NoReplyCase::ReportToHuman) => {
+            return Some(with_woken(REPORT_TO_HUMAN_GUIDANCE, woken));
+        }
+        Armed::NoReply(NoReplyCase::ResultSet) => {
+            return Some(with_woken(RESULT_SET_GUIDANCE, woken));
+        }
         Armed::NoReply(NoReplyCase::Relayed) if control["reply_mode"] != "channel" => {
             return Some(format!("{RELAYED_GUIDANCE} {FINAL_REPLY_WAITING}"));
         }
@@ -2216,10 +2224,17 @@ pub(crate) fn final_reply_guidance(
         }
         Armed::NoReply(NoReplyCase::AnswersOwn) => (
             "reply",
-            format!(
-                "Namedrop commands: this answers your message, so Namedrop closes it without a reply when your turn ends and your final message is for the person. To answer {} instead, run this line.",
-                addressee(control)?
-            ),
+            match woken {
+                Some(held) => format!(
+                    "Namedrop commands: this answers your message, so Namedrop closes it without a reply when your turn ends. {} To answer {} instead, run this line.",
+                    woken_sentence(held),
+                    addressee(control)?
+                ),
+                None => format!(
+                    "Namedrop commands: this answers your message, so Namedrop closes it without a reply when your turn ends and your final message is for the person. To answer {} instead, run this line.",
+                    addressee(control)?
+                ),
+            },
         ),
     };
     let (lines, _) = rendered_lines(control)?;
@@ -2236,6 +2251,22 @@ pub(crate) fn final_reply_guidance(
     guidance.push('\n');
     guidance.push_str(&line.text);
     Some(guidance)
+}
+
+/// What a turn that a held delivery's helper answered is for: its final
+/// message answers that delivery.
+fn woken_sentence(held: &crate::DeliveryAttemptId) -> String {
+    let held = held.as_str();
+    format!(
+        "Delivery {held} from an earlier turn waited on it, so your final message is your answer to delivery {held}, and Namedrop sends it there: run no settle command and write no status line. {FINAL_REPLY_WAITING}"
+    )
+}
+
+fn with_woken(guidance: &str, woken: Option<&crate::DeliveryAttemptId>) -> String {
+    match woken {
+        Some(held) => format!("{guidance} {}", woken_sentence(held)),
+        None => guidance.to_owned(),
+    }
 }
 
 /// Who the bound reply goes to, as its source names them: `@codex`, or

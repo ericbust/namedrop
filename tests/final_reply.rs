@@ -546,7 +546,7 @@ fn an_ask_and_its_answer_settle_from_final_messages_with_no_settle_command() {
     );
     assert!(
         context.contains(
-            "Namedrop commands: your final message is your reply to @lead. Namedrop sends it when your turn ends, so run no settle command and write no status line. If your turn ends while you wait on a helper, Namedrop sends nothing and you reply later. If it ends while background work you started this turn runs, Namedrop holds your final message, and your final message in the turn that work's notice starts is the reply. If the notice arrives during another turn, or another delivery reaches the turn it starts, answer with the line Namedrop shows. For no reply, run this line first."
+            "Namedrop commands: your final message is your reply to @lead. Namedrop sends it when your turn ends, so run no settle command and write no status line. If your turn ends while you wait on a helper, Namedrop sends nothing, and your final message in the turn that the helper's answer starts is the reply. If it ends while background work you started this turn runs, Namedrop holds your final message, and your final message in the turn that work's notice starts is the reply. If the notice arrives during another turn, or another delivery reaches the turn it starts, answer with the line Namedrop shows. For no reply, run this line first."
         ),
         "{context}"
     );
@@ -1243,7 +1243,7 @@ fn a_message_from_the_person_is_answered_in_its_thread_by_the_final_message() {
     );
     assert!(
         context.ends_with(
-            "\n\nNamedrop commands: your final message goes to the person when your turn ends, so run no settle command and write no status line. If your turn ends while you wait on a helper, Namedrop sends nothing and you reply later. If it ends while background work you started this turn runs, Namedrop holds your final message, and your final message in the turn that work's notice starts is the reply. If the notice arrives during another turn, or another delivery reaches the turn it starts, answer with the line Namedrop shows."
+            "\n\nNamedrop commands: your final message goes to the person when your turn ends, so run no settle command and write no status line. If your turn ends while you wait on a helper, Namedrop sends nothing, and your final message in the turn that the helper's answer starts is the reply. If it ends while background work you started this turn runs, Namedrop holds your final message, and your final message in the turn that work's notice starts is the reply. If the notice arrives during another turn, or another delivery reaches the turn it starts, answer with the line Namedrop shows."
         ),
         "{context}"
     );
@@ -1437,8 +1437,8 @@ fn a_turn_that_ends_waiting_on_a_helper_holds_the_delivery() {
             "a held delivery left the inbox"
         );
 
-        // Every later turn says how to answer it: the helper's answer, and
-        // a prompt typed into the pane alike.
+        // A later turn the person starts says how to answer it. The turn the
+        // helper's answer starts answers it by its final message instead.
         let way_back = |context: &str| {
             let (head, line) = context.rsplit_once('\n').unwrap();
             head.ends_with(&format!(
@@ -1446,37 +1446,6 @@ fn a_turn_that_ends_waiting_on_a_helper_holds_the_delivery() {
             )) && line.starts_with("reply: ")
                 && line.contains(&format!(r#""attempt_id":"{attempt}""#))
         };
-        // The agent going idle settles the attempt's state without a
-        // disposition, as reconciliation does, so the mailbox moves on.
-        StateStore::open(&space.directory.state)
-            .unwrap()
-            .transaction(|transaction| {
-                transaction.transition_delivery_attempt(
-                    &namespace(),
-                    &namedrop::DeliveryAttemptId::new(&attempt),
-                    namedrop::DeliveryState::Settled,
-                    &MutationAttribution::new(ActorKind::Plugin, "test", 42),
-                )
-            })
-            .unwrap();
-        let helper = space.herdr.envelope_for("pane-lead");
-        dispatch::message(
-            "reply",
-            bound_reply(&space, &helper, "@reviewer Yes, it is safe."),
-            &space.runtime("pane-lead"),
-        )
-        .unwrap();
-        let answer = space.herdr.envelope_for("pane-reviewer");
-        assert_eq!(answer["untrusted_body"], "Yes, it is safe.");
-        let turn = ("prompt_id", "answer-turn");
-        let context = space.prompt(
-            "pane-reviewer",
-            "session-reviewer",
-            turn,
-            &answer.to_string(),
-        );
-        assert!(way_back(&context), "{context}");
-        space.stop("session-reviewer", turn, "The lead says option B is safe.");
         let typed = space.prompt(
             "pane-reviewer",
             "session-reviewer",
@@ -1521,6 +1490,175 @@ fn a_turn_that_ends_waiting_on_a_helper_holds_the_delivery() {
     space.stop_with("session-reviewer", CLAUDE, "The build is running.", true);
     assert!(space.relayed().is_empty());
     assert_eq!(space.claims()[0]["state"], json!({"left":"held"}));
+}
+
+impl Space {
+    /// The person asks the reviewer, the reviewer asks the lead, and its turn
+    /// ends with a status: the person's delivery is held. Then the lead
+    /// answers. Returns the person's message, its delivery, and the lead's
+    /// answer as the reviewer's next delivery.
+    fn held_on_the_lead(&self) -> (Value, Value, Value) {
+        let question = self.send_as_person(
+            "question",
+            "@reviewer Is option B safe? Ask the lead.",
+            None,
+        );
+        let ask = self.herdr.envelope_for("pane-reviewer");
+        let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
+        self.prompt(
+            "pane-reviewer",
+            "session-reviewer",
+            CLAUDE,
+            &ask.to_string(),
+        );
+        dispatch::message(
+            "send",
+            json!({"request_id":"helper","source":"@lead Is option B safe?",
+                   "author_kind":"agent_session"}),
+            &self.runtime("pane-reviewer"),
+        )
+        .unwrap();
+        self.stop(
+            "session-reviewer",
+            CLAUDE,
+            "I asked @lead and will answer when it replies.",
+        );
+        assert_eq!(self.claims()[0]["state"], json!({"left":"held"}));
+        // The agent going idle settles the attempt without a disposition, as
+        // reconciliation does, so the mailbox moves on to the lead's answer.
+        StateStore::open(&self.directory.state)
+            .unwrap()
+            .transaction(|transaction| {
+                transaction.transition_delivery_attempt(
+                    &namespace(),
+                    &namedrop::DeliveryAttemptId::new(&attempt),
+                    namedrop::DeliveryState::Settled,
+                    &MutationAttribution::new(ActorKind::Plugin, "test", 42),
+                )
+            })
+            .unwrap();
+        let helper = self.herdr.envelope_for("pane-lead");
+        dispatch::message(
+            "reply",
+            bound_reply(self, &helper, "@reviewer Yes, it is safe."),
+            &self.runtime("pane-lead"),
+        )
+        .unwrap();
+        let answer = self.herdr.envelope_for("pane-reviewer");
+        assert_eq!(answer["untrusted_body"], "Yes, it is safe.");
+        (question, ask, answer)
+    }
+
+    /// The person's thread as the reviewer answered it, without its notes.
+    fn reviewer_posts(&self, question: &Value) -> Vec<Vec<String>> {
+        self.rows(&format!(
+            "SELECT message_id, in_reply_to, body FROM collaboration_messages
+             WHERE thread_id = '{}' AND author_address_id = 'address-reviewer'
+               AND message_id NOT LIKE 'progress-note:%' ORDER BY created_at_ms, rowid",
+            question["thread_id"].as_str().unwrap()
+        ))
+    }
+
+    /// The context of a prompt the person types into the reviewer's pane.
+    fn typed_context(&self, turn: &str, prompt: &str) -> String {
+        execute_user_prompt_submit_hook(
+            &json!({"hook_event_name":"UserPromptSubmit","session_id":"session-reviewer",
+                    "prompt_id":turn,"prompt":prompt})
+            .to_string(),
+            &self.runtime("pane-reviewer"),
+        )
+        .and_then(|output| {
+            output["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .map(str::to_owned)
+        })
+        .unwrap_or_default()
+    }
+}
+
+/// The helper's answer starts the turn whose final message is the held
+/// answer, as a background task's notice does: Namedrop sends that final
+/// message to the person's thread and closes the helper's answer without a
+/// reply. An agent that runs the reply line instead still answers once. A
+/// turn that ends with no final message warns the person, and the way back
+/// shows again. Nothing ends held and silent once the helper has answered.
+#[test]
+fn the_turn_a_helpers_answer_starts_answers_the_held_delivery() {
+    for runs_the_line in [false, true] {
+        let space = Space::new();
+        let (question, ask, answer) = space.held_on_the_lead();
+        let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
+        let answer_attempt = answer["control"]["attempt_id"].as_str().unwrap();
+        let turn = ("prompt_id", "answer-turn");
+        let context = space.prompt(
+            "pane-reviewer",
+            "session-reviewer",
+            turn,
+            &answer.to_string(),
+        );
+        assert!(!context.contains("is still open"), "{context}");
+        assert!(
+            context.contains(&format!(
+                "your final message is your answer to delivery {attempt}"
+            )),
+            "{context}"
+        );
+        if runs_the_line {
+            dispatch::message(
+                "reply",
+                bound_reply(&space, &ask, "@operator The lead says option B is safe."),
+                &space.runtime("pane-reviewer"),
+            )
+            .unwrap();
+        }
+        space.stop("session-reviewer", turn, "The lead says option B is safe.");
+        let posts = space.reviewer_posts(&question);
+        assert_eq!(posts.len(), 1, "{runs_the_line}: {posts:?}");
+        assert_eq!(posts[0][1], question["message_id"].as_str().unwrap());
+        assert_eq!(posts[0][2], "The lead says option B is safe.");
+        let held_and_answer: Vec<_> = space
+            .dispositions()
+            .into_iter()
+            .filter(|row| row[0] == attempt || row[0] == answer_attempt)
+            .collect();
+        let held_kind = if runs_the_line { "reply" } else { "no_reply" };
+        assert_eq!(
+            held_and_answer,
+            [
+                vec![attempt.clone(), held_kind.to_owned()],
+                vec![answer_attempt.to_owned(), "no_reply".to_owned()],
+            ],
+            "{runs_the_line}"
+        );
+        assert!(space.unresolved_disposition_warnings().is_empty());
+        let typed = space.typed_context("typed-turn", "Thanks.");
+        assert!(!typed.contains("is still open"), "{typed}");
+    }
+
+    let space = Space::new();
+    let (question, ask, answer) = space.held_on_the_lead();
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap();
+    let turn = ("prompt_id", "answer-turn");
+    space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        turn,
+        &answer.to_string(),
+    );
+    space.stop("session-reviewer", turn, "  ");
+    assert!(space.reviewer_posts(&question).is_empty());
+    assert_eq!(
+        space.unresolved_disposition_warnings().len(),
+        1,
+        "a held answer whose turn came and went without it warns"
+    );
+    let typed = space.typed_context("typed-turn", "Did you hear back?");
+    assert!(
+        typed.contains(&format!(
+            "Namedrop: delivery {attempt} from an earlier turn is still open"
+        )),
+        "{typed}"
+    );
 }
 
 /// A reply the agent sends during the turn opens no request, even to an
