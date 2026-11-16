@@ -2180,8 +2180,9 @@ fn rendered_lines(control: &Value) -> Option<(Vec<RenderedLine<'_>>, Vec<&str>)>
 const FINAL_REPLY_DONE: &str =
     "Namedrop sends it when your turn ends, so run no settle command and write no status line.";
 const FINAL_REPLY_OUTCOME: &str = "End it with one line: work_outcome: completed, work_outcome: needs_continuation, or work_outcome: blocked: <reason>. Without one it is needs_continuation.";
-const FINAL_REPLY_WAITING: &str = "If your turn ends while you wait on a helper, Namedrop sends nothing, and your final message in the turn that the helper's answer starts is the reply. If it ends while background work you started this turn runs, Namedrop holds your final message, and your final message in the turn that work's notice starts is the reply. If the notice arrives during another turn, or another delivery reaches the turn it starts, answer with the line Namedrop shows.";
 const REPORT_TO_HUMAN_GUIDANCE: &str = "Namedrop commands: none. Namedrop closes this without a reply when your turn ends; show it to the person once in your final message.";
+const REPORT_TO_HUMAN_WOKEN: &str =
+    "Namedrop commands: none. Namedrop closes this without a reply when your turn ends.";
 const RESULT_SET_GUIDANCE: &str = "Namedrop commands: none. Namedrop closes this without a reply when your turn ends; your final message is the non-empty response that fulfills the original user deliverable, synthesizing the message once. Earlier results or progress do not fulfill it.";
 const RELAYED_GUIDANCE: &str = "Namedrop commands: your final message goes to the person when your turn ends, so run no settle command and write no status line.";
 const RELAYED_CHANNEL: &str = " To wake a member with @name, run this reply line instead.";
@@ -2197,23 +2198,38 @@ pub(crate) fn final_reply_guidance(
 ) -> Option<String> {
     use crate::final_reply::{Armed, NoReplyCase};
     let (opposite, lead) = match armed {
+        // Woken, the final message answers the held delivery, which may be
+        // another agent's ask, so it is not told to show the person.
         Armed::NoReply(NoReplyCase::ReportToHuman) => {
-            return Some(with_woken(REPORT_TO_HUMAN_GUIDANCE, woken));
+            return Some(match woken {
+                Some(held) => format!("{REPORT_TO_HUMAN_WOKEN} {}", woken_sentence(held)),
+                None => REPORT_TO_HUMAN_GUIDANCE.to_owned(),
+            });
         }
         Armed::NoReply(NoReplyCase::ResultSet) => {
-            return Some(with_woken(RESULT_SET_GUIDANCE, woken));
+            return Some(match woken {
+                Some(held) => format!("{RESULT_SET_GUIDANCE} {}", woken_sentence(held)),
+                None => RESULT_SET_GUIDANCE.to_owned(),
+            });
         }
         Armed::NoReply(NoReplyCase::Relayed) if control["reply_mode"] != "channel" => {
-            return Some(format!("{RELAYED_GUIDANCE} {FINAL_REPLY_WAITING}"));
+            return Some(format!(
+                "{RELAYED_GUIDANCE} {}",
+                final_reply_waiting(THIS_DELIVERY)
+            ));
         }
         Armed::NoReply(NoReplyCase::Relayed) => (
             "reply",
-            format!("{RELAYED_GUIDANCE} {FINAL_REPLY_WAITING}{RELAYED_CHANNEL}"),
+            format!(
+                "{RELAYED_GUIDANCE} {}{RELAYED_CHANNEL}",
+                final_reply_waiting(THIS_DELIVERY)
+            ),
         ),
         Armed::Reply { tracked, .. } => {
             let mut lead = format!(
-                "Namedrop commands: your final message is your reply to {}. {FINAL_REPLY_DONE} {FINAL_REPLY_WAITING}",
-                addressee(control)?
+                "Namedrop commands: your final message is your reply to {}. {FINAL_REPLY_DONE} {}",
+                addressee(control)?,
+                final_reply_waiting(THIS_DELIVERY)
             );
             if *tracked {
                 lead.push(' ');
@@ -2225,10 +2241,14 @@ pub(crate) fn final_reply_guidance(
         Armed::NoReply(NoReplyCase::AnswersOwn) => (
             "reply",
             match woken {
+                // The line replies to the helper, so it comes last, after
+                // what the final message does.
                 Some(held) => format!(
-                    "Namedrop commands: this answers your message, so Namedrop closes it without a reply when your turn ends. {} To answer {} instead, run this line.",
+                    "Namedrop commands: this answers your message. {} Namedrop closes this answer without a reply when your turn ends. To reply to {} as well, run this line: it goes only to {}, and your final message still answers delivery {}.",
                     woken_sentence(held),
-                    addressee(control)?
+                    addressee(control)?,
+                    addressee(control)?,
+                    held.as_str()
                 ),
                 None => format!(
                     "Namedrop commands: this answers your message, so Namedrop closes it without a reply when your turn ends and your final message is for the person. To answer {} instead, run this line.",
@@ -2253,20 +2273,26 @@ pub(crate) fn final_reply_guidance(
     Some(guidance)
 }
 
-/// What a turn that a held delivery's helper answered is for: its final
-/// message answers that delivery.
-fn woken_sentence(held: &crate::DeliveryAttemptId) -> String {
-    let held = held.as_str();
+const THIS_DELIVERY: &str = "this delivery";
+
+/// What a turn that ends waiting means for `delivery`'s answer, and how to
+/// answer it once a later turn shows its way back instead: a notice or a
+/// helper's answer that reaches a turn about something else, an answer
+/// Namedrop can't tie to the request, and a turn that ended without it.
+fn final_reply_waiting(delivery: &str) -> String {
     format!(
-        "Delivery {held} from an earlier turn waited on it, so your final message is your answer to delivery {held}, and Namedrop sends it there: run no settle command and write no status line. {FINAL_REPLY_WAITING}"
+        "If your turn ends while you wait on a helper, Namedrop sends nothing, and your final message in the turn that the helper's answer starts is the reply. If it ends while background work you started this turn runs, Namedrop holds your final message, and your final message in the turn that work's notice starts is the reply. Whenever a later turn shows a line to answer {delivery}, answer with that line."
     )
 }
 
-fn with_woken(guidance: &str, woken: Option<&crate::DeliveryAttemptId>) -> String {
-    match woken {
-        Some(held) => format!("{guidance} {}", woken_sentence(held)),
-        None => guidance.to_owned(),
-    }
+/// What a turn that a held delivery's helper answered is for: its final
+/// message answers that delivery, unless the turn asks again and waits.
+fn woken_sentence(held: &crate::DeliveryAttemptId) -> String {
+    let held = held.as_str();
+    format!(
+        "Delivery {held} from an earlier turn waited on it, so your final message is your answer to delivery {held}, and Namedrop sends it there: run no settle command and write no status line. If this does not answer delivery {held} yet, send a new request rather than a reply, and end your turn while you wait for its answer. {}",
+        final_reply_waiting(&format!("delivery {held}"))
+    )
 }
 
 /// Who the bound reply goes to, as its source names them: `@codex`, or
