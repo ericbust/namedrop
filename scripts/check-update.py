@@ -15,11 +15,10 @@ import urllib.request
 
 DAY_MS = 86_400_000
 LIMIT = 65_536
-# The first release that ships scripts/install.sh. No release does yet, so
-# this stays above every release until the one that first ships it sets it
-# to its own version (docs/releasing.md). A standalone install is offered no
+# The first release that ships scripts/install.sh. It stays this release in
+# every later one (docs/releasing.md). A standalone install is offered no
 # older tag, because an older tag has no installer.
-INSTALLER_FLOOR = '2.0.0'
+INSTALLER_FLOOR = '1.12.0'
 
 
 def version(value):

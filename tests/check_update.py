@@ -172,10 +172,10 @@ class UpdateCheck(unittest.TestCase):
         self.assertEqual(self.cache()['source']['installed_version'], '1.7.9')
 
     def test_only_a_release_with_an_installer_on_the_installs_channel_is_offered(self):
-        self.assertEqual(worker.INSTALLER_FLOOR, '2.0.0', 'move the floor only with docs/releasing.md')
-        # Today's repository: every tag is below the floor, so nothing is
-        # offered and nothing is an error. 1.11.1 is newer than 1.7.9 but
-        # has no installer.
+        self.assertEqual(worker.INSTALLER_FLOOR, '1.12.0', 'move the floor only with docs/releasing.md')
+        # The repository before the first release with an installer: every
+        # tag is below the floor, so nothing is offered and nothing is an
+        # error. 1.11.1 is newer than 1.7.9 but has no installer.
         for installed in ('1.7.9', '1.7.9-exp.1', '1.0.0'):
             remote, cache = self.offered(installed, None, REPOSITORY_LISTING)
             self.assertIsNone(remote, installed)
@@ -187,9 +187,12 @@ class UpdateCheck(unittest.TestCase):
         self.assertIsNone(self.offered('1.2.0', None, SCRATCH_LISTING)[0])
         self.assertIsNone(self.offered('1.0.0', None, SCRATCH_LISTING)[0])
         # At the floor and above it.
-        self.assertEqual(self.offered('1.7.9', None, REPOSITORY_LISTING + 'f' * 40 + '\trefs/tags/v2.0.0\n')[0], '2.0.0')
-        self.assertEqual(self.offered('1.7.9', ['1.99.99', '2.0.0-exp.4'])[0], None)
-        self.assertEqual(self.offered('1.7.9', ['2.0.0', '2.0.1', '1.11.1'])[0], '2.0.1')
+        self.assertEqual(self.offered('1.7.9', None, REPOSITORY_LISTING + 'f' * 40 + '\trefs/tags/v1.12.0\n')[0], '1.12.0')
+        self.assertEqual(self.offered('1.7.9', ['1.11.99', '1.12.0-exp.4'])[0], None)
+        self.assertEqual(self.offered('1.7.9', ['1.12.0', '1.12.1', '1.11.1'])[0], '1.12.1')
+        # A pre-release of the floor's version sorts below the floor, so a
+        # pre-release install of it waits for the release.
+        self.assertIsNone(self.offered('1.12.0-exp.1', ['1.12.0-exp.3', '1.11.1'])[0])
         for installed, releases, expected in [
                 # Stable: only stable releases, never a pre-release, however new.
                 ('2.0.0', ['2.0.1', '2.1.0-exp.3', '3.0.0-exp.1'], '2.0.1'),
