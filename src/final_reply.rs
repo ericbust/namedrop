@@ -791,8 +791,9 @@ struct TurnSeen {
 struct Claims {
     directory: PathBuf,
     claims: Vec<Claim>,
-    /// Each claim's state when this call read the file.
-    read: Vec<(crate::DeliveryAttemptId, ClaimState)>,
+    /// Each claim's state, and the turn it waited for, when this call read
+    /// the file.
+    read: Vec<(crate::DeliveryAttemptId, ClaimState, HostTurn)>,
     _lock: fs::File,
 }
 
@@ -997,7 +998,7 @@ impl Claims {
         Some(Self {
             read: claims
                 .iter()
-                .map(|claim| (claim.attempt_id.clone(), claim.state))
+                .map(|claim| (claim.attempt_id.clone(), claim.state, claim.turn.clone()))
                 .collect(),
             claims,
             directory,
@@ -1007,7 +1008,8 @@ impl Claims {
 
     /// The claims this call decided, other than by a failed settle, which
     /// warns on its own. While a claim waits for its Stop the settle raises
-    /// nothing for its attempt, so every way out of that is judged here.
+    /// nothing for its attempt, so every way out of that is judged here. A
+    /// held claim that a later turn woke and held again was decided again.
     fn newly_decided(&self) -> Vec<(crate::StateNamespace, crate::DeliveryAttemptId)> {
         self.claims
             .iter()
@@ -1015,7 +1017,11 @@ impl Claims {
                 !matches!(
                     claim.state,
                     ClaimState::Open | ClaimState::Left(LeaveReason::OperationFailed)
-                ) && !self.read.contains(&(claim.attempt_id.clone(), claim.state))
+                ) && !self.read.contains(&(
+                    claim.attempt_id.clone(),
+                    claim.state,
+                    claim.turn.clone(),
+                ))
             })
             .map(|claim| (claim.namespace.clone(), claim.attempt_id.clone()))
             .collect()

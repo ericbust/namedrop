@@ -2245,6 +2245,28 @@ fn a_turn_that_replies_to_the_helper_and_asks_again_holds_without_a_warning() {
     assert_eq!(space.warnings_on(attempt), Vec::<String>::new());
 }
 
+/// The turn the lead's answer starts sits idle with no Stop past the grace,
+/// so the person is warned. Then its Stop arrives after all and holds the
+/// delivery again on a follow-up: the warning goes, and Channels shows the
+/// delivery held again.
+#[test]
+fn a_late_stop_that_holds_the_answer_again_withdraws_its_warning() {
+    let space = Space::new();
+    let (question, ask, answer) = space.held_on_the_lead();
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap();
+    space.reviewer_prompt_at(1_000, "answer-turn", &answer.to_string());
+    space.reviewer_sends_at(2_000, "@lead And what about option C?");
+    space.observe_at(IDLE);
+    space.observe_at(IDLE + STOP_ARRIVAL_GRACE_MS);
+    assert_eq!(space.warnings_on(attempt).len(), 1);
+    space.reviewer_stop_at(IDLE + 20_000, "answer-turn", "Asked a follow-up; waiting.");
+    assert_eq!(space.claims()[0]["state"], json!({"left":"held"}));
+    assert_eq!(space.warnings_on(attempt), Vec::<String>::new());
+    space.observe_at(IDLE + 21_000);
+    assert_eq!(space.warnings_on(attempt), Vec::<String>::new());
+    assert_eq!(space.question_leg(&question), "working");
+}
+
 /// A reply the agent sends during the turn opens no request, even to an
 /// agent who has not answered it: a late answer to an earlier delivery does
 /// not make the turn wait, so the person still gets the final message.
