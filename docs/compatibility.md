@@ -51,17 +51,17 @@ Namedrop reports this as ND-SESSION-003 in `namedrop doctor`, when you name a Co
 
 ## Rex (experimental)
 
-Rex support is on the `experimental` branch only, and no release includes it. On Rex, Namedrop does not need Herdr. See [Run Namedrop on Rex](rex.md).
+Rex support is experimental, and no release includes it yet. To use it, build the `experimental` branch. On Rex, Namedrop does not need Herdr, and `sh scripts/install.sh` installs it. See [Run Namedrop on Rex](rex.md).
 
 Namedrop speaks Rex's control protocol, `rex.control.v1`, at API revisions 12, 13 and 14. It offers revisions 12 to 14, and the server answers with the highest revision that both support. Namedrop refuses any other answer with `the server's welcome is not one for rex.control.v1 revisions 12 to 14`. `rex version` prints a server's revision and the range it supports.
 
 | Rex | API revision | Status |
 |---|---|---|
 | `0.1.0-preview.14`, commit `7e460d0` | 12, supports 0 to 12 | Supported, at revision 12. The spike and the adapter's design probes ran on it |
-| `0.1.0-preview.18`, commit `baf79e0` | 13, supports 0 to 13 | Works at revision 13. Tested without agents and without the relay |
-| `0.1.0-preview.19`, commit `ad5a836` | 14, supports 0 to 14 | Works at revision 14. Tested without agents and without the relay, and with Herdr inside Rex |
+| `0.1.0-preview.18`, commit `baf79e0` | 13, supports 0 to 13 | Supported, at revision 13. The installer, the palette actions, both install orders, and agents were tested on it through pre-release round B, and the relay to a Linux host in the remote-host lab. Round C did not run on preview.18 |
+| `0.1.0-preview.19`, commit `ad5a836` | 14, supports 0 to 14 | Supported, at revision 14. Tested as preview.18 was, except that the remote-host lab ran it only as B. Also tested with Herdr inside Rex, and in pre-release round C |
 
-Rex has been tested only on macOS on Apple silicon. The testbed's Rex lanes use the `rex` that the testbed finds, and their logs do not record its version.
+Rex has been tested with real agents only on macOS on Apple silicon. A Linux Rex server was tested only as the receiving machine in the remote-host lab, in a Docker container, with no real agent. The testbed's Rex lanes use the `rex` that the testbed finds, and their logs do not record its version, except where an entry below names it.
 
 ### What has been tested on Rex
 
@@ -71,8 +71,30 @@ Rex has been tested only on macOS on Apple silicon. The testbed's Rex lanes use 
 - **Rex preview.14 and preview.18, 2026-11-14**, Namedrop at commit `329c278b`, which offers only revision 12, in scratch Rex servers, without agents. Both servers answered with revision 12. On both, Doctor reported `ND-SETUP-001`, `activate` succeeded, and a terminal block was named.
 - **Rex preview.14 and preview.18, 2026-11-14**, Namedrop at commit `a08c40b6`, which offers revisions 12 to 13, in scratch Rex servers, without agents. Rex preview.14 answered with revision 12, and preview.18 answered with revision 13. On both, the four live tests that need no fixture passed, Doctor reported only `ND-SETUP-001`, `activate` succeeded, and a terminal block was named.
 - **Rex preview.14, preview.18 and preview.19, 2026-11-14**, Namedrop at commit `02fa5127`, which offers revisions 12 to 14, in scratch Rex servers. The servers answered with revisions 12, 13 and 14. On each, the four live tests passed, Doctor reported only `ND-SETUP-001`, `activate` succeeded, a terminal block was named, and a root status set and cleared after attachment reached the bridge. The testbed's Herdr-inside-Rex lane passed with preview.19. On every build, Rex sometimes sends no startup events for a new session's first block; activation reads the block itself, so nothing is lost. See [Control API revisions](../experimental/rex/ADAPTER.md#control-api-revisions).
+- **The installer and the palette actions, 2026-11-15**, Namedrop 1.7.9 at commit `a117053e`, on Rex preview.18 and preview.19. The testbed's Rex lane installed the build's release archive with `sh scripts/install.sh --yes`, with no `herdr` on its `PATH`. The server listed the eleven Namedrop actions. `rex do --origin palette namedrop_activate` opened the tour in one floating layer, and `namedrop_name` named Claude Code and Codex from the names typed into each layer. A mention each way between them got its reply back. All 17 checks passed on both builds.
+- **Install orders and removal**, on preview.18 at commit `164d7daf` and on preview.19 at commit `35a7abaf`, with real Herdr 0.9.5, Codex 0.163.0 on gpt-6-sol, and Claude Code. With Herdr first, `install.sh` adopted Herdr's install. Beside Namedrop 1.11.1, it refused and changed no file, and adopted after Herdr updated. With Rex first, Herdr's activation took over the Rex install, the old runtime refused, and Doctor's `ND-INSTALL-001` counted the agents from before the move. `install --remove` after each order restored `init.lua` byte for byte. A Codex on a second Rex server, named with `rex do --origin palette namedrop_name`, answered a mention relayed through `rex hosts`. All 92 checks of the five scenarios passed.
+- **The remote-host lab, 2026-11-15**, at commit `49c29139`: a scratch macOS Rex server on preview.18 as A, and as B a Debian trixie container on the same Mac, with Superlogical's apt Rex package, reached over `ssh://`. B ran preview.18, and preview.19 in an earlier run with fewer checks. No model ran. The lab showed these:
+	- `rex hosts check` reached B, and Rex identified A as B's own user, a local peer.
+	- B accepted a message once, and refused unknown, ambiguous, and terminal names with the reasons in [What a sender sees when a relayed message fails](rex-reference.md#what-a-sender-sees-when-a-relayed-message-fails).
+	- With `relay/allow-terminals`, a terminal on B ran a relayed command once, and its reply reached A at A's next collect.
+	- While B was away in four ways, A kept the message, Rex never answered `not_found`, and B ran the message once after it came back.
+	- A retry after a timeout was accepted once.
+	- B refused an anonymous `http://` caller, and A refused a second label for B's server.
+	- Namedrop's Linux process reads passed on B, and a Codex stand-in bound in a pane on B.
+	- Replacing B's executable under a running bridge made B answer every relayed message with a retry until the bridge restarted.
+- **Pre-release round C, 2026-11-16**, at commit `376b99c7` on round C's branch, on Rex preview.14 and preview.19 only. No preview.18 build was left on the test machine, because the Rex app had updated itself to preview.19. The scripted install, runtime, and update lanes passed on both. All five install-order scenarios passed with real Codex and Claude Code, including adoption of a Herdr install that Herdr lists and a relayed mention to Codex on a second Rex server. A mention each way between Claude Code and Codex got its reply back. The testbed's Herdr-inside-Rex lane passed 10 of 10 on preview.19.
 
-Not recorded on Rex: the relay and agents on preview.18. The testbed's Rex lanes do not log their Rex version, so their runs do not show which preview they used. Not tested on Rex: TLS to a real remote Rex server, Linux, two real machines, the Rex app's command palette, and a restart of the Rex app as opposed to the server.
+These have not been tested on Rex:
+
+- TLS to a remote Rex server, such as through Tailscale, and the Tailscale principal and device name that B shows for A.
+- A real Linux host, and a server that `rex server install ssh://` set up.
+- Mac to Mac across a network.
+- A real Claude Code or Codex on a Linux B, or on a B on another machine.
+- sshd's per-source penalties on a real B, which can refuse A for a while after a dropped connection.
+- An update of Namedrop on B while B's bridge runs.
+- The Rex app's own command palette and keys.
+- A restart of the Rex app, as opposed to its server.
+- Windows, which is out of scope.
 
 ### Herdr inside Rex
 
