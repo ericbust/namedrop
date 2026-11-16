@@ -64,16 +64,16 @@
       ],
       "sources": [
         {"file": "src/installed_runtime/packages.rs", "line": 123, "source": "ND-INSTALL-002: Namedrop's shared agent packages belong to Herdr's install in {}. Run Activate Namedrop in Herdr to update them."},
-        {"file": "scripts/install.sh", "line": 115, "source": "ND-INSTALL-002: Namedrop's shared agent packages belong to Herdr's install in "},
+        {"file": "scripts/install.sh", "line": 149, "source": "ND-INSTALL-002: Namedrop's shared agent packages belong to Herdr's install in "},
         {"file": "scripts/runtime_install.py", "line": 23, "source": "ND-INSTALL-002: Namedrop's shared agent packages belong to Herdr's install in "},
-        {"file": "scripts/install.sh", "line": 116, "source": "{state}. Run Activate Namedrop in Herdr to update them."},
+        {"file": "scripts/install.sh", "line": 150, "source": "{state}. Run Activate Namedrop in Herdr to update them."},
         {"file": "scripts/runtime_install.py", "line": 24, "source": "{self.state}. Run Activate Namedrop in Herdr to update them."}
       ],
       "reason": "ND-INSTALL-002's Herdr form: a Rex install's writer refuses packages that Herdr's install owns. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
     },
     {
       "kind": "shared-home",
-      "text": "ND-INSTALL-001: Namedrop on Rex moved to Herdr's install in <path>. In each Rex session, run Activate Namedrop again and name the panes again, then restart the agents there so they load the new hooks.",
+      "text": "ND-INSTALL-001: Namedrop on Rex moved to Herdr's install in <path>. In each Rex session, run Activate Namedrop again and name the panes again. Restart an agent there that shows Hook failed or does not answer a mention.",
       "surfaces": [
         "activate (Herdr took the state over)",
         "name (Herdr took the state over)",
@@ -82,21 +82,21 @@
         "doctor text (Herdr took the state over)"
       ],
       "sources": [
-        {"file": "src/installed_runtime/retirement.rs", "line": 27, "source": "ND-INSTALL-001: Namedrop on Rex moved to Herdr's install in {}. In each Rex session, run Activate Namedrop again and name the panes again, then restart the agents there so they load the new hooks."}
+        {"file": "src/installed_runtime/retirement.rs", "line": 27, "source": "ND-INSTALL-001: Namedrop on Rex moved to Herdr's install in {}. In each Rex session, run Activate Namedrop again and name the panes again. Restart an agent there that shows Hook failed or does not answer a mention."}
       ],
       "reason": "UI.md, Retiring a state: a Rex state that Herdr took over says where it went. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
     },
     {
       "kind": "shared-home",
-      "text": "Namedrop on Rex moved to Herdr's install in <path>. 1 agent on Rex still runs the old hooks from <path>, and the names made there were not carried over. In each Rex session, run Activate Namedrop again and name the panes again, then restart those agents so they load the new hooks. This warning clears when they have all ended.",
+      "text": "Namedrop on Rex moved to Herdr's install in <path>. 1 agent on Rex has not run its hooks since the move from <path>, and the names made there were not carried over. In each Rex session, run Activate Namedrop again and name the panes again. An agent runs the new hooks at its next turn. Restart one that shows Hook failed or does not answer a mention. This warning clears as each of them takes a turn or ends.",
       "surfaces": [
         "doctor (Herdr took the state over)",
         "doctor text (Herdr took the state over)"
       ],
       "sources": [
-        {"file": "src/rex_ui/handoff.rs", "line": 278, "source": "Namedrop on Rex moved to Herdr's install in {}. {count} the old hooks from {}, and the names made there were not carried over. In each Rex session, run Activate Namedrop again and name the panes again, then restart those agents so they load the new hooks. This warning clears when they have all ended.\n{blocks}"}
+        {"file": "src/rex_ui/handoff.rs", "line": 285, "source": "Namedrop on Rex moved to Herdr's install in {}. {count} not run its hooks since the move from {}, and the names made there were not carried over. In each Rex session, run Activate Namedrop again and name the panes again. An agent runs the new hooks at its next turn. Restart one that shows Hook failed or does not answer a mention. This warning clears as each of them takes a turn or ends.\n{blocks}"}
       ],
-      "reason": "ND-INSTALL-001 in Doctor of the state that took over, read from a Rex block whose agent still runs the old hooks. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
+      "reason": "ND-INSTALL-001 in Doctor of the state that took over, read from a Rex block whose agent has not run that state's hooks yet. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
     },
     {
       "kind": "shared-home",
@@ -129,8 +129,8 @@
         "install.sh"
       ],
       "sources": [
-        {"file": "scripts/runtime.py", "line": 856, "source": "Namedrop is moving to Herdr. Run Activate Namedrop in Herdr again."},
-        {"file": "scripts/install.sh", "line": 111, "source": "Namedrop is moving to Herdr. Run Activate Namedrop in Herdr again."}
+        {"file": "scripts/runtime.py", "line": 881, "source": "Namedrop is moving to Herdr. Run Activate Namedrop in Herdr again."},
+        {"file": "scripts/install.sh", "line": 145, "source": "Namedrop is moving to Herdr. Run Activate Namedrop in Herdr again."}
       ],
       "reason": "A Rex state that Herdr is taking over refuses the install. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
     },
@@ -152,10 +152,45 @@
         "install.sh"
       ],
       "sources": [
-        {"file": "scripts/install.sh", "line": 124, "source": "Namedrop is already installed in Herdr ({herdr}). "},
-        {"file": "scripts/install.sh", "line": 125, "source": "Update Namedrop in Herdr first, then run sh scripts/install.sh again."}
+        {"file": "scripts/install.sh", "line": 167, "source": "Namedrop is already installed in Herdr ({herdr}). "},
+        {"file": "scripts/install.sh", "line": 168, "source": "Update Namedrop in Herdr first, then run sh scripts/install.sh again."}
       ],
       "reason": "A Herdr release from before step 6 owns this HOME's Namedrop. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
+    },
+    {
+      "kind": "shared-home",
+      "text": "Namedrop is already installed in Herdr (<path>). Run Activate Namedrop in Herdr first, then run sh scripts/install.sh again.",
+      "surfaces": [
+        "install.sh"
+      ],
+      "sources": [
+        {"file": "scripts/install.sh", "line": 165, "source": "Namedrop is already installed in Herdr ({herdr}). "},
+        {"file": "scripts/install.sh", "line": 166, "source": "Run Activate Namedrop in Herdr first, then run sh scripts/install.sh again."}
+      ],
+      "reason": "A current Herdr release owns this HOME's Namedrop and lost its install record, which its activation writes again. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
+    },
+    {
+      "kind": "shared-home",
+      "text": "Namedrop cannot read Herdr's plugin list in <path>, so it cannot tell whether Namedrop is still installed in Herdr (<path>). If it is not, move that directory away, then run sh scripts/install.sh again.",
+      "surfaces": [
+        "install.sh"
+      ],
+      "sources": [
+        {"file": "scripts/install.sh", "line": 81, "source": "Namedrop cannot read Herdr's plugin list in {registry}, so it cannot tell whether "},
+        {"file": "scripts/install.sh", "line": 82, "source": "Namedrop is still installed in Herdr ({herdr}). If it is not, move that directory "}
+      ],
+      "reason": "Herdr's state for Namedrop outlives `herdr plugin uninstall`, so install.sh refuses beside it only while Herdr's plugin list names Namedrop, and names the way out when it cannot read that list. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
+    },
+    {
+      "kind": "shared-home",
+      "text": "Namedrop cannot read the owner of Herdr's Namedrop state in <path>: it is not a readable file. Inspect that file, then run sh scripts/install.sh again.",
+      "surfaces": [
+        "install.sh"
+      ],
+      "sources": [
+        {"file": "scripts/install.sh", "line": 161, "source": "Herdr's Namedrop state"}
+      ],
+      "reason": "Herdr's Namedrop state still listed by Herdr, with an owner file install.sh cannot read. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
     },
     {
       "kind": "shared-home",
@@ -164,7 +199,7 @@
         "install.sh"
       ],
       "sources": [
-        {"file": "scripts/install.sh", "line": 135, "source": "Update Namedrop in Herdr first, then run sh scripts/install.sh again."}
+        {"file": "scripts/install.sh", "line": 172, "source": "Update Namedrop in Herdr first, then run sh scripts/install.sh again."}
       ],
       "reason": "Herdr's runtime cannot install the Rex module yet. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
     },
@@ -175,7 +210,7 @@
         "install.sh"
       ],
       "sources": [
-        {"file": "scripts/install.sh", "line": 154, "source": "Herdr keeps its runtime and updates it. This archive publishes no runtime."}
+        {"file": "scripts/install.sh", "line": 191, "source": "Herdr keeps its runtime and updates it. This archive publishes no runtime."}
       ],
       "reason": "install.sh adopts Herdr's runtime. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
     },
@@ -186,7 +221,7 @@
         "install.sh"
       ],
       "sources": [
-        {"file": "scripts/install.sh", "line": 166, "source": "Installing the Rex module and agent packages with Herdr's runtime…"}
+        {"file": "scripts/install.sh", "line": 203, "source": "Installing the Rex module and agent packages with Herdr's runtime…"}
       ],
       "reason": "install.sh adopts Herdr's runtime. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
     },
@@ -260,6 +295,41 @@
         {"file": "integrations/tool.json", "line": 169, "source": "the pin writes one ref under refs/herdr-context/"}
       ],
       "reason": "The shared packages' tool.json when Herdr's install owns them. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
+    },
+    {
+      "kind": "shared-home",
+      "text": "herdr plugin action invoke update --plugin namedrop",
+      "surfaces": [
+        "update notice (Herdr owns the state)",
+        "doctor update (Herdr owns the state)",
+        "doctor update text (Herdr owns the state)"
+      ],
+      "sources": [
+        {"file": "src/update_check.rs", "line": 14, "source": "herdr plugin action invoke update --plugin namedrop"}
+      ],
+      "reason": "Herdr's update command, in the SessionStart notice and ND-UPDATE-001 of a Rex pane on a state that Herdr's install owns, which updates through Herdr. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
+    },
+    {
+      "kind": "shared-home",
+      "text": "'herdr' 'plugin' 'action' 'invoke' 'update' '--plugin' 'namedrop'",
+      "surfaces": [
+        "doctor update text (Herdr owns the state)"
+      ],
+      "sources": [
+        {"file": "src/update_check.rs", "line": 14, "source": "herdr plugin action invoke update --plugin namedrop"}
+      ],
+      "reason": "ND-UPDATE-001's repair command in Doctor's text, each word quoted, for a Rex pane on a state that Herdr's install owns. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
+    },
+    {
+      "kind": "shared-home",
+      "text": "path=<path>/herdr/plugins/config/namedrop/settings.json",
+      "surfaces": [
+        "doctor invalid settings text (Herdr owns the state)"
+      ],
+      "sources": [
+        {"file": "src/update_check.rs", "line": 50, "source": "herdr/plugins/config/namedrop/settings.json"}
+      ],
+      "reason": "ND-UPDATE-002 names the settings file it could not read, which for a state that Herdr's install owns is Herdr's. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
     }
   ],
   "unprinted": [
@@ -292,7 +362,16 @@
       "file": "scripts/install.sh",
       "reason": "A file or directory name of the agent packages, read and written, never printed as text.",
       "literals": [
-        [122, "herdr/plugins/namedrop"]
+        [159, "herdr/plugins/namedrop"]
+      ]
+    },
+    {
+      "kind": "unshown",
+      "file": "scripts/install.sh",
+      "reason": "Herdr's plugin list, its file and the key that names a plugin, read to tell whether Herdr still lists Namedrop. The file shows only inside its path.",
+      "literals": [
+        [73, "herdr/plugins.json"],
+        [84, "plugin_id"]
       ]
     },
     {
@@ -300,12 +379,12 @@
       "file": "scripts/install.sh",
       "reason": "A value of runtime/owner or retired.json's reason, read and written, never printed.",
       "literals": [
-        [59, "herdr"],
         [60, "herdr"],
-        [111, "herdr_handoff"],
-        [114, "herdr"],
-        [123, "herdr"],
-        [127, "herdr"]
+        [64, "herdr"],
+        [145, "herdr_handoff"],
+        [148, "herdr"],
+        [161, "herdr"],
+        [170, "herdr"]
       ]
     },
     {
@@ -325,10 +404,10 @@
       "reason": "Maintainer release tooling, which no home runs.",
       "literals": [
         [6, "version  prints the release version after checking Cargo.toml, Cargo.lock and herdr-plugin.toml agree."],
-        [18, "$namedrop_root/herdr-plugin.toml"],
-        [20, "herdr-plugin.toml has version '$manifest' but Cargo.toml has '$version'. Set the same version in both."],
-        [71, "Experimental version $version cannot be released to main. Choose a stable version for main in Cargo.toml, herdr-plugin.toml and Cargo.lock."],
-        [79, "Raise the version in Cargo.toml, herdr-plugin.toml and Cargo.lock (see docs/releasing.md#choose-the-version)."]
+        [19, "$namedrop_root/herdr-plugin.toml"],
+        [21, "herdr-plugin.toml has version '$manifest' but Cargo.toml has '$version'. Set the same version in both."],
+        [86, "Experimental version $version cannot be released to main. Choose a stable version for main in Cargo.toml, herdr-plugin.toml and Cargo.lock."],
+        [94, "Raise the version in Cargo.toml, herdr-plugin.toml and Cargo.lock (see docs/releasing.md#choose-the-version)."]
       ]
     },
     {
@@ -375,8 +454,8 @@
       "file": "scripts/runtime.py",
       "reason": "run.sh's argv form; install.sh always passes the explicit --state-dir form.",
       "literals": [
-        [1222, "--herdr-pane"],
-        [1223, "Expected activate or --herdr-pane after ROOT; explicit calls need --state-dir DIR --verify activate|install."]
+        [1247, "--herdr-pane"],
+        [1248, "Expected activate or --herdr-pane after ROOT; explicit calls need --state-dir DIR --verify activate|install."]
       ]
     },
     {
@@ -384,10 +463,10 @@
       "file": "scripts/runtime.py",
       "reason": "A value of runtime/owner or retired.json's reason, read and written, never printed.",
       "literals": [
-        [861, "herdr_handoff"],
-        [952, "herdr_handoff"],
-        [1011, "herdr_handoff"],
-        [1129, "herdr\n"]
+        [886, "herdr_handoff"],
+        [977, "herdr_handoff"],
+        [1036, "herdr_handoff"],
+        [1154, "herdr\n"]
       ]
     },
     {
@@ -399,9 +478,9 @@
         [444, "HERDR_PLUGIN_STATE_DIR"],
         [444, "HERDR_SOCKET_PATH"],
         [444, "HERDR_WORKSPACE_ID"],
-        [1049, "HERDR_PLUGIN_STATE_DIR"],
-        [1140, "HERDR_WORKSPACE_ID"],
-        [1219, "HERDR_PLUGIN_STATE_DIR"]
+        [1074, "HERDR_PLUGIN_STATE_DIR"],
+        [1165, "HERDR_WORKSPACE_ID"],
+        [1244, "HERDR_PLUGIN_STATE_DIR"]
       ]
     },
     {
@@ -448,16 +527,16 @@
         [158, "HERDR_SOCKET_PATH"],
         [163, "Herdr did not accept the bound setup action: "],
         [170, "herdr "],
-        [254, "  For new Codex sessions, refresh the installed plugin:"],
-        [266, "Herdr "],
-        [280, "    herdr integration install codex\n    herdr integration install claude"],
-        [297, "plugin"],
-        [301, "plugin_action_invoked"],
-        [307, "--plugin"],
+        [264, "  For new Codex sessions, refresh the installed plugin:"],
+        [276, "Herdr "],
+        [290, "    herdr integration install codex\n    herdr integration install claude"],
         [307, "plugin"],
-        [308, "plugin_log_list"],
-        [315, "plugin_id"],
-        [365, "Inspect herdr plugin log list --plugin namedrop --limit 100; do not assume the action failed or retry automatically."]
+        [311, "plugin_action_invoked"],
+        [317, "--plugin"],
+        [317, "plugin"],
+        [318, "plugin_log_list"],
+        [325, "plugin_id"],
+        [375, "Inspect herdr plugin log list --plugin namedrop --limit 100; do not assume the action failed or retry automatically."]
       ]
     },
     {
@@ -1021,15 +1100,6 @@
       "reason": "The tour's authoring check, which the test suite runs on every shipped tour.",
       "literals": [
         [193, "presentation {id} page {number} wraps to {height} lines at width {BODY_WIDTH}; the popup holds {MAX_BODY_LINES}"]
-      ]
-    },
-    {
-      "kind": "herdr-home-only",
-      "file": "src/update_check.rs",
-      "reason": "Herdr's update instruction and settings file; a standalone install has its own.",
-      "literals": [
-        [14, "herdr plugin action invoke update --plugin namedrop"],
-        [50, "herdr/plugins/config/namedrop/settings.json"]
       ]
     }
   ],

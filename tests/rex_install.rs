@@ -187,9 +187,17 @@ fn takeover_resumes_predecessors_and_doctor_reads_liveness_without_the_old_store
         format!("{}\n", old.display()),
     )
     .unwrap();
-    let agent = namedrop::test_process_incarnation(std::process::id()).unwrap();
+    // Two running agents, each with its own incarnation.
+    let mut second = std::process::Command::new("sleep")
+        .arg("60")
+        .spawn()
+        .unwrap();
+    let agents = [
+        namedrop::test_process_incarnation(std::process::id()).unwrap(),
+        namedrop::test_process_incarnation(second.id()).unwrap(),
+    ];
     fs::create_dir_all(old.join("rex/sessions")).unwrap();
-    for block in ["block:first", "block:second"] {
+    for (block, agent) in ["block:first", "block:second"].into_iter().zip(&agents) {
         fs::write(
             old.join(format!("rex/sessions/{}.json", block.replace(':', "-"))),
             json!({"endpoint":"rex:/tmp/u7-down.sock","block":block,"agent":agent}).to_string(),
@@ -251,11 +259,49 @@ fn takeover_resumes_predecessors_and_doctor_reads_liveness_without_the_old_store
         .unwrap();
     let text = serde_json::to_string(warning).unwrap();
     assert!(
-        text.contains("2 agents on Rex still run")
+        text.contains("2 agents on Rex have not run its hooks since the move from")
             && text.contains("block:first")
             && text.contains("block:second")
-            && text.contains(old.to_str().unwrap())
+            && text.contains(old.to_str().unwrap()),
+        "{text}"
     );
+    // An agent's next turn runs this state's hooks, which bind it here: it
+    // runs the new hooks, so it no longer counts (the U13 review's F1). A
+    // binding of another incarnation in the other block proves nothing.
+    let bind = |file: &str, block: &str, agent: &str| {
+        fs::create_dir_all(successor.join("rex/sessions")).unwrap();
+        fs::write(
+            successor.join("rex/sessions").join(file),
+            json!({"endpoint":"rex:/tmp/u7-down.sock","block":block,"space":"session:s","foreground":agent,
+                "agent":agent,"runtime":"codex","session":"next-turn","bound_at_ms":1})
+            .to_string(),
+        )
+        .unwrap();
+    };
+    bind("first.json", "block:first", &agents[0]);
+    bind("second.json", "block:second", "99999@1");
+    let text = serde_json::to_string(
+        &namedrop::diagnose_collaboration(&runtime)
+            .issues
+            .into_iter()
+            .filter(|i| i.code == "ND-INSTALL-001")
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    assert!(
+        text.contains("1 agent on Rex has not run its hooks since the move from")
+            && text.contains("block:second")
+            && !text.contains("block:first"),
+        "{text}"
+    );
+    bind("second.json", "block:second", &agents[1]);
+    assert!(
+        !namedrop::diagnose_collaboration(&runtime)
+            .issues
+            .iter()
+            .any(|i| i.code == "ND-INSTALL-001")
+    );
+    fs::remove_dir_all(successor.join("rex/sessions")).unwrap();
     assert_eq!(
         fs::read(old.join("namedrop.sqlite3")).unwrap(),
         b"an old incompatible store must never be opened"
@@ -309,6 +355,8 @@ fn takeover_resumes_predecessors_and_doctor_reads_liveness_without_the_old_store
             .iter()
             .any(|i| i.code == "ND-INSTALL-001")
     );
+    second.kill().unwrap();
+    second.wait().unwrap();
 }
 
 /// The U6 review's F2: the Rex module is no agent package, so a module the

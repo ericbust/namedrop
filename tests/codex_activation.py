@@ -59,6 +59,44 @@ class CodexActivation(unittest.TestCase):
         value, _, _ = self.install(verified=repeated)
         self.assertEqual(value['data']['handoff'], again)
 
+    def test_the_refreshed_handoff_keeps_what_only_the_first_run_found(self):
+        # The U13 review's F5: an unsealed entry makes the second activation
+        # repeat steps 4 to 6, which read no binding and seal the module.
+        first = [{'state': '/rex/a', 'notice': 'The names made on Rex stay in /rex/a.',
+                  'invalid_bindings': ['/rex/a/rex/sessions/broken.json'],
+                  'module': {'status': 'not_confirmed', 'error': 'Rex did not answer', 'sealed': False}},
+                 {'state': '/rex/b', 'notice': 'The names made on Rex stay in /rex/b.', 'invalid_bindings': [],
+                  'module': {'status': 'confirmed', 'sealed': True}}]
+        again = [{'state': '/rex/a', 'notice': 'The names made on Rex stay in /rex/a.',
+                  'invalid_bindings': ['/rex/a/rex/sessions/late.json'],
+                  'module': {'status': 'confirmed', 'sealed': True}},
+                 {'state': '/rex/c', 'notice': 'The names made on Rex stay in /rex/c.', 'invalid_bindings': [],
+                  'module': {'status': 'confirmed', 'sealed': True}}]
+        self.payload['data']['handoff'] = copy.deepcopy(first)
+        repeated = copy.deepcopy(self.verified)
+        repeated['data']['handoff'] = copy.deepcopy(again)
+        value, code, _ = self.install(verified=repeated)
+        self.assertEqual(code, 0)
+        self.assertEqual(value['data']['handoff'], [
+            dict(again[0], invalid_bindings=['/rex/a/rex/sessions/broken.json', '/rex/a/rex/sessions/late.json']),
+            first[1], again[1]])
+        # Shapes the binary never writes are read as no entries, not raised.
+        for shape in (None, 'handoff', [None, 'entry'], {'state': '/rex/a'}):
+            with self.subTest(shape=shape):
+                self.payload['data']['handoff'] = copy.deepcopy(first)
+                repeated['data']['handoff'] = shape
+                self.assertEqual(self.install(verified=repeated)[0]['data']['handoff'], first)
+                self.payload['data']['handoff'] = shape
+                repeated['data']['handoff'] = copy.deepcopy(again)
+                self.assertEqual(self.install(verified=repeated)[0]['data']['handoff'], again)
+        broken = [dict(first[0], invalid_bindings=None)]
+        self.payload['data']['handoff'] = copy.deepcopy(broken)
+        repeated['data']['handoff'] = copy.deepcopy(again[:1])
+        self.assertEqual(self.install(verified=repeated)[0]['data']['handoff'], again[:1])
+        # Without a handoff in the first report, the refreshed one is as it was.
+        del self.payload['data']['handoff']
+        self.assertEqual(self.install(verified=repeated)[0], repeated)
+
     def test_current_cache_does_no_work(self):
         _, code, run = self.install(self.verified)
         self.assertEqual(code, 0)

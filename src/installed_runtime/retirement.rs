@@ -24,7 +24,7 @@ impl Retirement {
     pub fn message(&self) -> String {
         match self {
             Self::HerdrHandoff { successor, .. } => format!(
-                "ND-INSTALL-001: Namedrop on Rex moved to Herdr's install in {}. In each Rex session, run Activate Namedrop again and name the panes again, then restart the agents there so they load the new hooks.",
+                "ND-INSTALL-001: Namedrop on Rex moved to Herdr's install in {}. In each Rex session, run Activate Namedrop again and name the panes again. Restart an agent there that shows Hook failed or does not answer a mention.",
                 successor.display()
             ),
             Self::Removed { .. } => {

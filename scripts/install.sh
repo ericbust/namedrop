@@ -52,13 +52,47 @@ def require(condition, message):
         raise ValueError(message)
 
 
-def owner(state):
+def owner(state, which='this Namedrop state'):
     runtime = state / 'runtime'
     path = runtime / 'owner'
     require(not path.is_symlink(), f'Runtime file has an unexpected type: {path}')
-    value = path.read_text().strip() if path.exists() else 'herdr' if (runtime / 'current').exists() else None
+    try:
+        value = path.read_text().strip() if path.exists() else 'herdr' if (runtime / 'current').exists() else None
+    except (OSError, UnicodeDecodeError):
+        raise ValueError(f'Namedrop cannot read the owner of {which} in {path}: it is not a readable file. '
+                         'Inspect that file, then run sh scripts/install.sh again.') from None
     require(value in (None, 'standalone', 'herdr'), f'Invalid Namedrop runtime owner in {state}')
     return value
+
+
+def herdr_lists_namedrop(home, herdr):
+    """Whether Herdr's plugin registry still lists Namedrop. Herdr keeps it in
+    $XDG_CONFIG_HOME/herdr/plugins.json, else ~/.config/herdr/plugins.json
+    (herdr's config::config_dir), and reads a missing file as no plugins."""
+    base = Path(os.environ.get('XDG_CONFIG_HOME') or '')
+    registry = (base if base.is_absolute() else home / '.config') / 'herdr/plugins.json'
+    try:
+        plugins = json.loads(registry.read_bytes())
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError):
+        plugins = None
+    require(isinstance(plugins, list),
+            f"Namedrop cannot read Herdr's plugin list in {registry}, so it cannot tell whether "
+            f'Namedrop is still installed in Herdr ({herdr}). If it is not, move that directory '
+            'away, then run sh scripts/install.sh again.')
+    return any(isinstance(plugin, dict) and plugin.get('plugin_id') == 'namedrop' for plugin in plugins)
+
+
+def supports_rex(launcher):
+    """Whether the runtime behind `launcher` installs the Rex module: its
+    contract names rex_ui, from U7 on."""
+    try:
+        result = subprocess.run([str(launcher), '--runtime-info'], capture_output=True, text=True,
+                                stdin=subprocess.DEVNULL)
+        return result.returncode == 0 and json.loads(result.stdout).get('rex_ui') == 1
+    except (OSError, ValueError, AttributeError):
+        return False
 
 
 def recorded_state(record):
@@ -115,24 +149,27 @@ try:
             "ND-INSTALL-002: Namedrop's shared agent packages belong to Herdr's install in "
             f'{state}. Run Activate Namedrop in Herdr to update them.')
     if not recorded:
-        # Herdr releases before step 6 write no record. Herdr keeps a
-        # plugin's state in $XDG_STATE_HOME/herdr/plugins/<id>, else
-        # ~/.local/state/herdr/plugins/<id> (herdr's config::state_dir).
+        # Herdr releases before step 6 write no record, and a current one
+        # whose record was lost has none either. Herdr keeps a plugin's
+        # state in $XDG_STATE_HOME/herdr/plugins/<id>, else
+        # ~/.local/state/herdr/plugins/<id> (herdr's config::state_dir). That
+        # state outlives `herdr plugin uninstall`, so it counts only while
+        # Herdr still lists Namedrop.
         base = Path(os.environ.get('XDG_STATE_HOME') or '')
         herdr = (base if base.is_absolute() else home / '.local/state') / 'herdr/plugins/namedrop'
-        require(owner(herdr) != 'herdr',
-                f'Namedrop is already installed in Herdr ({herdr}). '
-                'Update Namedrop in Herdr first, then run sh scripts/install.sh again.')
+        published = any(os.path.lexists(herdr / 'runtime' / name) for name in ('owner', 'current'))
+        if published and herdr_lists_namedrop(home, herdr) and owner(herdr, "Herdr's Namedrop state") == 'herdr':
+            # A Herdr release with the Rex module writes the record when it
+            # activates; an older one must be updated first.
+            if supports_rex(herdr / 'runtime/namedrop'):
+                raise ValueError(f'Namedrop is already installed in Herdr ({herdr}). '
+                                 'Run Activate Namedrop in Herdr first, then run sh scripts/install.sh again.')
+            raise ValueError(f'Namedrop is already installed in Herdr ({herdr}). '
+                             'Update Namedrop in Herdr first, then run sh scripts/install.sh again.')
     launcher = state / 'runtime/namedrop'
     decision = 'adopt' if recorded and selected_owner == 'herdr' else 'update' if recorded else 'new'
     if decision == 'adopt':
-        result = subprocess.run([str(launcher), '--runtime-info'], capture_output=True, text=True,
-                                stdin=subprocess.DEVNULL)
-        try:
-            supported = result.returncode == 0 and json.loads(result.stdout).get('rex_ui') == 1
-        except (ValueError, AttributeError):
-            supported = False
-        require(supported, 'Update Namedrop in Herdr first, then run sh scripts/install.sh again.')
+        require(supports_rex(launcher), 'Update Namedrop in Herdr first, then run sh scripts/install.sh again.')
     # The archive's own binary finds the Rex server as `namedrop install`
     # does, and names what that install writes. It writes nothing.
     staged = root / 'bin/namedrop'

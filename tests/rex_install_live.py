@@ -181,8 +181,12 @@ class Fixture:
         # Short socket paths fit sockaddr_un even when OUT is a long scratch path.
         self.socket = Path('/tmp') / ('nd-u7-' + TAG + '-' + name + '.sock')
         self.endpoint = 'rex:' + str(self.socket)
+        # git refuses every transport but a local one, so a fixture that
+        # forgets the opt-out above still reaches no network (the U10
+        # review's F4).
         self.env = {'HOME': str(self.home), 'PATH': '/usr/bin:/bin', 'SHELL': '/bin/none',
-                    'REX_SERVER': 'unix://' + str(self.socket), 'NAMEDROP_STATE_DIR': str(self.state)}
+                    'REX_SERVER': 'unix://' + str(self.socket), 'NAMEDROP_STATE_DIR': str(self.state),
+                    'GIT_ALLOW_PROTOCOL': 'file'}
         self.server_env = dict(self.env, HOME=str(self.server_home))
         self.args = [str(rex), '--autostart=false', '-S', 'unix://' + str(self.socket), 'server', 'run', '--listen',
                      'unix://' + str(self.socket), '--state-dir', str(self.root / 'rex-state'), '--restore=false']
@@ -374,12 +378,24 @@ def handoff_fixture(name, contents=b'-- config\n', install=True, **fixture):
     return f, Herdr(f)
 
 
+# A stand-in agent: its SessionStart hook binds it, and it runs until its
+# `ended` file appears. A `<ended>.turn` file naming a launcher and a state
+# is its next turn: it runs that launcher's UserPromptSubmit hook, and
+# records the hook's exit status in `<ended>.turned`.
 AGENT = '''import json,os,subprocess,sys,time
 launcher,state,ended=sys.argv[1:]
 env=dict(os.environ,NAMEDROP_HOOK_RUNTIME="codex")
-p=subprocess.run([launcher,"hook","session-start","--state-directory",state],input=json.dumps({"session_id":"u7-"+str(os.getpid())}),env=env,capture_output=True,text=True)
+def hook(name,launcher,state):
+    return subprocess.run([launcher,"hook",name,"--state-directory",state],input=json.dumps({"session_id":"u7-"+str(os.getpid())}),env=env,capture_output=True,text=True)
+p=hook("session-start",launcher,state)
 if p.returncode:raise SystemExit(p.stderr)
-while not os.path.exists(ended):time.sleep(.05)
+while not os.path.exists(ended):
+    if os.path.exists(ended+".turn"):
+        p=hook("user-prompt-submit",*open(ended+".turn").read().split("\\n")[:2])
+        os.remove(ended+".turn")
+        open(ended+".turned.tmp","w").write(str(p.returncode)+"\\n"+p.stderr)
+        os.replace(ended+".turned.tmp",ended+".turned")
+    time.sleep(.05)
 '''
 
 
@@ -611,10 +627,11 @@ def section_handoff():
             cached_hooks_are_quiet(f, cache)
             if scenario == 'takeover':
                 warn = h.warnings()
-                assert len(warn) == 1 and '2 agents on Rex still run' in json.dumps(warn), warn
+                assert len(warn) == 1 and '2 agents on Rex have not run its hooks' in json.dumps(warn), warn
                 assert all(block in json.dumps(warn) for block in blocks)
                 (f.root / 'end-0').touch()
-                wait(lambda: json.dumps(h.warnings()), lambda text: '1 agent on Rex still runs' in text, 'one old agent remains')
+                wait(lambda: json.dumps(h.warnings()), lambda text: '1 agent on Rex has not run its hooks' in text,
+                     'one old agent remains')
                 h.run('install', '--remove', '--input-json', CONFIRMED)
                 assert not h.warnings()
             say(scenario, 'passed')
@@ -800,11 +817,21 @@ def section_doctor():
             return [i for i in json.loads(report.stdout)['data']['issues'] if i['code'] == 'ND-INSTALL-001']
         two = warned()
         text = json.dumps(two)
-        assert len(two) == 1 and '2 agents on Rex still run' in text and str(f.state) in text, two
+        assert len(two) == 1 and '2 agents on Rex have not run its hooks' in text and str(f.state) in text, two
         assert all(block + ' on ' + f.endpoint in text for block in blocks), two
-        (f.root / 'end-0').touch()
-        one = wait(warned, lambda w: '1 agent on Rex still runs' in json.dumps(w), 'one old agent remains')
+        # The first agent's next turn runs Herdr's hooks, which bind it in
+        # Herdr's state. It still runs, and counts no more (the U13 review's F1).
+        (f.root / 'end-0.turn.tmp').write_text(str(h.launcher) + '\n' + str(h.state))
+        os.replace(f.root / 'end-0.turn.tmp', f.root / 'end-0.turn')
+        turned = wait(lambda: (f.root / 'end-0.turned').exists() and (f.root / 'end-0.turned').read_text(), bool,
+                      "the first agent's turn on Herdr's hooks")
+        assert turned.startswith('0\n'), turned
+        bound = [json.loads(p.read_text()) for p in (h.state / 'rex/sessions').glob('*.json')]
+        assert [b['agent'] for b in bound] == [agents[blocks[0]]['agent']], bound
+        one = warned()
+        assert '1 agent on Rex has not run its hooks' in json.dumps(one), one
         assert blocks[1] in json.dumps(one) and blocks[0] not in json.dumps(one), one
+        assert identity(int(agents[blocks[0]]['agent'].split('@')[0])), 'the first agent still runs'
         f.stop_server()
         f.start_server()
         wait(lambda: identity(int(agents[blocks[1]]['agent'].split('@')[0])), lambda alive: alive is None,

@@ -65,4 +65,56 @@ set_version 1.5.0-exp.1
 for base in exp/ui experimental; do
   sh "$test_root/scripts/release.sh" check "$base" > /dev/null
 done
+
+# The installer floor (the U10 review's F3), once main ships install.sh.
+commit() {
+  git -C "$test_root" add -A
+  git -C "$test_root" -c user.name=Test -c user.email=test@example.com commit -qm "$1"
+}
+set_floor() {
+  printf "INSTALLER_FLOOR = '%s'\n" "$1" > "$test_root/scripts/check-update.py"
+}
+floor_fails() {
+  set_version "$1"
+  if sh "$test_root/scripts/release.sh" check "$2" > "$test_root/output" 2>&1; then
+    printf 'release check accepted INSTALLER_FLOOR %s for %s on %s\n' "$(cat "$test_root/scripts/check-update.py")" "$1" "$2" >&2
+    exit 1
+  fi
+  grep -F "$3" "$test_root/output" > /dev/null || {
+    cat "$test_root/output" >&2
+    exit 1
+  }
+}
+set_floor 2.0.0
+set_version 1.4.3
+commit 'a release with no installer'
+git -C "$test_root" tag v1.4.3
+git -C "$test_root" update-ref refs/heads/main HEAD
+set_version 1.4.4
+sh "$test_root/scripts/release.sh" check main > /dev/null
+printf '#!/bin/sh\n' > "$test_root/scripts/install.sh"
+floor_fails 1.5.0 main 'INSTALLER_FLOOR in scripts/check-update.py is 2.0.0, but no release tag v2.0.0 ships scripts/install.sh.'
+grep -F 'Set it to 1.5.0 if this is the first release with scripts/install.sh' "$test_root/output" > /dev/null
+set_version 1.5.0
+for base in exp/ui experimental; do
+  sh "$test_root/scripts/release.sh" check "$base" > /dev/null
+done
+set_version 2.0.0
+sh "$test_root/scripts/release.sh" check main > /dev/null
+set_floor 1.4.3
+floor_fails 1.5.0 origin/main 'no release tag v1.4.3 ships scripts/install.sh'
+: > "$test_root/scripts/check-update.py"
+floor_fails 1.5.0 main "scripts/check-update.py sets no INSTALLER_FLOOR = 'X.Y.Z' line."
+set_floor 1.5.0
+set_version 1.5.0
+sh "$test_root/scripts/release.sh" check main > /dev/null
+commit 'the first release with an installer'
+git -C "$test_root" tag v1.5.0
+git -C "$test_root" update-ref refs/heads/main HEAD
+set_version 1.6.0
+sh "$test_root/scripts/release.sh" check refs/remotes/origin/main > /dev/null
+set_floor 1.6.0
+sh "$test_root/scripts/release.sh" check main > /dev/null
+set_floor 1.5.1
+floor_fails 1.6.0 main 'no release tag v1.5.1 ships scripts/install.sh'
 printf '%s\n' 'release version checks passed'

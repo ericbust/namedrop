@@ -153,7 +153,7 @@ pub(crate) fn handoff(
             Ok(()) => confirm(home, state, &old),
             Err(error) => json!({"status":"not_confirmed","error":error,"sealed":false}),
         };
-        reports.push(json!({"state":old,"notice":format!("The names made on Rex stay in {} and were not carried over. In each Rex session, run Activate Namedrop again and name the panes again, then restart the agents there so they load the new hooks.",old.display()),"invalid_bindings":invalid,"module":confirmation}));
+        reports.push(json!({"state":old,"notice":format!("The names made on Rex stay in {} and were not carried over. In each Rex session, run Activate Namedrop again and name the panes again.",old.display()),"invalid_bindings":invalid,"module":confirmation}));
     }
     Ok(reports)
 }
@@ -262,20 +262,27 @@ fn seal(home: &Path, state: &Path, old: &Path) -> Result<Value, String> {
     Ok(json!({"status":"confirmed","sealed":true}))
 }
 
+/// One warning for each retired predecessor with an agent that still runs
+/// and has not run this state's hooks. Every SessionStart and
+/// UserPromptSubmit hook binds its agent in its own state with no activation
+/// needed (`mux::home::context_hook`), so a binding of that incarnation here
+/// proves the agent runs the new hooks (the U13 review's F1).
 pub(crate) fn predecessor_warnings(home: &Path, state: &Path) -> Vec<String> {
     let Ok(Some(record)) = registration(home) else {
         return Vec::new();
     };
     let local = ThisMachine;
+    let (bound, _) = bindings(state);
     predecessors(&record).into_iter().filter_map(|entry| {
         if !installed_runtime::retirement(&entry.state).ok().flatten().is_some_and(|marker| marker.hands_to(state)) { return None; }
         let agents: Vec<_> = entry.agents.into_iter().filter(|a| {
             a.agent.split_once('@').and_then(|(pid,_)| pid.parse::<u32>().ok()).is_some_and(|pid| matches!(local.read(pid), LocalRead::Alive(p) if p.incarnation.0 == a.agent))
+                && !bound.iter().any(|b| b.agent == a.agent)
         }).collect();
         if agents.is_empty() { return None; }
-        let count = if agents.len() == 1 { "1 agent on Rex still runs".to_owned() } else { format!("{} agents on Rex still run",agents.len()) };
+        let count = if agents.len() == 1 { "1 agent on Rex has".to_owned() } else { format!("{} agents on Rex have",agents.len()) };
         let blocks = agents.iter().map(|a| format!("{} on {}",a.block,a.endpoint)).collect::<Vec<_>>().join("\n");
-        Some(format!("Namedrop on Rex moved to Herdr's install in {}. {count} the old hooks from {}, and the names made there were not carried over. In each Rex session, run Activate Namedrop again and name the panes again, then restart those agents so they load the new hooks. This warning clears when they have all ended.\n{blocks}",state.display(),entry.state.display()))
+        Some(format!("Namedrop on Rex moved to Herdr's install in {}. {count} not run its hooks since the move from {}, and the names made there were not carried over. In each Rex session, run Activate Namedrop again and name the panes again. An agent runs the new hooks at its next turn. Restart one that shows Hook failed or does not answer a mention. This warning clears as each of them takes a turn or ends.\n{blocks}",state.display(),entry.state.display()))
     }).collect()
 }
 

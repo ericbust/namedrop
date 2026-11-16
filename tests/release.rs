@@ -404,8 +404,78 @@ fn setup_shows_what_a_handoff_from_rex_did() {
         "The names made on Rex stay in /rex/state and were not carried over.",
         "The Rex module is not confirmed: Rex did not answer",
         "Could not read the Rex session binding /rex/state/rex/sessions/broken.json",
+        "An agent turn that was running during the move may show Hook failed. If one does, restart that agent.",
     ] {
         assert!(shown.contains(line), "{line:?} missing from {output}");
+    }
+    // The U13 review's F6: a path the person copies stays on one line, and
+    // shapes the binary never writes print what they can.
+    let long =
+        "/Users/someone/.namedrop-testbed/profiles/rex-u13-r1/state/namedrop-rex-first-scenario";
+    for (handoff, shows, hides) in [
+        (
+            serde_json::json!([{
+                "state": long,
+                "notice": format!("The names made on Rex stay in {long} and were not carried over."),
+                "invalid_bindings": [format!("{long}/rex/sessions/a-broken-binding-file.json")],
+                "module": {"status": "not_confirmed", "sealed": false}
+            }]),
+            vec![
+                long.to_owned(),
+                format!("{long}/rex/sessions/a-broken-binding-file.json"),
+                "The Rex module is not confirmed.".to_owned(),
+            ],
+            vec!["None"],
+        ),
+        (
+            serde_json::Value::Null,
+            vec![],
+            vec!["Namedrop on Rex", "Hook failed"],
+        ),
+        (
+            serde_json::json!(7),
+            vec![],
+            vec!["Namedrop on Rex", "Hook failed"],
+        ),
+        (
+            serde_json::json!([
+                {"state": "/rex/state", "notice": "Moved.", "invalid_bindings": null, "module": null},
+                {"state": "/rex/other", "notice": "Moved too.", "invalid_bindings": "/rex/other/x.json",
+                    "module": "confirmed"},
+                7
+            ]),
+            vec![
+                "Moved.".to_owned(),
+                "Moved too.".to_owned(),
+                "Hook failed".to_owned(),
+            ],
+            vec!["Could not read", "None"],
+        ),
+    ] {
+        report["data"]["handoff"] = handoff.clone();
+        let output = success(
+            fixture
+                .command("setup.sh")
+                .arg("activate")
+                .env("HERDR_SOCKET_PATH", "/isolated socket")
+                .env("HERDR_WORKSPACE_ID", "space-1")
+                .env("HERDR_PANE_ID", "pane-1")
+                .env(
+                    "NAMEDROP_TEST_LOG_RESPONSE",
+                    action_response("activate", 0, &report.to_string()),
+                )
+                .output()
+                .unwrap(),
+        );
+        for text in shows {
+            assert!(
+                output.lines().any(|line| line.contains(&text)),
+                "{handoff}: {text:?} is not whole on one line of {output}"
+            );
+        }
+        for text in hides {
+            assert!(!output.contains(text), "{handoff}: {text:?} in {output}");
+        }
     }
     let plain = success(
         fixture
