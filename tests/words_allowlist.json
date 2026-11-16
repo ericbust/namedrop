@@ -1427,7 +1427,7 @@
     },
     {
       "file": "src/health.rs",
-      "line": 1757,
+      "line": 1753,
       "text": "Run `namedrop channels --no-open` to start the server again on the same port. Devices that are signed in stay signed in.",
       "reason": "ND-TAILSCALE-001's repair once a tailnet handler's Channels server has stopped, which needs a Tailscale the sweep's homes do not have."
     }
