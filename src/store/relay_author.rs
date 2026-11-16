@@ -374,6 +374,44 @@ impl StateTransaction<'_> {
             .optional()?)
     }
 
+    /// Whether the message at `rowid`, written in reply to `in_reply_to`,
+    /// acknowledges the relay's host notice there rather than answering the
+    /// message the notice told about: no delivery of that message to the
+    /// reply's author had been attempted before the reply was made, so the
+    /// author had not been given it.
+    pub(crate) fn acknowledges_notice(
+        &self,
+        namespace: &StateNamespace,
+        rowid: i64,
+        in_reply_to: &str,
+    ) -> Result<bool, StoreError> {
+        let Some(told) = in_reply_to.strip_suffix(HOST_NOTICE) else {
+            return Ok(false);
+        };
+        Ok(self.transaction.query_row(
+            "SELECT EXISTS (SELECT 1 FROM collaboration_messages
+                WHERE session_socket_id = ?1 AND worktree_id = ?2 AND message_id = ?3
+                  AND grammar_version = ?5)
+             AND NOT EXISTS (SELECT 1 FROM collaboration_messages reply
+                JOIN mailbox_deliveries delivery
+                  ON delivery.session_socket_id = reply.session_socket_id
+                 AND delivery.worktree_id = reply.worktree_id
+                 AND delivery.address_id = reply.author_address_id
+                JOIN delivery_attempts attempt USING (session_socket_id, worktree_id, delivery_id, address_id)
+                WHERE reply.rowid = ?6 AND delivery.message_id = ?4
+                  AND attempt.created_at_ms < reply.created_at_ms)",
+            params![
+                namespace.session_socket_id,
+                namespace.space_id.as_str(),
+                in_reply_to,
+                told,
+                NOTICE_GRAMMAR,
+                rowid
+            ],
+            |row| row.get(0),
+        )?)
+    }
+
     /// The space and thread of `message` among the spaces of
     /// `session_socket_id`.
     pub(crate) fn message_place(
