@@ -691,6 +691,7 @@ The first draft left four calls to the operator. They are made.
 - **Claude Code's next turn after a handoff is not measured.** That its next hook runs the rewritten wrapper, binds in Herdr's state, and so leaves `ND-INSTALL-001`'s count rests on its hook log and the rewritten file. No live run gives Claude Code a turn after the handoff, so the driver checks only that Codex's turn clears Codex.
 - **On Linux, a subreaper may adopt the checker's child.** The guard's parent test is measured only on macOS ([Release checks](#release-checks)).
 - **Channels tells a Rex user to open Herdr.** The palette's "Open Namedrop Channels" opens the dashboard, whose copy names Herdr's panes, palette and setup ([Words](#words)). Before the first Rex release, the page gets per-space host copy, or the module drops the `channels` action.
+- **Channels creates channels and agents only in Herdr.** Main's New channel and Add agent forms (1.11.0) open a Herdr workspace or tab through the port's `open_space` and `open_tab`, which the Rex adapter refuses. In a Rex session each form, and the folder each shows, answers `501` in Rex's words and reads or opens nothing ([PORT.md](PORT.md#main-1111-merged-in)). Main's restart of the tailnet server (1.8.1) runs from `reconcile` and Herdr's pane events, which a Rex home does not run, so after a reboot a Rex home's tailnet link stays down until `namedrop channels --no-open`, as Doctor's `ND-TAILSCALE-001` says there.
 
 ## Review history
 
