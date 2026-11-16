@@ -404,10 +404,10 @@
       "reason": "Maintainer release tooling, which no home runs.",
       "literals": [
         [6, "version  prints the release version after checking Cargo.toml, Cargo.lock and herdr-plugin.toml agree."],
-        [18, "$namedrop_root/herdr-plugin.toml"],
-        [20, "herdr-plugin.toml has version '$manifest' but Cargo.toml has '$version'. Set the same version in both."],
-        [71, "Experimental version $version cannot be released to main. Choose a stable version for main in Cargo.toml, herdr-plugin.toml and Cargo.lock."],
-        [79, "Raise the version in Cargo.toml, herdr-plugin.toml and Cargo.lock (see docs/releasing.md#choose-the-version)."]
+        [19, "$namedrop_root/herdr-plugin.toml"],
+        [21, "herdr-plugin.toml has version '$manifest' but Cargo.toml has '$version'. Set the same version in both."],
+        [86, "Experimental version $version cannot be released to main. Choose a stable version for main in Cargo.toml, herdr-plugin.toml and Cargo.lock."],
+        [94, "Raise the version in Cargo.toml, herdr-plugin.toml and Cargo.lock (see docs/releasing.md#choose-the-version)."]
       ]
     },
     {
