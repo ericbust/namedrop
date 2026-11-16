@@ -523,7 +523,8 @@ pub(crate) struct Claim {
     /// says it ended.
     #[serde(default)]
     pub paused: Vec<String>,
-    /// When a claim that a task's notice woke was first armed.
+    /// When a claim that a task's notice or a helper's answer woke was first
+    /// armed.
     #[serde(default)]
     pub first_armed_at_ms: Option<u64>,
     /// The turn whose prompt carried a notice of this held claim's work and
@@ -1846,7 +1847,9 @@ impl Claim {
 }
 
 /// What the store says about the claim's attempt, and the helper requests its
-/// session still waits to have answered.
+/// session still waits to have answered: those its turn sent, and those it
+/// was held on before a notice or an answer woke it. A request another turn
+/// sent in between is that turn's, and its answer is that turn's too.
 fn settle_facts(
     state: &Path,
     session: &str,
@@ -1859,14 +1862,27 @@ fn settle_facts(
         .and_then(|mut store| {
             store
                 .transaction(|transaction| {
-                    Ok((
-                        transaction.delivery_disposition(&claim.namespace, &claim.attempt_id)?,
-                        transaction.helper_requests(
+                    let mut helpers = transaction.helper_requests(
+                        &claim.namespace,
+                        &claim.attempt_id,
+                        claim.armed_at_ms,
+                        now_ms,
+                    )?;
+                    if !claim.helpers.is_empty() {
+                        for request in transaction.helper_requests(
                             &claim.namespace,
                             &claim.attempt_id,
                             claim.helpers_since_ms(),
                             now_ms,
-                        )?,
+                        )? {
+                            if claim.helpers.contains(&request) && !helpers.contains(&request) {
+                                helpers.push(request);
+                            }
+                        }
+                    }
+                    Ok((
+                        transaction.delivery_disposition(&claim.namespace, &claim.attempt_id)?,
+                        helpers,
                     ))
                 })
                 .ok()

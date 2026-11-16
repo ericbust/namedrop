@@ -2246,6 +2246,20 @@ fn a_helpers_answer_holds_its_claim_through_the_turn_and_that_turns_stop_answers
     // The answer stays held while its turn runs, which may be long after the
     // held delivery's attempt settled, so nothing judges it unanswered.
     assert_eq!(held(&state, 60_000), Ok(AnswerClaim::Held));
+    // Another prompt of the same turn, a message queued into it, leaves the
+    // claim to that turn's Stop and shows no way back.
+    let queued = observe_prompt(
+        &state.0,
+        "socket",
+        "session",
+        &turn("answer-turn"),
+        None,
+        PromptFacts::default(),
+        35,
+    );
+    assert!(queued.left_open.is_empty(), "{:?}", queued.left_open);
+    assert_eq!(state.claims()[0].state, ClaimState::Left(LeaveReason::Held));
+    assert_eq!(state.claims()[0].answered_turn, Some(turn("answer-turn")));
     let log = std::cell::RefCell::new(Vec::new());
     settle(
         &state,
