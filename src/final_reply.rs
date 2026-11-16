@@ -1009,9 +1009,17 @@ impl Claims {
     }
 
     /// The held claim whose helper request `answered` is: the oldest still
-    /// outstanding that waits on it.
+    /// outstanding that waits on it. An older build held claims without
+    /// recording their requests, and this one holds a claim only on a request
+    /// or a task, so failing that, it is the oldest claim held on neither: one
+    /// an older build held before an update.
     fn answered(&self, state: &Path, answered: &crate::MessageId) -> Option<usize> {
         self.oldest_outstanding(state, |claim| claim.helpers.contains(answered))
+            .or_else(|| {
+                self.oldest_outstanding(state, |claim| {
+                    claim.helpers.is_empty() && claim.awaits.is_empty()
+                })
+            })
     }
 
     /// The oldest held claim still outstanding that `matches`, when `turn`

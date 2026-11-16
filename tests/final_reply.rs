@@ -1927,6 +1927,39 @@ fn a_turn_the_answer_starts_can_ask_again_and_hold_until_that_is_answered() {
     }
 }
 
+/// A delivery an older build held on a helper records no requests. After
+/// the update, the helper's answer still starts the turn whose final
+/// message answers it.
+#[test]
+fn a_hold_an_older_build_left_takes_its_helpers_answer_after_the_update() {
+    let space = Space::new();
+    let (question, ask, answer) = space.held_on_the_lead();
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap();
+    let mut claims: Value =
+        serde_json::from_slice(&fs::read(space.claims_file()).unwrap()).unwrap();
+    for claim in claims.as_array_mut().unwrap() {
+        let claim = claim.as_object_mut().unwrap();
+        claim.remove("helpers");
+        claim.remove("answered_turn");
+    }
+    fs::write(space.claims_file(), claims.to_string()).unwrap();
+    let turn = ("prompt_id", "answer-turn");
+    let context = space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        turn,
+        &answer.to_string(),
+    );
+    assert!(context.contains(&woken_for(attempt)), "{context}");
+    assert!(!context.contains("is still open"), "{context}");
+    space.stop("session-reviewer", turn, "The lead says option B is safe.");
+    assert_eq!(
+        space.answers_to(&question),
+        ["The lead says option B is safe."]
+    );
+    assert!(space.unresolved_disposition_warnings().is_empty());
+}
+
 /// The turn that held the delivery asked the lead two things. The first
 /// answer's turn ends with the second still unanswered, so it holds the
 /// delivery again, and the second answer's turn answers it.
