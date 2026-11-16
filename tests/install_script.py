@@ -21,6 +21,11 @@ CONTRACT = json.loads((REPO / 'runtime.json').read_text())
 # macOS's /usr/bin/python3 caches bytecode under HOME. The python3 on the
 # stub PATH does the same, so a write that would land there is seen.
 CACHE = 'Library/Caches/com.apple.python'
+# macOS's own Python, which the script runs under on a Mac with the
+# developer tools and nothing else, and the one running these tests.
+SYSTEM_PYTHON = '/usr/bin/python3'
+PYTHONS = [sys.executable] + [SYSTEM_PYTHON] * (sys.platform == 'darwin' and subprocess.run(
+    [SYSTEM_PYTHON, '-c', 'import sys'], env={'PATH': '/usr/bin:/bin'}, capture_output=True).returncode == 0)
 # The Words test (tests/words.rs) reads what each run printed from here.
 CAPTURE = os.environ.get('NAMEDROP_WORDS_CAPTURE')
 
@@ -388,13 +393,19 @@ class Installer(unittest.TestCase):
                              f'Namedrop is still installed in Herdr ({herdr}).')
         self.cwd = None
         del self.env['XDG_CONFIG_HOME']
-        # A registry it cannot read names the way out.
-        for label, contents in [('not JSON', b'['), ('an object', b'{"plugin_id": "namedrop"}')]:
-            with self.subTest(label):
-                registry = self.registry(contents)
-                self.refused(f"Namedrop cannot read Herdr's plugin list in {registry}, so it cannot tell whether "
-                             f'Namedrop is still installed in Herdr ({herdr}). If it is not, move that directory '
-                             'away, then run sh scripts/install.sh again.')
+        # A registry it cannot read names the way out, under each Python the
+        # script may run with: macOS's own parses deep nesting by recursion.
+        for python in PYTHONS:
+            self.python(python)
+            for label, contents in [('not JSON', b'['), ('an object', b'{"plugin_id": "namedrop"}'),
+                                    ('nested too deep', b'[' * 100000)]:
+                with self.subTest(label, python=python):
+                    registry = self.registry(contents)
+                    stderr = self.refused(f"Namedrop cannot read Herdr's plugin list in {registry}, so it cannot "
+                                          f'tell whether Namedrop is still installed in Herdr ({herdr}). If it is '
+                                          'not, move that directory away, then run sh scripts/install.sh again.')
+                    self.assertNotIn('Traceback', stderr)
+        self.python(sys.executable)
         registry.unlink()
         registry.mkdir()
         self.refused(f"Namedrop cannot read Herdr's plugin list in {registry},")
@@ -695,9 +706,7 @@ class Installer(unittest.TestCase):
         self.assertIn('non-zero exit status 23', result.stderr)
         self.assertNotIn('In the Rex palette', result.stdout)
 
-    @unittest.skipUnless(sys.platform == 'darwin' and subprocess.run(
-        ['/usr/bin/python3', '-c', 'import sys'], env={'PATH': '/usr/bin:/bin'},
-        capture_output=True).returncode == 0, "needs macOS's own Python")
+    @unittest.skipUnless(SYSTEM_PYTHON in PYTHONS, "needs macOS's own Python")
     def test_system_python_writes_nothing_before_confirmation(self):
         self.python('/usr/bin/python3')
         state = self.record('herdr')

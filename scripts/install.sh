@@ -82,7 +82,8 @@ def herdr_lists_namedrop(home, herdr):
         if not relative:
             return False
         plugins = None
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
+        # Python 3.9, macOS's own, parses deep nesting by recursion.
         plugins = None
     require(isinstance(plugins, list),
             f"Namedrop cannot read Herdr's plugin list in {registry}, so it cannot tell whether "

@@ -105,7 +105,8 @@ MUTATIONS = [
     ('n1-registry-xdg-ignored', 'scripts/install.sh', "(home / '.config' if config is None else Path(config))",
      "(home / '.config')", 'test_herdr_state_counts_only_while_herdr_lists_namedrop'),
     ('n1-unreadable-registry-as-empty', 'scripts/install.sh',
-     '    except (OSError, ValueError):\n        plugins = None\n', '    except (OSError, ValueError):\n        plugins = []\n',
+     "    except (OSError, ValueError, RecursionError):\n        # Python 3.9, macOS's own, parses deep nesting by recursion.\n        plugins = None\n",
+     "    except (OSError, ValueError, RecursionError):\n        # Python 3.9, macOS's own, parses deep nesting by recursion.\n        plugins = []\n",
      'test_herdr_state_counts_only_while_herdr_lists_namedrop'),
     ('n1-missing-registry-refused', 'scripts/install.sh', 'if not relative:\n            return False',
      'if False:\n            return False', 'test_herdr_state_counts_only_while_herdr_lists_namedrop'),
@@ -152,6 +153,8 @@ MUTATIONS = [
     ('c2-relative-missing-list-as-no-plugins', 'scripts/install.sh',
      '        if not relative:\n            return False\n        plugins = None\n',
      '        return False\n', 'test_herdr_state_counts_only_while_herdr_lists_namedrop'),
+    ('c7-deep-list-traceback', 'scripts/install.sh', 'except (OSError, ValueError, RecursionError):',
+     'except (OSError, ValueError):', 'test_herdr_state_counts_only_while_herdr_lists_namedrop'),
 ]
 
 
