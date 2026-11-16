@@ -137,15 +137,22 @@ fn truncate_chars(value: &str, limit: usize) -> String {
     out
 }
 
-/// What a failed worker's error output says: its last line, which a CLI
-/// prints after its warnings, as Codex prints why it stopped. A line too
-/// long to show keeps its start and its end, where the cause is.
+/// What a failed worker's error output says: its last line that starts with
+/// "error", as a CLI states why it stopped before a usage hint, else its last
+/// line, which a CLI prints after its warnings. A line too long to show keeps
+/// its start and its end, where the cause is.
 fn failure_detail(stderr: &str) -> String {
     const LIMIT: usize = 200;
-    let line = stderr
+    let lines: Vec<String> = stderr
         .split(['\n', '\r'])
         .map(sanitize_text)
-        .rfind(|line| !line.is_empty())
+        .filter(|line| !line.is_empty())
+        .collect();
+    let line = lines
+        .iter()
+        .rfind(|line| line.trim_start().to_ascii_lowercase().starts_with("error"))
+        .or_else(|| lines.last())
+        .cloned()
         .unwrap_or_default();
     let length = line.chars().count();
     if length <= LIMIT {
@@ -1422,6 +1429,16 @@ mod response_tests {
             "Error: no\u{fffd}[31m model"
         );
         assert_eq!(failure_detail("\n \n"), "");
+        assert_eq!(
+            failure_detail(
+                "error: unexpected argument '--ignore-rules' found\n\nUsage: codex exec [OPTIONS]\n\nFor more information, try '--help'.\n"
+            ),
+            "error: unexpected argument '--ignore-rules' found"
+        );
+        assert_eq!(
+            failure_detail("warming up\nstill warming\n"),
+            "still warming"
+        );
         let long = format!("Error: {}: Operation not permitted", "x".repeat(300));
         let detail = failure_detail(&long);
         assert_eq!(detail.chars().count(), 200);
