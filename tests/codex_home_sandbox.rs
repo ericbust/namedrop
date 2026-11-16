@@ -102,6 +102,13 @@ fn the_worker_resolves_a_codex_home_it_was_given() {
     std::os::unix::fs::symlink(profile("linked"), root.join("link")).unwrap();
     fs::create_dir_all(profile("home-link")).unwrap();
     std::os::unix::fs::symlink(profile("home-link"), root.join("home-link")).unwrap();
+    // A dotfiles manager may keep `~/.codex` elsewhere behind a link.
+    fs::create_dir_all(profile("dot-link").join("home")).unwrap();
+    std::os::unix::fs::symlink(
+        profile("dot-link").join("dotfiles/codex"),
+        profile("dot-link").join("home/.codex"),
+    )
+    .unwrap();
     let layouts = [
         Layout {
             name: "the testbed's profile",
@@ -134,6 +141,14 @@ fn the_worker_resolves_a_codex_home_it_was_given() {
             home: root.join("home-link/users/me"),
             given: None,
             files: profile("home-link").join("users/me/.codex"),
+        },
+        // Codex reads `~/.codex` by the path through the link, which the
+        // sandbox checks at the link's own path (round B's review, F4).
+        Layout {
+            name: "the default home a link",
+            home: profile("dot-link").join("home"),
+            given: None,
+            files: profile("dot-link").join("dotfiles/codex"),
         },
     ];
     let mut failures = Vec::new();
