@@ -67,14 +67,21 @@ def owner(state, which='this Namedrop state'):
 
 def herdr_lists_namedrop(home, herdr):
     """Whether Herdr's plugin registry still lists Namedrop. Herdr keeps it in
-    $XDG_CONFIG_HOME/herdr/plugins.json, else ~/.config/herdr/plugins.json
-    (herdr's config::config_dir), and reads a missing file as no plugins."""
-    base = Path(os.environ.get('XDG_CONFIG_HOME') or '')
-    registry = (base if base.is_absolute() else home / '.config') / 'herdr/plugins.json'
+    $XDG_CONFIG_HOME/herdr/plugins.json whenever that is set, even empty or
+    relative, else in ~/.config/herdr/plugins.json (herdr's
+    config::config_dir), and reads a missing file as no plugins."""
+    config = os.environ.get('XDG_CONFIG_HOME')
+    registry = (home / '.config' if config is None else Path(config)) / 'herdr/plugins.json'
+    # Herdr reads a relative directory from its own working directory, which
+    # may not be this one, so a list missing here says nothing.
+    relative = not registry.is_absolute()
     try:
+        registry = registry.absolute()
         plugins = json.loads(registry.read_bytes())
     except FileNotFoundError:
-        return False
+        if not relative:
+            return False
+        plugins = None
     except (OSError, ValueError):
         plugins = None
     require(isinstance(plugins, list),

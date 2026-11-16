@@ -122,6 +122,7 @@ class Installer(unittest.TestCase):
             'PYTHONDONTWRITEBYTECODE', 'PYTHONPYCACHEPREFIX', 'STUB_MODE'}}
         self.env.update(HOME=str(self.home), PATH=str(self.tools), CALLS=str(self.root / 'calls'),
                         XDG_RUNTIME_DIR=str(self.root / 'run'))
+        self.cwd = None
         self.binary = self.root / 'namedrop'
         self.binary.write_text(STUB.format(python=sys.executable, version=VERSION,
                                           contract=json.dumps(CONTRACT), schema=CONTRACT['state_schema'],
@@ -149,7 +150,7 @@ class Installer(unittest.TestCase):
         package = package or self.checkout
         result = subprocess.run(['/bin/sh', str(package / 'scripts/install.sh'), *args],
                                 input=answer if stdin is None else None, stdin=stdin,
-                                env=self.env, capture_output=True, text=True)
+                                env=self.env, cwd=self.cwd, capture_output=True, text=True)
         capture('install.sh', result.stdout)
         capture('install.sh', result.stderr)
         return result
@@ -362,14 +363,30 @@ class Installer(unittest.TestCase):
                 if plugins is not None:
                     self.registry(plugins)
                 self.assertIn('install: new', self.ok(self.run_install(answer='n\n')))
-        # Herdr's own rule for its config directory: an absolute
-        # XDG_CONFIG_HOME, else ~/.config.
+        # Herdr's own rule for its config directory (herdr's
+        # config::config_dir): XDG_CONFIG_HOME as it is whenever it is set,
+        # else ~/.config. Herdr reads an empty or relative one from its own
+        # working directory, so a list missing from this one says nothing.
         config = self.root / 'xdg config'
         self.registry(['namedrop'], config)
         self.env['XDG_CONFIG_HOME'] = str(config)
         self.refused(update)
-        self.env['XDG_CONFIG_HOME'] = 'relative config'
-        self.assertIn('install: new', self.ok(self.run_install(answer='n\n')))
+        self.registry(['namedrop'])
+        self.cwd = self.root / 'working directory'
+        self.cwd.mkdir()
+        for value, config in [('', self.cwd), ('relative config', self.cwd / 'relative config')]:
+            with self.subTest(XDG_CONFIG_HOME=value):
+                self.env['XDG_CONFIG_HOME'] = value
+                registry = self.registry(['other'], config)
+                self.assertIn('install: new', self.ok(self.run_install(answer='n\n')))
+                self.registry(['namedrop'], config)
+                self.refused(update)
+                registry.unlink()
+                # The list it looked for, by the path that names it.
+                looked = Path(os.path.realpath(self.cwd)) / registry.relative_to(self.cwd)
+                self.refused(f"Namedrop cannot read Herdr's plugin list in {looked}, so it cannot tell whether "
+                             f'Namedrop is still installed in Herdr ({herdr}).')
+        self.cwd = None
         del self.env['XDG_CONFIG_HOME']
         # A registry it cannot read names the way out.
         for label, contents in [('not JSON', b'['), ('an object', b'{"plugin_id": "namedrop"}')]:
