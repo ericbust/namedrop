@@ -84,7 +84,7 @@ impl RuntimeOptions {
 /// Each help line that names Herdr or its popups and plugin, and the line a
 /// Rex home shows in its place. Clap drops a doc comment's final period, so
 /// neither column has one.
-const REX_HELP: [(&str, &str); 9] = [
+const REX_HELP: [(&str, &str); 14] = [
     (
         "Name and @mention AI agents and terminal panes to collaborate inside Herdr",
         "Name and @mention AI agents and terminal panes to collaborate inside Rex",
@@ -120,6 +120,26 @@ const REX_HELP: [(&str, &str); 9] = [
     (
         "Plugin-owned state directory for this installed hook",
         "Namedrop's state directory for this installed hook",
+    ),
+    (
+        "Permanently purge this space's Namedrop data after confirmation",
+        "Permanently purge this Rex session's Namedrop data after confirmation",
+    ),
+    (
+        "Open Channels for this workspace in your browser",
+        "Open Channels for this Rex session in your browser",
+    ),
+    (
+        "List this space's names and live agents",
+        "List this Rex session's names and live agents",
+    ),
+    (
+        "Let agents in other workspaces run commands in a named terminal",
+        "Let agents in other Rex sessions run commands in a named terminal",
+    ),
+    (
+        "Take back commands from other workspaces for a named terminal",
+        "Take back commands from other Rex sessions for a named terminal",
     ),
 ];
 

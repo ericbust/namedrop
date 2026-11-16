@@ -150,7 +150,7 @@ where
         worktree,
     } = match load_health_snapshot(runtime) {
         Ok(snapshot) => snapshot,
-        Err(error) => return unavailable_report(&error),
+        Err(error) => return unavailable_report(&error, runtime.mux.endpoint().kind),
     };
     let worktree_issue = worktree.as_deref().and_then(|worktree| {
         crate::install::codex_sandbox::check_worktree(runtime.state_directory, worktree)
@@ -158,7 +158,7 @@ where
             .map(|error| issue(
                 "ND-INTEGRATION-001",
                 HealthSeverity::Broken,
-                "The Space worktree exposes trusted Namedrop state to Codex.",
+                runtime.mux.endpoint().kind.text("The Space worktree exposes trusted Namedrop state to Codex.", "The Rex session worktree exposes trusted Namedrop state to Codex."),
                 &error,
                 HealthRepairKind::HumanDecision,
                 "Move the worktree or Namedrop state as instructed, then activate Namedrop again.",
@@ -184,7 +184,10 @@ where
         let mut inactive = issue(
             "ND-SETUP-001",
             HealthSeverity::Blocked,
-            "Namedrop is not active in this space.",
+            runtime.mux.endpoint().kind.text(
+                "Namedrop is not active in this space.",
+                "Namedrop is not active in this Rex session.",
+            ),
             "Messages will wait until Namedrop is activated.",
             HealthRepairKind::ProductAction,
             "Activate Namedrop?",
@@ -333,7 +336,7 @@ where
             HealthSeverity::Notice,
             "The install record names another state directory than the hooks write.",
             &format!(
-                "{} names {}, and an installed hook wrapper writes elsewhere, so Namedrop in a Rex block would read a directory its hooks never write.",
+                "{} names {}, and an installed hook wrapper writes elsewhere, so Namedrop in a Rex pane would read a directory its hooks never write.",
                 record.display(),
                 recorded.display()
             ),
@@ -361,7 +364,7 @@ where
         let mut wrapper_issue = issue(
             "ND-INTEGRATION-003",
             HealthSeverity::Blocked,
-            "An installed hook wrapper does not name its agent, so its sessions never bind in a Rex block.",
+            "An installed hook wrapper does not name its agent, so its sessions never bind in a Rex pane.",
             &format!(
                 "{} sets no NAMEDROP_HOOK_RUNTIME. It was installed by an older Namedrop, and an agent whose hooks do not bind cannot register or receive mentions here.",
                 unbindable
@@ -391,7 +394,10 @@ where
         let mut paused = issue(
             "ND-SPACE-001",
             HealthSeverity::Notice,
-            "Namedrop is paused in this space.",
+            runtime.mux.endpoint().kind.text(
+                "Namedrop is paused in this space.",
+                "Namedrop is paused in this Rex session.",
+            ),
             "Messages are preserved and will wait until Namedrop resumes.",
             HealthRepairKind::ProductAction,
             "Resume Namedrop?",
@@ -718,13 +724,19 @@ where
         issues.push(issue(
             "ND-SETUP-003",
             HealthSeverity::Blocked,
-            "No supported agents are open in this space.",
+            runtime.mux.endpoint().kind.text(
+                "No supported agents are open in this space.",
+                "No supported agents are open in this Rex session.",
+            ),
             runtime.mux.endpoint().kind.text(
                 "Start Codex or Claude Code in a Herdr pane, then check again.",
                 "Start Codex or Claude Code in a Rex pane, then check again.",
             ),
             HealthRepairKind::ProductAction,
-            "Start an agent in this space?",
+            runtime.mux.endpoint().kind.text(
+                "Start an agent in this space?",
+                "Start an agent in this Rex session?",
+            ),
         ));
     }
     for address in &setup.addresses {
@@ -1282,7 +1294,7 @@ where
     })
 }
 
-fn unavailable_report(error: &str) -> HealthReport {
+fn unavailable_report(error: &str, kind: crate::mux::MuxKind) -> HealthReport {
     HealthReport {
         status: HealthStatus::Unavailable,
         available_agents: 0,
@@ -1293,7 +1305,10 @@ fn unavailable_report(error: &str) -> HealthReport {
         issues: vec![issue(
             "ND-INSPECT-001",
             HealthSeverity::Broken,
-            "Namedrop could not inspect this space safely.",
+            kind.text(
+                "Namedrop could not inspect this space safely.",
+                "Namedrop could not inspect this Rex session safely.",
+            ),
             error,
             HealthRepairKind::AgentRepair,
             "Ask an agent to diagnose it?",

@@ -711,6 +711,7 @@ where
     I: crate::IdGenerator,
 {
     execute_message_operation_with_caller(operation, input, runtime, None)
+        .map_err(|error| runtime.mux.endpoint().kind.authored_error(error))
 }
 
 pub(crate) fn execute_message_operation_with_caller<M, C, I>(

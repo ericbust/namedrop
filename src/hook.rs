@@ -89,7 +89,7 @@ pub fn execute_codex_app_server_hook(input: &str, kind: crate::mux::MuxKind) -> 
 /// wrapper can forward each as an exact literal. The person sees
 /// `systemMessage` as one warning line; the agent gets the full advice and
 /// how to offer the fix.
-pub(crate) fn codex_app_server_hook_output(kind: crate::mux::MuxKind) -> Value {
+pub fn codex_app_server_hook_output(kind: crate::mux::MuxKind) -> Value {
     use crate::codex_app_server as notice;
     let (guidance, advice, banner) = match kind {
         crate::mux::MuxKind::Herdr => (

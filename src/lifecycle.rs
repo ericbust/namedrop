@@ -200,6 +200,7 @@ where
     I: IdGenerator,
 {
     execute_with_tour(operation, input, runtime, ActivationTour::Automatic)
+        .map_err(|error| runtime.mux.endpoint().kind.authored_error(error))
 }
 
 /// The naming layer is already open, so its confirmed activation opens no tour.
@@ -512,13 +513,15 @@ where
                     runtime.mux.endpoint().kind,
                 );
                 return Err(format!(
-                    "activation requires confirmation: Space={}, state_directory={}, shared_agent_integration_packages={{{}}} created or refreshed on activation and shared by every space on this machine, agent_integration_hook_activation={}, safe_defaults={{settled_delay_ms:500, ordinary_panes_auto_registered:false, routing_scope:space}}",
+                    "activation requires confirmation: {}={}, state_directory={}, shared_agent_integration_packages={{{}}} created or refreshed on activation and shared by every {} on this machine, agent_integration_hook_activation={}, safe_defaults={{settled_delay_ms:500, ordinary_panes_auto_registered:false, routing_scope:space}}",
+                    runtime.mux.endpoint().kind.text("Space", "Rex session"),
                     discovered.workspace_id,
                     runtime.state_directory.display(),
                     crate::disclosed_user_package_targets(
                         runtime.home_directory,
                         runtime.agent_config
                     ),
+                    runtime.mux.endpoint().kind.text("space", "Rex session"),
                     hook_activation
                 ));
             }

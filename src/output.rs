@@ -17,6 +17,15 @@ pub fn render_command_result_to_text_within(
     result: &CommandResult,
     columns: Option<usize>,
 ) -> String {
+    render_command_result_to_text_for(result, columns, crate::mux::MuxKind::Herdr)
+}
+
+/// Render authored prose for the endpoint without changing response data.
+pub fn render_command_result_to_text_for(
+    result: &CommandResult,
+    columns: Option<usize>,
+    kind: crate::mux::MuxKind,
+) -> String {
     if let Some(error) = &result.error {
         // Preserve useful line breaks from Clap, but never emit terminal controls.
         return format!(
@@ -70,7 +79,8 @@ pub fn render_command_result_to_text_within(
         }
         "dashboard" => {
             lines.push(format!(
-                "Namedrop dashboard for workspace {} is live:",
+                "Namedrop dashboard for {} {} is live:",
+                kind.text("workspace", "Rex session"),
                 text(&data["workspace_id"])
             ));
             // A link the browser on this machine already used is spent, and
@@ -111,7 +121,8 @@ pub fn render_command_result_to_text_within(
         "activate" => {
             lines.push("Status".into());
             lines.push(format!(
-                "  Namedrop activated in space {}.",
+                "  Namedrop activated in {} {}.",
+                kind.text("space", "Rex session"),
                 text(&data["space_id"])
             ));
             package_errors(&data["integration_packages"], &mut lines);
@@ -176,7 +187,7 @@ pub fn render_command_result_to_text_within(
             field("Command", &data["shell_command"]["path"], 1, &mut lines);
         }
         "deactivate" => lines.push(
-            "Namedrop deactivated in this space. Names and message history are preserved.".into(),
+            kind.text("Namedrop deactivated in this space. Names and message history are preserved.", "Namedrop deactivated in this Rex session. Names and message history are preserved.").into(),
         ),
         "doctor" => {
             if let Ok(report) = serde_json::from_value::<HealthReport>(data.clone()) {
@@ -188,7 +199,7 @@ pub fn render_command_result_to_text_within(
             if let Some(addresses) = data.as_array() {
                 if addresses.is_empty() {
                     lines.push(
-                        "No names in this space. Use namedrop name @name to name this pane.".into(),
+                        kind.text("No names in this space. Use namedrop name @name to name this pane.", "No names in this Rex session. Use namedrop name @name to name this pane.").into(),
                     );
                 } else {
                     lines.push(format!(
@@ -238,7 +249,7 @@ pub fn render_command_result_to_text_within(
         "group.list" => {
             if let Some(groups) = data["groups"].as_array() {
                 if groups.is_empty() {
-                    lines.push("No saved groups in this space.".into());
+                    lines.push(kind.text("No saved groups in this space.", "No saved groups in this Rex session.").into());
                 }
                 for group in groups {
                     group_line(group, &mut lines);
@@ -260,8 +271,8 @@ pub fn render_command_result_to_text_within(
                 "address.unbind" => "Unbound",
                 "address.rename" => "Renamed to",
                 "address.enable" => "Enabled",
-                "address.allow-remote" => "Allowed commands from other workspaces for",
-                "address.deny-remote" => "Turned off commands from other workspaces for",
+                "address.allow-remote" => kind.text("Allowed commands from other workspaces for", "Allowed commands from other Rex sessions for"),
+                "address.deny-remote" => kind.text("Turned off commands from other workspaces for", "Turned off commands from other Rex sessions for"),
                 "address.persona" => {
                     if data["persona"].is_string() {
                         "Set the persona for"
@@ -297,9 +308,9 @@ pub fn render_command_result_to_text_within(
             )
         }),
         "worktree.pause" => {
-            lines.push("Namedrop paused in this space. Messages will wait until you resume.".into())
+            lines.push(kind.text("Namedrop paused in this space. Messages will wait until you resume.", "Namedrop paused in this Rex session. Messages will wait until you resume.").into())
         }
-        "worktree.resume" => lines.push("Namedrop resumed in this space.".into()),
+        "worktree.resume" => lines.push(kind.text("Namedrop resumed in this space.", "Namedrop resumed in this Rex session.").into()),
         "reconcile" => lines.push("Namedrop reconciliation completed.".into()),
         operation => {
             // Less common operations retain their complete data as labeled text,

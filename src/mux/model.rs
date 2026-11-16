@@ -40,6 +40,22 @@ impl MuxKind {
         }
     }
 
+    /// Translate only complete authored errors, preserving user data and protocol keys.
+    pub fn authored_error(self, error: String) -> String {
+        if self == Self::Herdr {
+            return error;
+        }
+        match error.as_str() {
+            "Namedrop is not activated for this space" => "Namedrop is not activated for this Rex session".to_owned(),
+            "the current pane is not live in this space" => "the current pane is not live in this Rex session".to_owned(),
+            "delivery attempt does not exist in this workspace" => "delivery attempt does not exist in this Rex session".to_owned(),
+            "coordination does not exist in this workspace" => "coordination does not exist in this Rex session".to_owned(),
+            "coordination requires its original workspace, address, and exact owner session" => "coordination requires its original Rex session, address, and exact owner session".to_owned(),
+            "allow-remote cannot run from a named terminal; run it from another pane in this workspace" => "allow-remote cannot run from a named terminal; run it from another pane in this Rex session".to_owned(),
+            _ => error,
+        }
+    }
+
     pub fn title(self) -> &'static str {
         self.text("Herdr", "Rex")
     }

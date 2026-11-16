@@ -2,7 +2,7 @@
 
 Prints one JSON document: every literal outside test code in src/ (Rust) and
 scripts/ (Python and sh) that holds a host word, every Rex text that a
-`kind.text(herdr, rex)`, `.replace(herdr, rex)` or `(herdr, rex)` pair puts in
+`kind.text(herdr, rex)` or `.replace(herdr, rex)` pair puts in
 place of a Herdr text, and every format string that names its host through
 `kind.title()`. Each literal carries its file, line and decoded text, and a
 format string also its fixed fragments, which a Rex output must hold in order.
@@ -11,12 +11,13 @@ format string also its fixed fragments, which a Rex output must hold in order.
 moved within its file, and touches nothing else: a new literal still needs a
 decision.
 """
+import ast
 import json
 from pathlib import Path
 import re
 import sys
 
-WORDS = re.compile(r'herdr|popup|plugin', re.I)
+WORDS = re.compile(r'herdr|popup|plugin|\bprefix\b|rex\s+(?:space|workspace)', re.I)
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -109,7 +110,7 @@ def without_test_items(tokens):
                         break
                 j += 1
             attribute = ' '.join(str(t[1]) for t in tokens[i + 2:j])
-            if attribute.startswith('cfg (') and ('test' in attribute) and 'not ( test' not in attribute:
+            if attribute in ('cfg ( test )', 'cfg ( feature = test-support )', 'cfg ( any ( test , feature = test-support ) )', 'cfg ( all ( test , feature = test-support ) )'):
                 k, item = j + 1, []
                 while tokens[k][1] not in ('{', ';'):
                     item.append(tokens[k])
@@ -118,7 +119,7 @@ def without_test_items(tokens):
                     words = [t[1] for t in item]
                     path = [t[1] for t in item if t[0] == 'str']
                     if 'mod' in words:
-                        skipped_modules.append(path[0] if path else words[-1] + '.rs')
+                        skipped_modules.append((path[0] if path else words[-1] + '.rs', bool(path)))
                     i = k + 1
                     continue
                 depth = 0
@@ -220,11 +221,6 @@ def rust_literals(path, text):
                             add(first, 'title-format', fragments=fragments(tokens[first][1]))
                             break
                         depth -= 1
-        if kind == 'punct' and value == '(' and literal(i + 1) and i + 3 < len(tokens) and tokens[i + 2][1] == ',' and literal(i + 3):
-            before = tokens[i - 1]
-            if before[0] != 'ident' and before[1] not in ('!', '>', ')') and WORDS.search(tokens[i + 1][1]):
-                add(i + 1, 'herdr-arm', rex=tokens[i + 3][1], rex_line=tokens[i + 3][2])
-                add(i + 3, 'rex-arm')
     for item in found.values():
         if item['role'] == 'plain' and '{' in item['text']:
             item['fragments'] = fragments(item['text'])
@@ -233,6 +229,14 @@ def rust_literals(path, text):
 
 def python_literals(text, first_line=1):
     """Plain literals of Python source; an f-string is a format string."""
+    tree = ast.parse(text)
+    docstrings = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node.body and isinstance(node.body[0], ast.Expr):
+                value = node.body[0].value
+                if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                    docstrings.add((value.lineno + first_line - 1, value.col_offset))
     found, i, n, line = [], 0, len(text), first_line
     while i < n:
         c = text[i]
@@ -257,11 +261,8 @@ def python_literals(text, first_line=1):
                     out.append(text[j])
                     j += 1
             value = ''.join(out)
-            end = text.find('\n', j)
-            # A docstring: a triple-quoted string alone on its lines.
-            docstring = (len(quote) == 3 and not text[text.rfind('\n', 0, i) + 1:i].strip()
-                         and not text[j + 3:None if end < 0 else end].strip())
-            if WORDS.search(value) and not docstring:
+            column = len(text[text.rfind('\n', 0, i) + 1:i].encode('utf-8'))
+            if WORDS.search(value) and (line, column) not in docstrings:
                 item = {'line': line, 'text': value, 'role': 'plain'}
                 if 'f' in prefix:
                     item['fragments'] = fragments(value)
@@ -277,7 +278,7 @@ def python_literals(text, first_line=1):
 
 
 def shell_literals(text):
-    """Quoted words of sh, and the Python of a `<<'PY'` heredoc."""
+    """Shell words and heredoc text; Python-fed heredocs use Python syntax."""
     found, i, n, line, heredocs = [], 0, len(text), 1, []
     while i < n:
         c = text[i]
@@ -285,15 +286,30 @@ def shell_literals(text):
             line += 1
             i += 1
             if heredocs:
-                end = text.index('\n' + heredocs[0] + '\n', i - 1)
-                found += python_literals(text[i:end + 1], line)
-                line += text.count('\n', i, end + 1) + 1
-                i = end + len(heredocs.pop(0)) + 2
+                for delimiter, strip_tabs, python in heredocs:
+                    end = re.search(r'^' + (r'\t*' if strip_tabs else '') + re.escape(delimiter) + r'\r?$', text[i:], re.M)
+                    if end is None:
+                        raise ValueError(f'unterminated heredoc {delimiter!r}')
+                    body = text[i:i + end.start()]
+                    if python:
+                        found += python_literals(body, line)
+                    else:
+                        for offset, value in enumerate(body.splitlines()):
+                            if WORDS.search(value):
+                                found.append({'line': line + offset, 'text': value, 'role': 'plain'})
+                    consumed = end.end()
+                    line += text.count('\n', i, i + consumed)
+                    i += consumed
+                    if text[i:i + 1] == '\n':
+                        i += 1
+                        line += 1
+                heredocs.clear()
         elif c == '#' and (i == 0 or text[i - 1] in ' \t\n;'):
             j = text.find('\n', i)
             i = n if j < 0 else j
-        elif (m := re.match(r"<<-?'(\w+)'", text[i:i + 40])):
-            heredocs.append(m.group(1))
+        elif (m := re.match(r"<<(-?)[ \t]*(['\"]?)(\w+)\2", text[i:])):
+            command = text[text.rfind('\n', 0, i) + 1:i].lstrip()
+            heredocs.append((m.group(3), bool(m.group(1)), bool(re.match(r'python[0-9.]*\s', command))))
             i += len(m.group(0))
         elif c == '\\':
             line += text[i + 1:i + 2] == '\n'
@@ -315,6 +331,18 @@ def shell_literals(text):
                 found.append(item)
             line += text.count('\n', i, j)
             i = j + 1
+        elif c not in ' \t\r;|&()<>':
+            start, out = i, []
+            while i < n and text[i] not in "\r\n;|&()<>'\"":
+                if text[i] == '\\' and i + 1 < n:
+                    i += 1
+                out.append(text[i])
+                i += 1
+            value = ''.join(out).strip()
+            if WORDS.search(value):
+                found.append({'line': line, 'text': value, 'role': 'plain'})
+            if i == start:
+                i += 1
         else:
             i += 1
     return found
@@ -323,16 +351,14 @@ def shell_literals(text):
 def scan(root):
     literals, parsed, skipped = [], {}, set()
     for path in sorted((root / 'src').rglob('*.rs')):
-        if path.name == 'tests.rs' or path.name.endswith('_tests.rs'):
-            continue
         parsed[path], modules = rust_literals(path.relative_to(root).as_posix(), path.read_text())
         directory = path.parent if path.stem in ('lib', 'main', 'mod') else path.parent / path.stem
-        for module in modules:
-            target = path.parent / module if module.endswith('.rs') and '/' in module or module.endswith('.rs') and module != Path(module).name else None
+        for module, explicit_path in modules:
             name = Path(module).stem
-            for candidate in ([path.parent / module] if target or module != name + '.rs' else []) + [directory / f'{name}.rs', directory / name / 'mod.rs']:
-                skipped.add(candidate.resolve())
-            skipped.update(item.resolve() for item in (directory / name).rglob('*.rs'))
+            candidates = [path.parent / module] if explicit_path else [directory / f'{name}.rs', directory / name / 'mod.rs']
+            skipped.update(candidate.resolve() for candidate in candidates)
+            if not explicit_path:
+                skipped.update(item.resolve() for item in (directory / name).rglob('*.rs'))
     for path, items in parsed.items():
         if path.resolve() not in skipped:
             literals += [dict(item, file=path.relative_to(root).as_posix()) for item in items]
@@ -342,6 +368,16 @@ def scan(root):
             literals += [dict(item, file=relative) for item in python_literals(path.read_text())]
         elif path.suffix == '.sh':
             literals += [dict(item, file=relative) for item in shell_literals(path.read_text())]
+    path = root / 'src/rex_ui/module.lua'
+    if path.exists():
+        pattern = re.compile(r"--\[(=*)\[.*?\]\1\]|--[^\n]*|\[(=*)\[(.*?)\]\2\]|(['\"])((?:\\.|(?!\4).)*?)\4", re.S)
+        text = path.read_text()
+        for match in pattern.finditer(text):
+            if match.group(0).startswith('--'):
+                continue
+            value = match.group(3) if match.group(2) is not None else match.group(5)
+            if WORDS.search(value):
+                literals.append({'file': path.relative_to(root).as_posix(), 'line': text.count('\n', 0, match.start()) + 1, 'text': value, 'role': 'plain'})
     return literals
 
 

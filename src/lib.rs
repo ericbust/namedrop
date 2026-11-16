@@ -134,7 +134,8 @@ pub use spaces::{SpaceScope, WorkspaceLabel};
 mod output;
 mod qr;
 pub use output::{
-    agent_result_view, render_command_result_to_text, render_command_result_to_text_within,
+    agent_result_view, render_command_result_to_text, render_command_result_to_text_for,
+    render_command_result_to_text_within,
 };
 pub use store::coordination_review::{OperatorSession, REVIEW_GRANT_TTL_MS};
 pub use store::{
@@ -314,3 +315,10 @@ pub fn test_process_incarnation(pid: u32) -> Option<String> {
         _ => None,
     }
 }
+
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub use hook::codex_app_server_hook_output as test_codex_app_server_hook_output;
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub use integration::registration_prompt as test_registration_prompt;

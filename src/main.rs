@@ -18,7 +18,7 @@ use namedrop::{
         Budget, Mux,
         home::{self, Home, Inherited, Location},
     },
-    render_command_result_to_text, render_command_result_to_text_within,
+    render_command_result_to_text, render_command_result_to_text_for,
     status_queue::{self, Marker},
     validate_message_input,
 };
@@ -518,7 +518,16 @@ fn main() -> ExitCode {
     let format = cli.result_format(io::stdout().is_terminal());
     let input_file = cli.input_is_file();
     let omitted = "Input file rejected; file contents are omitted from diagnostics.";
-    let write_result = |result: &CommandResult, code| write_result(result, code, format);
+    // Resolved only when a result is written, so a hook or a command that
+    // writes none never resolves its home a second time.
+    let wording_host = || {
+        *WORDING_HOST.get_or_init(|| {
+            home::resolve(&cli.runtime.flags(), inherited)
+                .map_or(namedrop::mux::MuxKind::Herdr, |home| home.kind())
+        })
+    };
+    let write_result =
+        |result: &CommandResult, code| write_result_for(result, code, format, wording_host());
     let input_error = |error: String| {
         if input_file && error.starts_with("invalid operation input: ") {
             omitted.to_owned()
@@ -527,7 +536,14 @@ fn main() -> ExitCode {
         }
     };
     let finish = |operation, result: Result<serde_json::Value, String>| {
-        finish(operation, result.map_err(input_error), format)
+        finish_for(
+            operation,
+            result
+                .map_err(input_error)
+                .map_err(|error| wording_host().authored_error(error)),
+            format,
+            wording_host(),
+        )
     };
 
     if let Some(state_directory) = cli.user_prompt_submit_hook_state_directory() {
@@ -1090,6 +1106,15 @@ fn finish(
     result: Result<serde_json::Value, String>,
     format: ResultFormat,
 ) -> ExitCode {
+    finish_for(operation, result, format, namedrop::mux::MuxKind::Herdr)
+}
+
+fn finish_for(
+    operation: &'static str,
+    result: Result<serde_json::Value, String>,
+    format: ResultFormat,
+    kind: namedrop::mux::MuxKind,
+) -> ExitCode {
     match result {
         Ok(data) => {
             // Workspace activation can succeed while a shared integration has
@@ -1099,12 +1124,13 @@ fn finish(
                 (operation == "activate" && !activation_complete(&data))
                     || (operation == "ui.install-shortcuts" && data["status"] == "needs_attention"),
             );
-            write_result(&CommandResult::success(operation, data), code, format)
+            write_result_for(&CommandResult::success(operation, data), code, format, kind)
         }
-        Err(error) => write_result(
+        Err(error) => write_result_for(
             &CommandResult::rejected(operation, "operation_failed", error),
             65,
             format,
+            kind,
         ),
     }
 }
@@ -1408,6 +1434,11 @@ fn with_runtime_at<T>(
     )
 }
 
+/// The host whose words this process's result is written in: the home its
+/// runtime resolved, or for a command that built no runtime, the home
+/// resolved when it writes its result.
+static WORDING_HOST: std::sync::OnceLock<namedrop::mux::MuxKind> = std::sync::OnceLock::new();
+
 /// The runtime of the multiplexer this process runs in: the Herdr body as it
 /// always ran, or a Rex place from the home.
 fn with_runtime_options<T>(
@@ -1416,6 +1447,7 @@ fn with_runtime_options<T>(
     action: impl FnOnce(&Runtime<'_>) -> Result<T, String>,
 ) -> Result<T, String> {
     let home = home::resolve(&options.flags(), inherited)?;
+    let _ = WORDING_HOST.set(home.kind());
     let state_directory =
         locator::state_directory(options.plugin_state.clone(), home.kind(), |name| {
             inherited.var(name)
@@ -3391,8 +3423,17 @@ fn reader_columns(output: &impl std::os::fd::AsRawFd) -> Option<usize> {
 }
 
 fn write_result(result: &CommandResult, exit_code: u8, format: ResultFormat) -> ExitCode {
+    write_result_for(result, exit_code, format, namedrop::mux::MuxKind::Herdr)
+}
+
+fn write_result_for(
+    result: &CommandResult,
+    exit_code: u8,
+    format: ResultFormat,
+    kind: namedrop::mux::MuxKind,
+) -> ExitCode {
     if format == ResultFormat::Human {
-        let text = render_command_result_to_text_within(result, reader_columns(&io::stdout()));
+        let text = render_command_result_to_text_for(result, reader_columns(&io::stdout()), kind);
         let written = if exit_code == 0 {
             writeln!(io::stdout().lock(), "{text}")
         } else {

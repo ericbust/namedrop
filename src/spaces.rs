@@ -257,6 +257,7 @@ impl SpaceDirectory {
         let exact = match exact.as_slice() {
             [] if family.is_empty() => {
                 return Err(RouteRefusal::UnknownWorkspace {
+                    kind: self.kind,
                     label: label.clone(),
                     known: self
                         .entries
@@ -743,6 +744,7 @@ pub(crate) enum RouteRefusal {
         retry: ReplyRetry,
     },
     UnknownWorkspace {
+        kind: crate::mux::MuxKind,
         label: WorkspaceLabel,
         known: Vec<WorkspaceLabel>,
     },
@@ -921,12 +923,18 @@ impl fmt::Display for RouteRefusal {
                      space, and the message text"
                 )
             }
-            Self::UnknownWorkspace { label, known } if known.is_empty() => {
-                write!(formatter, "no workspace is labelled {label}")
+            Self::UnknownWorkspace { kind, label, known } if known.is_empty() => {
+                write!(
+                    formatter,
+                    "{} {label}",
+                    kind.text("no workspace is labelled", "no Rex session is labelled")
+                )
             }
-            Self::UnknownWorkspace { label, known } => write!(
+            Self::UnknownWorkspace { kind, label, known } => write!(
                 formatter,
-                "no workspace is labelled {label}; activated workspaces: {}",
+                "{} {label}; {} {}",
+                kind.text("no workspace is labelled", "no Rex session is labelled"),
+                kind.text("activated workspaces:", "activated Rex sessions:"),
                 joined(known, ", ")
             ),
             Self::DuplicateLabel {
@@ -935,8 +943,12 @@ impl fmt::Display for RouteRefusal {
                 workspaces,
             } => write!(
                 formatter,
-                "{label} matches more than one workspace ({}); use the token shown, or rename one in \
+                "{label} {} ({}); use the token shown, or rename one in \
                  {}",
+                kind.text(
+                    "matches more than one workspace",
+                    "matches more than one Rex session"
+                ),
                 workspaces
                     .iter()
                     .map(|(display, id)| format!(

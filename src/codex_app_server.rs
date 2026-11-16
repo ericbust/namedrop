@@ -90,19 +90,19 @@ pub(crate) fn agent_guidance() -> String {
     )
 }
 
-/// The notice's words in a Rex block. The shared server runs its hooks
-/// outside every block's program, so no Codex session there ever binds to
-/// its block.
-pub(crate) const REX_SUMMARY: &str = "Codex runs its sessions through its shared app-server, so Namedrop cannot tell which Rex block each Codex session is in.";
+/// The notice's words in a Rex pane. The shared server runs its hooks
+/// outside every pane's program, so no Codex session there ever binds to
+/// its pane.
+pub(crate) const REX_SUMMARY: &str = "Codex runs its sessions through its shared app-server, so Namedrop cannot tell which Rex pane each Codex session is in.";
 
-pub(crate) const REX_EXPLANATION: &str = "Since version 0.162, Codex starts one background app-server for each Codex home (CODEX_HOME) and runs every session's hooks inside it. That server keeps the environment of wherever it was first started, not of the block you type in, and its hooks run outside the block's program. Namedrop then cannot bind a Codex session to its block: the agent cannot take a mention name, and mentions to it stay queued. Submitting another prompt does not help. The server also updates and restarts itself, which can close an open Codex window the next time it saves a setting.";
+pub(crate) const REX_EXPLANATION: &str = "Since version 0.162, Codex starts one background app-server for each Codex home (CODEX_HOME) and runs every session's hooks inside it. That server keeps the environment of wherever it was first started, not of the pane you type in, and its hooks run outside the pane's program. Namedrop then cannot bind a Codex session to its pane: the agent cannot take a mention name, and mentions to it stay queued. Submitting another prompt does not help. The server also updates and restarts itself, which can close an open Codex window the next time it saves a setting.";
 
-pub(crate) const REX_FIX: &str = "The fix turns the shared app-server off, so each Codex runs inside its own block, where Namedrop can see it. While it is off, the `codex agents` session browser and Codex remote control are unavailable. Namedrop never changes Codex settings: run the steps yourself, or let the agent in the block run them once you approve.";
+pub(crate) const REX_FIX: &str = "The fix turns the shared app-server off, so each Codex runs inside its own pane, where Namedrop can see it. While it is off, the `codex agents` session browser and Codex remote control are unavailable. Namedrop never changes Codex settings: run the steps yourself, or let the agent in the pane run them once you approve.";
 
 pub(crate) const REX_STEPS: [&str; 7] = [
     DISABLE,
     STOP,
-    "Then restart Codex in each of its Rex blocks. The stop is needed because a running server keeps taking new sessions even with the setting off. It disconnects every open Codex window that uses it, including the one whose agent ran these steps for you; relaunch those windows.",
+    "Then restart Codex in each of its Rex panes. The stop is needed because a running server keeps taking new sessions even with the setting off. It disconnects every open Codex window that uses it, including the one whose agent ran these steps for you; relaunch those windows.",
     "To fix one session only, leave the setting on and start that Codex with:",
     PER_SESSION,
     "To undo the fix and turn the shared app-server back on:",
@@ -119,13 +119,13 @@ pub(crate) fn rex_advice_lines() -> impl Iterator<Item = &'static str> {
 
 pub(crate) fn rex_banner() -> String {
     format!(
-        "Namedrop: Codex runs through its shared app-server, so Namedrop cannot tell which Rex block this session is in; mentions to it stay queued. Fix: {DISABLE}, then {STOP}, then restart Codex in its blocks. One session only: {PER_SESSION}. Undo: {ENABLE}. Namedrop changes nothing itself; see namedrop doctor."
+        "Namedrop: Codex runs through its shared app-server, so Namedrop cannot tell which Rex pane this session is in; mentions to it stay queued. Fix: {DISABLE}, then {STOP}, then restart Codex in its panes. One session only: {PER_SESSION}. Undo: {ENABLE}. Namedrop changes nothing itself; see namedrop doctor."
     )
 }
 
 pub(crate) fn rex_agent_guidance() -> String {
     format!(
-        "Namedrop shared app-server notice. Relay the notice below to the person once, in plain words, in your next reply. Run none of its commands without the person's approval. If they approve, run `{DISABLE}`, then tell them that `{STOP}` disconnects this session too before you run it, and remind them to restart Codex in each of its Rex blocks. To fix one session only, they can start it with `{PER_SESSION}`."
+        "Namedrop shared app-server notice. Relay the notice below to the person once, in plain words, in your next reply. Run none of its commands without the person's approval. If they approve, run `{DISABLE}`, then tell them that `{STOP}` disconnects this session too before you run it, and remind them to restart Codex in each of its Rex panes. To fix one session only, they can start it with `{PER_SESSION}`."
     )
 }
 

@@ -52,12 +52,13 @@ use std::{
 const ENDPOINT: &str = "rex:/tmp/words.sock";
 
 /// What a Rex home must not say. Each check is case-insensitive.
-const FORBIDDEN: [&str; 8] = [
+const FORBIDDEN: [&str; 9] = [
     "herdr",
     "popup",
     "press prefix",
     "rex space",
     "rex workspace",
+    "rex block",
     "plugin action",
     "plugin restart",
     "plugin-owned",
@@ -65,21 +66,12 @@ const FORBIDDEN: [&str; 8] = [
 
 /// The words of an agent plugin, Codex's or Claude Code's, which a Rex home
 /// installs as Herdr's does. Any other "plugin" is Herdr's.
-const AGENT_PLUGIN: [&str; 14] = [
+const AGENT_PLUGIN: [&str; 5] = [
     "--plugin-state",
     "codex plugin",
-    "namedrop plugin",
-    "the plugin changed",
-    "plugin cache",
-    "plugin setup",
-    "plugin.json",
-    "plugin.schema.json",
-    "-plugin/",
-    "-plugin-v1",
     "/reload-plugins",
+    "plugin setup",
     "plugins/",
-    "plugin_root",
-    "enabledplugins",
 ];
 
 #[derive(serde::Deserialize)]
@@ -198,7 +190,54 @@ fn violation(text: &str) -> Option<&'static str> {
     for allowed in AGENT_PLUGIN {
         rest = rest.replace(allowed, "");
     }
-    rest.contains("plugin").then_some("plugin")
+    if rest.contains("plugin") {
+        return Some("plugin");
+    }
+    let mut prose = text.replace("--space", "");
+    prose = prose
+        .replace("`workspaces`", "")
+        .replace(r#"\"workspaces\""#, "")
+        .replace(r#""workspaces""#, "")
+        .replace("routing_scope:space", "");
+    for identifier in ["{space}", "{workspace}", "{spaces}", "{workspaces}"] {
+        prose = prose.replace(identifier, "<identifier>");
+    }
+    for pattern in ["'<path>'", "\"<path>\""] {
+        for (start, end) in occurrences(&prose, pattern).into_iter().rev() {
+            prose.replace_range(start..end, "<path>");
+        }
+    }
+    if matches!(prose.trim(), "space" | "workspaces") {
+        return None;
+    }
+    for line in prose.lines() {
+        let line = if let Some(rest) = line.strip_prefix("Usage: space ") {
+            rest
+        } else if line.trim_start().starts_with("space       ") {
+            &line.trim_start()["space".len()..]
+        } else {
+            line
+        };
+        if line
+            .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
+            .any(|word| {
+                matches!(
+                    word,
+                    "space"
+                        | "spaces"
+                        | "workspace"
+                        | "workspaces"
+                        | "Space"
+                        | "Spaces"
+                        | "Workspace"
+                        | "Workspaces"
+                )
+            })
+        {
+            return Some("bare session noun");
+        }
+    }
+    None
 }
 
 impl Words {
@@ -214,8 +253,7 @@ impl Words {
             allowlist,
             corpus: Vec::new(),
             violations: Vec::new(),
-            dump: std::env::var_os("NAMEDROP_WORDS_DUMP")
-                .map(|path| fs::File::create(path).unwrap()),
+            dump: None,
         }
     }
 
@@ -290,6 +328,15 @@ impl Words {
     /// a host word classified, and every Rex text reached.
     fn finish(self) {
         let mut failures = self.violations.clone();
+        for allowance in AGENT_PLUGIN {
+            if !self
+                .corpus
+                .iter()
+                .any(|text| text.to_lowercase().contains(allowance))
+            {
+                failures.push(format!("unused agent-plugin allowance {allowance:?}"));
+            }
+        }
         for (entry, matched) in self.allowlist.printed.iter().zip(&self.matched) {
             if !*matched {
                 failures.push(format!(
@@ -317,8 +364,10 @@ impl Words {
         let scanned = |file: &str| file.starts_with("src/") || file.starts_with("scripts/");
         for entry in &self.allowlist.printed {
             for source in &entry.sources {
-                let present = if scanned(&source.file) {
-                    at(&source.file, source.line, &source.source)
+                let present = if scanned(&source.file)
+                    && at(&source.file, source.line, &source.source)
+                {
+                    true
                 } else {
                     fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(&source.file))
                         .is_ok_and(|text| {
@@ -377,9 +426,17 @@ impl Words {
         };
         let host_word = |text: &str| {
             let lower = text.to_lowercase();
-            ["herdr", "popup", "plugin"]
-                .iter()
-                .any(|word| lower.contains(word))
+            [
+                "herdr",
+                "popup",
+                "plugin",
+                "prefix",
+                "rex space",
+                "rex workspace",
+                "rex block",
+            ]
+            .iter()
+            .any(|word| lower.contains(word))
         };
         for literal in &literals {
             let place = format!("{}:{}", literal.file, literal.line);
@@ -537,6 +594,28 @@ fn operations(
             panic!("uncovered catalog operation {operation}")
         };
         words.outcome(&format!("{surface} {operation}"), &result);
+        let rendered = [
+            "address.list",
+            "group.list",
+            "worktree.pause",
+            "worktree.resume",
+            "address.allow-remote",
+            "deactivate",
+            "address.create",
+            "name",
+        ]
+        .into_iter()
+        .find(|token| *token == operation);
+        if let (Ok(value), Some(operation)) = (result, rendered) {
+            words.check(
+                &format!("{surface} {operation} rendered"),
+                render_command_result_to_text_for(
+                    &CommandResult::success(operation, value),
+                    None,
+                    MuxKind::Rex,
+                ),
+            );
+        }
     }
 }
 
@@ -684,15 +763,22 @@ fn homes(words: &mut Words, root: &Path) {
         words.json(&format!("activate json {tag}"), &activation);
         words.check(
             &format!("activate text {tag}"),
-            render_command_result_to_text(&CommandResult::success("activate", activation)),
+            render_command_result_to_text_for(
+                &CommandResult::success("activate", activation),
+                None,
+                MuxKind::Rex,
+            ),
         );
         for runtime in [AgentRuntime::Codex, AgentRuntime::ClaudeCode] {
             let package = package_directory(&f.home, runtime);
             for file in ["SKILL.md", "tool.json"] {
-                words.check(
-                    &format!("installed {runtime:?}/{file}"),
-                    fs::read_to_string(package.join(file)).unwrap(),
-                );
+                let surface = format!("installed {runtime:?}/{file}");
+                let text = fs::read_to_string(package.join(file)).unwrap();
+                if file == "tool.json" {
+                    words.json(&surface, &serde_json::from_str(&text).unwrap());
+                } else {
+                    words.check(&surface, text);
+                }
             }
         }
         let report = diagnose_collaboration(&runtime);
@@ -736,7 +822,11 @@ fn homes(words: &mut Words, root: &Path) {
             if let Ok(data) = &result {
                 words.check(
                     &format!("{operation} text {tag}"),
-                    render_command_result_to_text(&CommandResult::success(operation, data.clone())),
+                    render_command_result_to_text_for(
+                        &CommandResult::success(operation, data.clone()),
+                        None,
+                        MuxKind::Rex,
+                    ),
                 );
             }
         }
@@ -1243,10 +1333,13 @@ fn shared_home(words: &mut Words, root: &Path) {
         for runtime in [AgentRuntime::Codex, AgentRuntime::ClaudeCode] {
             let package = package_directory(&herdr.home, runtime);
             for file in ["SKILL.md", "tool.json"] {
-                words.check(
-                    &format!("installed {runtime:?}/{file} (Herdr owns the packages)"),
-                    fs::read_to_string(package.join(file)).unwrap(),
-                );
+                let surface = format!("installed {runtime:?}/{file} (Herdr owns the packages)");
+                let text = fs::read_to_string(package.join(file)).unwrap();
+                if file == "tool.json" {
+                    words.json(&surface, &serde_json::from_str(&text).unwrap());
+                } else {
+                    words.check(&surface, text);
+                }
             }
         }
     };
@@ -1376,6 +1469,24 @@ fn rex_words_sweep() {
         return;
     }
     let mut words = Words::new();
+    words.dump =
+        std::env::var_os("NAMEDROP_WORDS_DUMP").map(|path| fs::File::create(path).unwrap());
+    dedicated_sites(&mut words, &root);
+    for (operation, data) in [
+        ("deactivate", json!({})),
+        ("address.list", json!([])),
+        ("address.allow-remote", json!({"alias":"worker"})),
+        ("address.deny-remote", json!({"alias":"worker"})),
+    ] {
+        words.check(
+            operation,
+            render_command_result_to_text_for(
+                &CommandResult::success(operation, data),
+                None,
+                MuxKind::Rex,
+            ),
+        );
+    }
     static_surfaces(&mut words);
     homes(&mut words, &root);
     sessions(&mut words, &root);
@@ -1523,5 +1634,66 @@ fn words_cli_uses_the_selected_home() {
         assert!(out.status.success(), "{out:?}");
         let text = String::from_utf8(out.stdout).unwrap();
         assert!(!text.to_lowercase().contains(forbidden), "{text}");
+    }
+}
+
+include!("support/words_hosts.rs");
+
+#[test]
+fn scanner_rejects_unclassified_literal_escapes() {
+    let out = binary::command("python3")
+        .args([
+            "-B",
+            "-I",
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/words_literals_regression.py"
+            ),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn host_pair_sites_are_reached() {
+    let root = std::env::temp_dir().join(format!("nd-words-sites-{}", std::process::id()));
+    let mut words = Words::new();
+    dedicated_sites(&mut words, &root);
+    assert!(
+        words.violations.is_empty(),
+        "{}",
+        words.violations.join("\n")
+    );
+    cleanup::remove_fixture(&root).unwrap();
+}
+
+#[test]
+fn nouns_preserve_protocol_identifiers() {
+    for invalid in [
+        "No named agents in this workspace.",
+        "Open this space.",
+        "Rex block",
+        "Other workspaces are paused.",
+        "  space       Open this workspace.",
+        "Usage: space Open this workspace.",
+    ] {
+        assert!(violation(invalid).is_some(), "{invalid}");
+    }
+    for identifier in [
+        "space_id",
+        "workspace_id",
+        "namespace",
+        "whitespace",
+        "--space <SPACE>",
+        "routing_scope:space",
+        "{space}",
+    ] {
+        assert_eq!(violation(identifier), None, "{identifier}");
     }
 }
