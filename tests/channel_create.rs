@@ -475,6 +475,51 @@ fn every_new_channel_and_agent_request_needs_the_session_csrf_and_same_origin() 
     assert_eq!(server.folders("w9").status, 404);
 }
 
+/// Namedrop opens no Rex session or tab yet, so a Rex session refuses each
+/// form at once, in Rex's words, and nothing is created or typed anywhere.
+#[test]
+fn a_rex_session_refuses_new_channels_and_agents_before_reaching_a_multiplexer() {
+    let f = fixture();
+    let socket = "rex:/nonexistent-namedrop-rex.sock";
+    f.sql(&format!(
+        "INSERT INTO worktrees (session_socket_id, worktree_id, activated, paused, deactivated, created_at_ms)
+         VALUES ('{socket}', 'session:s1', 1, 0, 0, 0);"
+    ));
+    let server = Server::start(&f);
+    let key = SpaceKey::of(&StateNamespace::for_space(socket, "session:s1"))
+        .as_str()
+        .to_owned();
+    let get = |path: &str| server.request("GET", path, &[("Cookie", &server.cookie)], "");
+    let channel = "Channels can't create a channel in Rex yet. Start a Rex session, activate Namedrop in it, and it shows here as a channel.";
+    let agent = "Channels can't add an agent in Rex yet. Start the agent in a Rex pane, then name it there.";
+    for (what, response, sentence) in [
+        (
+            "new channel",
+            server.post_with(
+                &format!("/w/{key}/channels"),
+                &json!({"name": "Proto", "folder": f.root.join("home/project")}),
+                &[],
+            ),
+            channel,
+        ),
+        ("recent folders", get(&format!("/w/{key}/folders")), channel),
+        (
+            "add agent",
+            server.post_with(
+                &format!("/w/{key}/agents"),
+                &json!({"kind": "claude", "name": "coder"}),
+                &[],
+            ),
+            agent,
+        ),
+        ("agent folder", get(&format!("/w/{key}/folder")), agent),
+    ] {
+        assert_eq!(response.status, 501, "{what}: {}", response.body);
+        assert_eq!(response.error(), sentence, "{what}");
+    }
+    assert_eq!(creations(&f), Vec::<Vec<String>>::new());
+}
+
 #[test]
 fn recent_folders_list_each_workspace_folder_newest_first_and_need_herdr() {
     let f = fixture();

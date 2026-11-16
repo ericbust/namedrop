@@ -2,14 +2,16 @@
 //! with Namedrop active in it; an agent is a named pane in a new tab, started
 //! with the plain `claude` or `codex` command. Herdr is only ever reached on
 //! the socket of a space Namedrop already knows, through the multiplexer port.
+//! A Rex session refuses both before anything is read, since Namedrop opens
+//! no Rex session or tab yet.
 use super::super::channel_folders::ChannelFolders;
 use super::super::hub::{HubCommand, now_ms};
 use super::super::launches::{Launch, run_lifecycle};
 use super::super::snapshot::{SpaceKey, StartedAgent};
 use super::{Front, Request, read_json_body, respond, respond_status};
 use crate::mux::{
-    Budget, Closing, Depth, InputOutcome, Mux, MuxError, NewPane, NewSpace, NewTab, Scope,
-    SpaceView,
+    Budget, Closing, Depth, Endpoint, InputOutcome, Mux, MuxError, MuxKind, NewPane, NewSpace,
+    NewTab, Scope, SpaceView,
 };
 use crate::pane_effects::DashboardPane;
 use crate::store::AliasClaim;
@@ -32,6 +34,10 @@ const UNKNOWN_CHANNEL: &str =
     "Namedrop doesn't know this channel. Reload the page, then try again.";
 const RESTARTING: &str = "Channels is restarting. Try again in a moment.";
 const STATE_UNAVAILABLE: &str = "Namedrop couldn't read its state. Try again.";
+const NO_REX_CHANNELS: &str = "Channels can't create a channel in Rex yet. Start a Rex session, activate Namedrop in it, and it shows here as a channel.";
+const NO_REX_AGENTS: &str =
+    "Channels can't add an agent in Rex yet. Start the agent in a Rex pane, then name it there.";
+const NOT_IMPLEMENTED: &str = "501 Not Implemented";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -110,6 +116,7 @@ struct NewAgent {
 enum FoldersRefusal {
     UnknownChannel,
     StateUnavailable,
+    InRex,
     HerdrUnreachable,
 }
 
@@ -118,6 +125,7 @@ impl FoldersRefusal {
         match self {
             Self::UnknownChannel => ("404 Not Found", UNKNOWN_CHANNEL.into()),
             Self::StateUnavailable => ("503 Service Unavailable", STATE_UNAVAILABLE.into()),
+            Self::InRex => (NOT_IMPLEMENTED, NO_REX_CHANNELS.into()),
             Self::HerdrUnreachable => ("503 Service Unavailable", UNREACHABLE.into()),
         }
     }
@@ -136,6 +144,7 @@ enum ChannelRefusal {
     UnknownChannel,
     StateUnavailable,
     Restarting,
+    InRex,
     HerdrUnreachable,
     CreateFailed,
     FolderNotUsed,
@@ -172,6 +181,7 @@ impl ChannelRefusal {
             Self::UnknownChannel => ("404 Not Found", UNKNOWN_CHANNEL.into()),
             Self::StateUnavailable => ("503 Service Unavailable", STATE_UNAVAILABLE.into()),
             Self::Restarting => ("503 Service Unavailable", RESTARTING.into()),
+            Self::InRex => (NOT_IMPLEMENTED, NO_REX_CHANNELS.into()),
             Self::HerdrUnreachable => ("503 Service Unavailable", UNREACHABLE.into()),
             Self::CreateFailed => (
                 "500 Internal Server Error",
@@ -206,6 +216,7 @@ enum AgentRefusal {
     WorkspaceClosed,
     StateUnavailable,
     Restarting,
+    InRex,
     HerdrUnreachable,
     TabFailed,
     FolderNotUsed,
@@ -271,6 +282,7 @@ impl AgentRefusal {
             ),
             Self::StateUnavailable => ("503 Service Unavailable", STATE_UNAVAILABLE.into()),
             Self::Restarting => ("503 Service Unavailable", RESTARTING.into()),
+            Self::InRex => (NOT_IMPLEMENTED, NO_REX_AGENTS.into()),
             Self::HerdrUnreachable => ("503 Service Unavailable", UNREACHABLE.into()),
             Self::TabFailed => (
                 "500 Internal Server Error",
@@ -424,6 +436,11 @@ fn fixed_folder(
             .and_then(|checkout| checkout.path.to_str())
             .map(str::to_owned)
     })
+}
+
+/// Whether the space is in a Rex session, where Namedrop opens nothing yet.
+fn in_rex(namespace: &StateNamespace) -> bool {
+    Endpoint::parse(&namespace.session_socket_id).kind == MuxKind::Rex
 }
 
 /// One Herdr session, reached on the socket of a space Namedrop knows.
@@ -614,6 +631,9 @@ pub(super) fn folders(writer: &mut TcpStream, front: &Front, key: &SpaceKey) -> 
         let space = known_space(front.files.state(), key)
             .map_err(|()| FoldersRefusal::StateUnavailable)?
             .ok_or(FoldersRefusal::UnknownChannel)?;
+        if in_rex(&space.namespace) {
+            return Err(FoldersRefusal::InRex);
+        }
         let herdr =
             Herdr::of(front, &space.namespace).map_err(|()| FoldersRefusal::HerdrUnreachable)?;
         let workspaces = herdr
@@ -645,6 +665,9 @@ pub(super) fn channel_folder(
         let space = known_space(state, key)
             .map_err(|()| AgentRefusal::StateUnavailable)?
             .ok_or(AgentRefusal::UnknownChannel)?;
+        if in_rex(&space.namespace) {
+            return Err(AgentRefusal::InRex);
+        }
         let herdr =
             Herdr::of(front, &space.namespace).map_err(|()| AgentRefusal::HerdrUnreachable)?;
         let workspace = herdr.workspace(&space.namespace)?;
@@ -752,6 +775,9 @@ fn create(
     let space = known_space(front.files.state(), key)
         .map_err(|()| ChannelRefusal::StateUnavailable)?
         .ok_or(ChannelRefusal::UnknownChannel)?;
+    if in_rex(&space.namespace) {
+        return Err(ChannelRefusal::InRex);
+    }
     let herdr =
         Herdr::of(front, &space.namespace).map_err(|()| ChannelRefusal::HerdrUnreachable)?;
     let live = herdr
@@ -848,6 +874,9 @@ fn add(front: &Front, key: &SpaceKey, agent: NewAgent) -> Result<(String, String
         return Err(AgentRefusal::Paused);
     }
     let namespace = space.namespace;
+    if in_rex(&namespace) {
+        return Err(AgentRefusal::InRex);
+    }
     let herdr = Herdr::of(front, &namespace).map_err(|()| AgentRefusal::HerdrUnreachable)?;
     let live = herdr
         .workspaces()
@@ -1161,6 +1190,7 @@ mod tests {
             ChannelRefusal::UnknownChannel,
             ChannelRefusal::StateUnavailable,
             ChannelRefusal::Restarting,
+            ChannelRefusal::InRex,
             ChannelRefusal::HerdrUnreachable,
             ChannelRefusal::CreateFailed,
             ChannelRefusal::FolderNotUsed,
@@ -1184,6 +1214,7 @@ mod tests {
             AgentRefusal::WorkspaceClosed,
             AgentRefusal::StateUnavailable,
             AgentRefusal::Restarting,
+            AgentRefusal::InRex,
             AgentRefusal::HerdrUnreachable,
             AgentRefusal::TabFailed,
             AgentRefusal::FolderNotUsed,
@@ -1194,6 +1225,7 @@ mod tests {
         let folders = [
             FoldersRefusal::UnknownChannel,
             FoldersRefusal::StateUnavailable,
+            FoldersRefusal::InRex,
             FoldersRefusal::HerdrUnreachable,
         ]
         .map(|refusal| refusal.reply());
@@ -1202,6 +1234,18 @@ mod tests {
             assert!(sentence.ends_with('.'), "{sentence}");
             assert!(!sentence.to_lowercase().contains("operator"), "{sentence}");
             assert!(!sentence.contains('\u{2014}'), "{sentence}");
+        }
+        // A Rex session's refusals name Rex and none of Herdr's words.
+        for (status, sentence) in [
+            ChannelRefusal::InRex.reply(),
+            AgentRefusal::InRex.reply(),
+            FoldersRefusal::InRex.reply(),
+        ] {
+            assert_eq!(status, NOT_IMPLEMENTED);
+            assert!(sentence.contains("Rex"), "{sentence}");
+            for word in ["Herdr", "workspace", "space ", "tab"] {
+                assert!(!sentence.contains(word), "{sentence}");
+            }
         }
     }
 }
