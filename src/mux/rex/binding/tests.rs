@@ -438,7 +438,6 @@ fn a_turn_that_rebinds_the_same_binding_clears_the_handed_off_agent() {
     let LocalRead::Alive(me) = ThisMachine.read(pid) else {
         panic!("this process does not read alive")
     };
-    let start: u64 = me.incarnation.0.split_once('@').unwrap().1.parse().unwrap();
     let case: Value = serde_json::from_str(
         &case("Codex 0.163 with --no-daemon")
             .to_string()
@@ -446,7 +445,14 @@ fn a_turn_that_rebinds_the_same_binding_clears_the_handed_off_agent() {
     )
     .unwrap();
     let hook = Hook::of(&case);
-    hook.local.alive(pid, start, pid);
+    hook.local.set(
+        pid,
+        LocalRead::Alive(LocalProc {
+            incarnation: me.incarnation.clone(),
+            group: pid,
+        }),
+    );
+    hook.local.groups.lock().unwrap().insert(pid, vec![pid]);
     let state = State::new();
     let root = std::env::temp_dir().join(format!("nd-rebind-{pid}"));
     let _ = std::fs::remove_dir_all(&root);
