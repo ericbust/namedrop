@@ -36,6 +36,34 @@ impl Retirement {
     pub(crate) fn hands_to(&self, state: &Path) -> bool {
         matches!(self, Self::HerdrHandoff { successor, .. } if super::packages::same(successor, state))
     }
+
+    /// When the state was retired, in milliseconds since the epoch, from
+    /// the time `utc_now` wrote, or `None` for a time it cannot read.
+    pub(crate) fn at_ms(&self) -> Option<u64> {
+        let (Self::HerdrHandoff { at, .. } | Self::Removed { at, .. }) = self;
+        let (date, time) = at.strip_suffix('Z')?.split_once('T')?;
+        let (time, fraction) = time.split_once('.').unwrap_or((time, ""));
+        let mut date = date.splitn(3, '-').map(str::parse::<libc::c_int>);
+        let mut time = time.splitn(3, ':').map(str::parse::<libc::c_int>);
+        // Safety: a zeroed `tm` is a valid value of a plain C struct.
+        let mut parts: libc::tm = unsafe { std::mem::zeroed() };
+        parts.tm_year = date.next()?.ok()? - 1900;
+        parts.tm_mon = date.next()?.ok()? - 1;
+        parts.tm_mday = date.next()?.ok()?;
+        parts.tm_hour = time.next()?.ok()?;
+        parts.tm_min = time.next()?.ok()?;
+        parts.tm_sec = time.next()?.ok()?;
+        // Safety: `timegm` reads and normalizes the struct it is given.
+        let seconds = u64::try_from(unsafe { libc::timegm(&mut parts) }).ok()?;
+        let millis: u64 = fraction
+            .chars()
+            .chain(std::iter::repeat('0'))
+            .take(3)
+            .collect::<String>()
+            .parse()
+            .ok()?;
+        seconds.checked_mul(1000)?.checked_add(millis)
+    }
 }
 
 pub fn retirement(state: &Path) -> Result<Option<Retirement>, String> {
@@ -176,6 +204,37 @@ pub fn begin_removal(state: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_marker_s_time_is_read_as_utc_now_writes_it() {
+        let at = |at: &str| {
+            Retirement::Removed {
+                successor: None,
+                at: at.into(),
+            }
+            .at_ms()
+        };
+        assert_eq!(
+            at("2026-11-15T12:00:00.250999999Z"),
+            Some(1_794_744_000_250)
+        );
+        assert_eq!(at("2026-11-15T12:00:00Z"), Some(1_794_744_000_000));
+        assert_eq!(at("1970-01-01T00:00:00.000000000Z"), Some(0));
+        for unreadable in [
+            "now",
+            "",
+            "2026-11-15T12:00:00",
+            "2026-11-15T12:00:00.2x5Z",
+            "😀",
+        ] {
+            assert_eq!(at(unreadable), None, "{unreadable:?}");
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let written = at(&utc_now()).unwrap();
+        assert!(written >= now && written < now + 1000, "{written} {now}");
+    }
     #[test]
     fn a_retired_state_creates_no_command_lock_and_removed_has_one_exception() {
         let root = std::env::temp_dir().join(format!("nd-u7-retire-{}", std::process::id()));

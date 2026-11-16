@@ -267,34 +267,55 @@ fn takeover_resumes_predecessors_and_doctor_reads_liveness_without_the_old_store
     );
     // An agent's next turn runs this state's hooks, which bind it here: it
     // runs the new hooks, so it no longer counts (the U13 review's F1). A
-    // binding of another incarnation in the other block proves nothing.
-    let bind = |file: &str, block: &str, agent: &str| {
+    // binding made before the move, or of another incarnation of the other
+    // block's process, proves nothing (round A's review, F3 and F5).
+    let marker = old.join("runtime/retired.json");
+    let mut retired: Value = serde_json::from_slice(&fs::read(&marker).unwrap()).unwrap();
+    retired["at"] = json!("2026-11-15T12:00:00.250999999Z");
+    fs::write(&marker, retired.to_string()).unwrap();
+    let moved_ms = 1_794_744_000_250_u64;
+    let bind = |file: &str, block: &str, agent: &str, bound_at_ms: u64| {
         fs::create_dir_all(successor.join("rex/sessions")).unwrap();
         fs::write(
             successor.join("rex/sessions").join(file),
             json!({"endpoint":"rex:/tmp/u7-down.sock","block":block,"space":"session:s","foreground":agent,
-                "agent":agent,"runtime":"codex","session":"next-turn","bound_at_ms":1})
+                "agent":agent,"runtime":"codex","session":"next-turn","bound_at_ms":bound_at_ms})
             .to_string(),
         )
         .unwrap();
     };
-    bind("first.json", "block:first", &agents[0]);
-    bind("second.json", "block:second", "99999@1");
-    let text = serde_json::to_string(
-        &namedrop::diagnose_collaboration(&runtime)
-            .issues
-            .into_iter()
-            .filter(|i| i.code == "ND-INSTALL-001")
-            .collect::<Vec<_>>(),
-    )
-    .unwrap();
+    let warning = || {
+        serde_json::to_string(
+            &namedrop::diagnose_collaboration(&runtime)
+                .issues
+                .into_iter()
+                .filter(|i| i.code == "ND-INSTALL-001")
+                .collect::<Vec<_>>(),
+        )
+        .unwrap()
+    };
+    bind("first.json", "block:first", &agents[0], moved_ms - 1);
+    let text = warning();
+    assert!(
+        text.contains("2 agents on Rex have not run its hooks since the move from"),
+        "{text}"
+    );
+    bind("first.json", "block:first", &agents[0], moved_ms);
+    let (pid, _) = agents[1].split_once('@').unwrap();
+    bind(
+        "second.json",
+        "block:second",
+        &format!("{pid}@1"),
+        moved_ms + 5,
+    );
+    let text = warning();
     assert!(
         text.contains("1 agent on Rex has not run its hooks since the move from")
             && text.contains("block:second")
             && !text.contains("block:first"),
         "{text}"
     );
-    bind("second.json", "block:second", &agents[1]);
+    bind("second.json", "block:second", &agents[1], moved_ms + 5);
     assert!(
         !namedrop::diagnose_collaboration(&runtime)
             .issues
