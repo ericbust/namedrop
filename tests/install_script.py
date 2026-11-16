@@ -314,15 +314,34 @@ class Installer(unittest.TestCase):
         self.unchanged(before)
         return result.stderr
 
+    @staticmethod
+    def unlisted(state, registry, relative=False):
+        """The refusal for a recorded Herdr state that the list read does not name."""
+        return (f"Namedrop's install record names Herdr's Namedrop state ({state}), but Herdr's plugin list in "
+                f'{registry} does not name Namedrop.{Installer.elsewhere(relative)} Otherwise install Namedrop '
+                'in Herdr again, or move that state directory away, then run sh scripts/install.sh again.')
+
+    @staticmethod
+    def unreadable(herdr, registry, relative=False):
+        """The refusal for a Herdr plugin list it cannot read."""
+        return (f"Namedrop cannot read Herdr's plugin list in {registry}, so it cannot tell whether Namedrop is "
+                f'still installed in Herdr ({herdr}).{Installer.elsewhere(relative)} Otherwise, if Namedrop is '
+                'not installed in Herdr, move that state directory away, then run sh scripts/install.sh again.')
+
+    @staticmethod
+    def elsewhere(relative):
+        """Each list refusal's first way out: Herdr may read another list."""
+        return ((" XDG_CONFIG_HOME is relative, so Namedrop read that list from this working directory, which "
+                 "may not be Herdr's." if relative else '') +
+                " If Herdr uses another config directory, run sh scripts/install.sh again with Herdr's "
+                'XDG_CONFIG_HOME.')
+
     def test_a_recorded_herdr_state_is_adopted_only_while_herdr_lists_namedrop(self):
         # `herdr plugin uninstall` keeps the state and the record that names
         # it, and nothing would update its runtime (round A's review, F1).
         herdr = self.record('herdr')
         self.assertIn('install: adopt', self.ok(self.run_install(answer='n\n')))
         registry = self.home / '.config/herdr/plugins.json'
-        gone = (f"Namedrop's install record names Herdr's Namedrop state ({herdr}), but Namedrop is no "
-                'longer installed in Herdr. Install it in Herdr again, or move that directory away, '
-                'then run sh scripts/install.sh again.')
         for label, plugins in [('another plugin', ['other']), ('no plugins', []), ('no registry', None)]:
             with self.subTest(label):
                 if plugins is None:
@@ -330,12 +349,31 @@ class Installer(unittest.TestCase):
                 else:
                     self.registry(plugins)
                 (self.root / 'calls').unlink(missing_ok=True)
-                self.refused(gone)
+                self.refused(self.unlisted(herdr, registry))
                 self.assertEqual([call for call in self.calls() if 'install' in call], [])
         registry = self.registry(b'[')
-        self.refused(f"Namedrop cannot read Herdr's plugin list in {registry}, so it cannot tell whether "
-                     f'Namedrop is still installed in Herdr ({herdr}). If it is not, move that directory '
-                     'away, then run sh scripts/install.sh again.')
+        self.refused(self.unreadable(herdr, registry))
+        # The refusal names the list it read, and the way out for a Herdr
+        # that reads another one, before moving its state away (round C's
+        # review, F2): this shell's XDG_CONFIG_HOME is not Herdr's.
+        self.registry(['namedrop'])
+        config = self.root / 'xdg config'
+        self.env['XDG_CONFIG_HOME'] = str(config)
+        self.refused(self.unlisted(herdr, self.registry(['other'], config)))
+        # A relative one is read from this working directory, which may not
+        # be Herdr's (round C's review, F3).
+        self.cwd = self.root / 'working directory'
+        self.cwd.mkdir()
+        self.env['XDG_CONFIG_HOME'] = 'relative config'
+        listed = self.registry(['other'], self.cwd / 'relative config')
+        read = Path(os.path.realpath(self.cwd)) / 'relative config/herdr/plugins.json'
+        self.refused(self.unlisted(herdr, read, relative=True))
+        listed.unlink()
+        self.refused(self.unreadable(herdr, read, relative=True))
+        self.registry(['namedrop'], self.cwd / 'relative config')
+        self.assertIn('install: adopt', self.ok(self.run_install(answer='n\n')))
+        self.cwd = None
+        del self.env['XDG_CONFIG_HOME']
         # Moved away, the state leaves a stale record, so the archive makes
         # an install of its own.
         self.registry([])
@@ -389,8 +427,7 @@ class Installer(unittest.TestCase):
                 registry.unlink()
                 # The list it looked for, by the path that names it.
                 looked = Path(os.path.realpath(self.cwd)) / registry.relative_to(self.cwd)
-                self.refused(f"Namedrop cannot read Herdr's plugin list in {looked}, so it cannot tell whether "
-                             f'Namedrop is still installed in Herdr ({herdr}).')
+                self.refused(self.unreadable(herdr, looked, relative=True))
         self.cwd = None
         del self.env['XDG_CONFIG_HOME']
         # A registry it cannot read names the way out, under each Python the
@@ -401,9 +438,7 @@ class Installer(unittest.TestCase):
                                     ('nested too deep', b'[' * 100000)]:
                 with self.subTest(label, python=python):
                     registry = self.registry(contents)
-                    stderr = self.refused(f"Namedrop cannot read Herdr's plugin list in {registry}, so it cannot "
-                                          f'tell whether Namedrop is still installed in Herdr ({herdr}). If it is '
-                                          'not, move that directory away, then run sh scripts/install.sh again.')
+                    stderr = self.refused(self.unreadable(herdr, registry))
                     self.assertNotIn('Traceback', stderr)
         self.python(sys.executable)
         registry.unlink()
