@@ -78,6 +78,7 @@ where
     C: Clock,
     I: IdGenerator,
 {
+    use crate::dashboard::tailscale::Repair;
     let mut report = diagnose_space(runtime);
     if let Some(home) = runtime.home_directory {
         for warning in crate::rex_ui::predecessor_warnings(home, runtime.state_directory) {
@@ -98,9 +99,10 @@ where
         report.issues.push(check);
     }
     if let Some(diagnostic) = crate::dashboard::tailscale::diagnose(runtime.state_directory) {
+        let idle = crate::dashboard::idle_policy(runtime.state_directory);
         let explanation = match (&diagnostic.url, &diagnostic.problem) {
             (Some(url), Some(problem)) => format!("{url}: {problem}"),
-            (Some(url), None) => url.clone(),
+            (Some(url), None) => format!("{url}. {}", idle.sentence()),
             (None, Some(problem)) => problem.clone(),
             (None, None) => unreachable!(),
         };
@@ -119,18 +121,50 @@ where
             },
             &explanation,
             HealthRepairKind::HumanDecision,
-            if problem {
-                "Run `namedrop channels --tailscale off`, then `namedrop channels --tailscale` to configure access again."
-            } else {
-                "Run `namedrop channels --tailscale --no-open` for a one-time sign-in link."
+            &match diagnostic.repair {
+                Repair::Start => tailnet_start_repair(runtime.mux.endpoint().kind).to_owned(),
+                Repair::FreePort(port) => format!("Stop the program that uses port {port}, then run `namedrop channels --no-open`. To move Channels to another port instead, run `namedrop channels --tailscale off`, then `namedrop channels --tailscale`."),
+                Repair::Reconfigure => "Run `namedrop channels --tailscale off`, then `namedrop channels --tailscale` to configure access again.".to_owned(),
+                Repair::SignIn => "Run `namedrop channels --tailscale --no-open` for a one-time sign-in link.".to_owned(),
             },
         );
-        check.diagnostic =
-            serde_json::json!({"url": diagnostic.url, "problem": diagnostic.problem});
+        check.diagnostic = serde_json::json!({
+            "url": diagnostic.url,
+            "problem": diagnostic.problem,
+            "idle": idle.json(),
+        });
         report.issues.push(check);
         if problem && report.status == HealthStatus::Healthy {
             report.status = HealthStatus::NeedsAttention;
         }
+    }
+    let idle = crate::dashboard::idle_policy(runtime.state_directory);
+    let setting = match crate::dashboard::idle::saved(runtime.state_directory) {
+        Err(unreadable) => Some(issue(
+            "ND-CHANNELS-001",
+            HealthSeverity::Notice,
+            "Channels cannot read its saved idle setting.",
+            &format!("{unreadable}. The 10 minute default applies."),
+            HealthRepairKind::HumanDecision,
+            "Run `namedrop channels --idle <minutes|never>` to save it again.",
+        )),
+        // With Tailscale access on, the tailnet entry above already says the setting is unused.
+        Ok(Some(_)) if idle.source == crate::dashboard::idle::Source::Setting => Some(issue(
+            "ND-CHANNELS-001",
+            HealthSeverity::Info,
+            "Channels has a saved idle setting.",
+            &idle.sentence(),
+            HealthRepairKind::HumanDecision,
+            "Run `namedrop channels --idle <minutes|never>` to change it.",
+        )),
+        Ok(_) => None,
+    };
+    if let Some(mut check) = setting {
+        if check.severity == HealthSeverity::Notice && report.status == HealthStatus::Healthy {
+            report.status = HealthStatus::NeedsAttention;
+        }
+        check.diagnostic = serde_json::json!({"idle": idle.json()});
+        report.issues.push(check);
     }
     report
 }
@@ -1711,6 +1745,15 @@ fn add_operation<M, C, I>(
         issue.repair.command = Some(command);
     }
 }
+/// What starts a stopped tailnet server again. Herdr's startup command also
+/// does; nothing in a Rex home runs it.
+fn tailnet_start_repair(kind: crate::mux::MuxKind) -> &'static str {
+    kind.text(
+        "Run `namedrop channels --no-open` to start the server again on the same port. Devices that are signed in stay signed in. Herdr also starts it when Herdr starts.",
+        "Run `namedrop channels --no-open` to start the server again on the same port. Devices that are signed in stay signed in.",
+    )
+}
+
 /// `ND-REX-001`: the module the server loaded, as `rex_ui::inspect` read
 /// it. Only a confirmed module is information; any other is a notice, with a
 /// reload for a module the server loaded before a refresh rewrote it, and a
@@ -1913,6 +1956,19 @@ pub fn render_health_report_to_text(report: &HealthReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Herdr's repair is main's, word for word. A Rex home is told only what
+    /// it can do itself, since no Herdr startup command runs there.
+    #[test]
+    fn a_stopped_tailnet_server_s_repair_names_herdr_only_on_herdr() {
+        use crate::mux::MuxKind;
+        let person = "Run `namedrop channels --no-open` to start the server again on the same port. Devices that are signed in stay signed in.";
+        assert_eq!(
+            tailnet_start_repair(MuxKind::Herdr),
+            format!("{person} Herdr also starts it when Herdr starts.")
+        );
+        assert_eq!(tailnet_start_repair(MuxKind::Rex), person);
+    }
 
     #[test]
     fn rex_module_explanation_is_one_line_with_each_key() {

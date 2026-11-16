@@ -17,9 +17,10 @@ pub(crate) mod wire;
 mod ws;
 
 use super::{
-    Allowance, Applied, Budget, Depth, Effect, Endpoint, Gone, InputKind, InputOutcome, Key,
-    MuxAct, MuxError, MuxInput, MuxRead, PaneFacts, PaneId, PaneInput, PaneProcess, PromptRequest,
-    Retry, Scope, Screen, ScreenRequest, SpaceView, Style, Survey, TabId, TerminalId, Wrap, gate,
+    Allowance, Applied, Budget, Closing, Depth, Effect, Endpoint, Gone, InputKind, InputOutcome,
+    Key, MuxAct, MuxError, MuxInput, MuxRead, NewSpace, NewTab, PaneFacts, PaneId, PaneInput,
+    PaneProcess, PromptRequest, Retry, Scope, Screen, ScreenRequest, SpaceView, Style, Survey,
+    TabId, TerminalId, Wrap, gate,
     home::Claimed,
     narrowest,
     processes::{LocalProcesses, LocalRead, members},
@@ -851,7 +852,22 @@ impl<W: Wire> MuxAct for RexMux<W> {
             }
         }
     }
+
+    /// Namedrop opens and closes no Rex session or tab yet.
+    fn open_space(&self, _cwd: &str, _label: &str) -> Result<NewSpace, MuxError> {
+        Err(MuxError::Unavailable(OPENS_NOTHING.to_owned()))
+    }
+
+    fn open_tab(&self, _space: &SpaceId, _cwd: &str, _label: &str) -> Result<NewTab, MuxError> {
+        Err(MuxError::Unavailable(OPENS_NOTHING.to_owned()))
+    }
+
+    fn close(&self, _closing: &Closing) -> Result<(), MuxError> {
+        Err(MuxError::Unavailable(OPENS_NOTHING.to_owned()))
+    }
 }
+
+const OPENS_NOTHING: &str = "Namedrop does not open or close Rex sessions or tabs";
 
 #[cfg(test)]
 mod tests;

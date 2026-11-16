@@ -41,6 +41,11 @@ function buttons(markup: string): string[] {
     ([, inner]) => text(inner ?? "").replaceAll("&#x27;", "'"),
   );
 }
+const noCreator = {
+  folders: async () => [],
+  createChannel: async () =>
+    ({ kind: "refused", status: 0, message: "" }) as const,
+};
 function space(value: unknown) {
   const event = parseEvent("space", JSON.stringify(value));
   assert.ok(event?.type === "space");
@@ -88,10 +93,15 @@ test("item 1: rendered display names never invent mentions and exact tokens stay
         onSelect() {},
         onActivity() {},
         onAnnounce() {},
+        creator: noCreator,
       }),
     );
     assert.equal(
-      text(sidebar.match(/<button[^>]*>(.*?)<\/button>/)?.[1] ?? ""),
+      text(
+        sidebar.match(
+          /<button[^>]*data-channel-key[^>]*>(.*?)<\/button>/,
+        )?.[1] ?? "",
+      ),
       name,
     );
     assert.equal(sidebar.includes("#"), false, "the sidebar row has no token");
@@ -140,6 +150,7 @@ test("a channel whose post was refused while the reader was elsewhere shows the 
         onSelect() {},
         onActivity() {},
         onAnnounce() {},
+        creator: noCreator,
       }),
     );
   assert.equal((render(sending).match(marker) ?? []).length, 0);
@@ -191,6 +202,7 @@ test("item 6: paused and inactive channels with attention have no Needs you shor
         onSelect() {},
         onActivity() {},
         onAnnounce() {},
+        creator: noCreator,
       }),
     );
     const header = renderToStaticMarkup(
@@ -253,7 +265,10 @@ test("fix5: future member values show neutral labels and keep role and pane in t
   ];
   const event = space(fixture);
   const markup = renderToStaticMarkup(
-    createElement(MemberStrip, { members: event.channel.members }),
+    createElement(MemberStrip, {
+      members: event.channel.members,
+      addAgent: null,
+    }),
   );
   assert.equal((markup.match(/>Unknown</g) ?? []).length, 2);
   assert.ok(markup.includes('title="Member"'));
@@ -288,7 +303,10 @@ test("design-b: member chips order by state, end with the operator as You withou
   ];
   const event = space(fixture);
   const markup = renderToStaticMarkup(
-    createElement(MemberStrip, { members: event.channel.members }),
+    createElement(MemberStrip, {
+      members: event.channel.members,
+      addAgent: null,
+    }),
   );
   const chips = [
     ...markup.matchAll(/<li data-address-id="([^"]+)">(.*?)<\/li>/g),
@@ -342,7 +360,10 @@ test("a recently closed member reads Pane closed, muted without a dot, last amon
     createElement(
       PeekContext.Provider,
       { value: { scope: event.channel.key, open() {} } },
-      createElement(MemberStrip, { members: event.channel.members }),
+      createElement(MemberStrip, {
+        members: event.channel.members,
+        addAgent: null,
+      }),
     ),
   );
   assert.deepEqual(
@@ -384,7 +405,7 @@ test("an old retired member leaves the strip but remains the author of its histo
   ];
   const { channel } = space(fixture);
   const strip = renderToStaticMarkup(
-    createElement(MemberStrip, { members: channel.members }),
+    createElement(MemberStrip, { members: channel.members, addAgent: null }),
   );
   assert.equal(strip.includes('data-address-id="closed"'), false);
   assert.equal(channel.members.size, 1);
@@ -601,6 +622,7 @@ test("attention actions show historical evidence and safe responses for every so
           : source === "coordination"
             ? "Message @codex"
             : "Reply to @codex",
+        "Dismiss",
       ],
       source,
     );
@@ -631,7 +653,7 @@ test("attention actions show historical evidence and safe responses for every so
   assert.doesNotMatch(local, /Namedrop setup|Namedrop Doctor/);
 });
 
-test("a lost answer's card offers Dismiss, and a card whose agent can still answer does not", async () => {
+test("every card offers Dismiss, a lost answer's and one whose agent can still answer", async () => {
   const { AttentionActions } = await load<
     typeof import("./ui/AttentionActions.tsx")
   >("/src/ui/AttentionActions.tsx");
@@ -683,7 +705,11 @@ test("a lost answer's card offers Dismiss, and a card whose agent can still answ
       ["Show message", "Reply to @codex", "Dismiss"],
       cause,
     );
-  assert.deepEqual(shown(null), ["Show message", "Reply to @codex"]);
+  assert.deepEqual(
+    shown(null),
+    ["Show message", "Reply to @codex", "Dismiss"],
+    "an agent that can still answer",
+  );
 });
 
 test("a Needs-you item keeps Show message, its response and Details on one action row, and its hint says where to answer", async () => {
@@ -747,11 +773,35 @@ test("a Needs-you item keeps Show message, its response and Details on one actio
   assert.deepEqual(
     rows.map((found) => found.map(([, row]) => buttons(row ?? ""))),
     [
-      [["Show message", "See @worker's screen", "Details"]],
-      [["Show message", "Reply to @worker", "Details"]],
-      [["Details"]],
+      [["Show message", "See @worker's screen", "Details", "Dismiss"]],
+      [["Show message", "Reply to @worker", "Details", "Dismiss"]],
+      [["Details", "Dismiss"]],
     ],
   );
+  const whole = (count: number) => {
+    const all = value.frame.attention;
+    value.frame.attention = all.slice(0, count);
+    const { channel } = space(value);
+    const markup = renderToStaticMarkup(
+      createElement(
+        PeekContext,
+        { value: { scope: channel.key, open() {} } },
+        createElement(NeedsYou, {
+          channel,
+          directory: { members: channel.members, homes: new Map() },
+          onFocus() {},
+          onControl,
+          onReview,
+        }),
+      ),
+    );
+    value.frame.attention = all;
+    return buttons(
+      markup.match(/<div class="attention-more">(.*?)<\/div>/s)?.[1] ?? "",
+    );
+  };
+  assert.deepEqual(whole(3), ["Dismiss all"], "one button clears the list");
+  assert.deepEqual(whole(1), [], "one card has its own Dismiss only");
   const hint = (inner: string) =>
     inner.match(/<p class="attention-hint"( title="[^"]*")?>(.*?)<\/p>/s);
   assert.deepEqual(hint(items[0] ?? "")?.slice(1), [
@@ -844,6 +894,7 @@ test("focused tracked evidence exposes the channel response path without a rejec
           threadId: "tracked",
           inReplyTo: null,
           progressNote: false,
+          images: [],
           at: 1,
           author: "human",
           kind: "mention",
@@ -1058,7 +1109,10 @@ test("subagent chips show counts and plain bounded descriptions without nested c
   ];
   const event = space(fixture);
   const markup = renderToStaticMarkup(
-    createElement(MemberStrip, { members: event.channel.members }),
+    createElement(MemberStrip, {
+      members: event.channel.members,
+      addAgent: null,
+    }),
   );
   assert.match(markup, /class="subagent-count">· 1 subagent</);
   assert.match(markup, /aria-label="Subagents of @claude"/);

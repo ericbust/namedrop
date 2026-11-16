@@ -45,10 +45,9 @@ export type ControlThread = (
   signal: AbortSignal,
 ) => Promise<ControlResult>;
 const idle: ThreadControl = { kind: "idle" };
-function failureCopy(action: ControlAction, status: number): string {
+export function failureCopy(action: ControlAction, status: number): string {
   if (action === "dismiss") {
     if (status === 404) return threadControlCopy.requestGone;
-    if (status === 409) return threadControlCopy.stillAnswerable;
     if (status === 410) return threadControlCopy.nothingToDismiss;
   } else if (status === 404) return threadControlCopy.gone;
   return threadControlCopy[action].failed;
@@ -156,7 +155,7 @@ export function AttentionActions({
       next.action === "dismiss"
         ? dismissable === null
           ? null
-          : { kind: "attempt", attemptId: dismissable, action: "dismiss" }
+          : { kind: "attention", ids: [dismissable], action: "dismiss" }
         : controls === null
           ? null
           : {
@@ -192,7 +191,9 @@ export function AttentionActions({
       <span className="attention-confirm">
         {action === "stop"
           ? threadControlCopy.confirm
-          : threadControlCopy.confirmDismissQuestion}
+          : item.answerLost != null
+            ? threadControlCopy.confirmDismissQuestion
+            : threadControlCopy.confirmDismissWarning}
       </span>
       <button
         ref={confirmButton}
@@ -307,7 +308,9 @@ export function AttentionActions({
             {responseCopy.pane(member.alias)}
           </PeekControl>
         )}
+        {children}
         {dismissable !== null &&
+          confirming !== "stop" &&
           (confirming === "dismiss" ? (
             confirmRow("dismiss")
           ) : (
@@ -322,7 +325,6 @@ export function AttentionActions({
               {threadControlCopy.dismiss.label}
             </button>
           ))}
-        {children}
       </div>
       {control.kind === "failed" && (
         <p

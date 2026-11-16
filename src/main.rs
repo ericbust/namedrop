@@ -461,7 +461,7 @@ fn main() -> ExitCode {
         let result = selected_state
             .as_deref()
             .ok_or_else(state_required)
-            .and_then(namedrop::dashboard::disable_tailscale);
+            .and_then(|state| namedrop::dashboard::disable_tailscale(state, cli.dashboard_idle()));
         return finish(
             "dashboard",
             result,
@@ -562,6 +562,9 @@ fn main() -> ExitCode {
         && let Some(state) = selected_state.as_deref()
     {
         namedrop::update_check::start(state, SystemClock.now_unix_ms());
+        if let Err(error) = namedrop::dashboard::revive(state) {
+            eprintln!("Could not start Channels again for Tailscale access: {error}");
+        }
     }
     if let Some(attempt) = cli.terminal_attempt() {
         let result = with_runtime_options(&cli.runtime, inherited, |runtime| {
@@ -589,6 +592,7 @@ fn main() -> ExitCode {
                     open_browser,
                     cli.dashboard_ui(),
                     cli.dashboard_tailscale(),
+                    cli.dashboard_idle(),
                 )
             }),
         );
@@ -1180,7 +1184,7 @@ fn rex_action_in(
             );
             report
         }
-        Action::Channels => namedrop::dashboard::open(runtime, true, None, None),
+        Action::Channels => namedrop::dashboard::open(runtime, true, None, None, None),
         Action::Pause => execute_control_operation("worktree.pause", empty, runtime),
         Action::Resume => execute_control_operation("worktree.resume", empty, runtime),
         Action::Deactivate => execute_lifecycle_operation("deactivate", empty, runtime),

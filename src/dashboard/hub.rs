@@ -388,7 +388,8 @@ struct Hub<'a> {
     mux: Arc<dyn MuxConnector>,
     files: &'a ServerFiles,
     instance: &'a str,
-    idle: Duration,
+    /// The test override; without one the saved setting decides, read as it changes.
+    idle: Option<Duration>,
     store: Option<StateStore>,
     data_version: Option<i64>,
     channel_notes_revision: Option<(std::time::SystemTime, u64)>,
@@ -410,14 +411,17 @@ struct Hub<'a> {
     unsupported_schema: bool,
     schema_busy_since: Option<Instant>,
     last_error: Option<String>,
+    launches: super::launches::Launches,
+    launches_revision: u64,
 }
 
 pub(crate) fn run(
     files: &ServerFiles,
     instance: &str,
-    idle: Duration,
+    idle: Option<Duration>,
     commands: Receiver<HubCommand>,
     mux: Arc<dyn MuxConnector>,
+    launches: super::launches::Launches,
 ) -> Verdict {
     let mut hub = Hub {
         mux,
@@ -445,6 +449,8 @@ pub(crate) fn run(
         unsupported_schema: false,
         schema_busy_since: None,
         last_error: None,
+        launches,
+        launches_revision: 0,
     };
     let verdict = loop {
         let wait = if hub.retry_discovery_drain {
@@ -609,11 +615,19 @@ impl Hub<'_> {
         {
             return Some(Verdict::Exit("server.json was replaced"));
         }
-        if self
-            .idle_since
-            .is_some_and(|since| now.duration_since(since) >= self.idle)
-            && !tailnet_owned
-        {
+        if let Some(requested) = self.files.requested_ui() {
+            let serves_it = self.files.info().is_some_and(|info| info.ui == requested);
+            if !serves_it && requested.usable() && tailnet.is_ok() {
+                return Some(Verdict::Handoff("another Channels app was requested"));
+            }
+            if serves_it || !requested.usable() {
+                let _ = self.files.take_ui_request();
+            }
+        }
+        if self.idle_since.is_some_and(|since| {
+            super::idle::policy(self.files.state(), tailnet_owned, self.idle)
+                .reached(now.duration_since(since))
+        }) {
             return Some(Verdict::Idle);
         }
         None
@@ -702,6 +716,9 @@ impl Hub<'_> {
         let subagents_changed =
             self.subagent_revision != Some(subagent_revision) || subagent_revision == [0xff; 32];
         self.subagent_revision = Some(subagent_revision);
+        let launches_revision = self.launches.revision();
+        let launches_changed = launches_revision != self.launches_revision;
+        self.launches_revision = launches_revision;
         let retention_expired = self.published.values().any(|published| {
             published
                 .expires_at_ms
@@ -710,6 +727,7 @@ impl Hub<'_> {
         if !database_changed
             && !metadata_changed
             && !subagents_changed
+            && !launches_changed
             && !retention_expired
             && incoming.is_none()
         {
@@ -1075,9 +1093,26 @@ impl Hub<'_> {
                     .addresses
                     .iter()
                     .filter_map(snapshot::closed_member_expires_at)
+                    .chain(
+                        rows.attention
+                            .iter()
+                            .filter_map(snapshot::attention_expires_at),
+                    )
                     .filter(|expiry| *expiry > now)
                     .min();
                 let mut snapshot = snapshot::build(&rows, label.as_deref(), now);
+                let starting = self.launches.starting(&namespace);
+                let starts = snapshot.add_agent_start_cards(
+                    &rows,
+                    &super::launches::as_starting(&starting),
+                    now,
+                );
+                for address_id in &starts.settled {
+                    self.launches.forget(&namespace, address_id);
+                }
+                if let Some(due) = starts.next_due_ms {
+                    expires_at_ms = Some(expires_at_ms.map_or(due, |old| old.min(due)));
+                }
                 for participant in &mut snapshot.participants {
                     if !matches!(participant.kind, snapshot::ParticipantKind::Agent { .. }) {
                         continue;
@@ -1349,7 +1384,7 @@ mod tests {
             mux: Arc::new(crate::mux::Connector::new(std::path::Path::new(""))),
             files,
             instance: "test",
-            idle: Duration::from_secs(60),
+            idle: Some(Duration::from_secs(60)),
             store: None,
             data_version: None,
             channel_notes_revision: None,
@@ -1371,6 +1406,8 @@ mod tests {
             unsupported_schema: false,
             schema_busy_since: None,
             last_error: None,
+            launches: Default::default(),
+            launches_revision: 0,
         }
     }
 
@@ -1714,7 +1751,7 @@ mod tests {
         let files = schema_test_files("tailnet-lifetime");
         let mut hub = schema_test_hub(&files);
         let now = Instant::now();
-        hub.idle_since = Some(now - hub.idle);
+        hub.idle_since = Some(now - hub.idle.unwrap());
         let ownership = files.state().join("dashboard/tailscale.json");
         let runtime = files.state().join("runtime");
         fs::create_dir_all(&runtime).unwrap();
@@ -1782,6 +1819,53 @@ mod tests {
     }
 
     #[test]
+    fn a_saved_idle_setting_applies_to_a_running_server_and_tailscale_overrides_it() {
+        let files = schema_test_files("idle-setting");
+        let mut hub = schema_test_hub(&files);
+        hub.idle = None;
+        let now = Instant::now();
+        let setting = files.state().join("dashboard/idle");
+        hub.idle_since = Some(now - Duration::from_secs(10 * 60));
+        assert!(
+            matches!(hub.verdict_at(now), Some(Verdict::Idle)),
+            "no setting stops after 10 minutes"
+        );
+        hub.idle_since = Some(now - Duration::from_secs(10 * 60 - 1));
+        assert!(hub.verdict_at(now).is_none());
+
+        fs::write(&setting, "never").unwrap();
+        hub.idle_since = Some(now - Duration::from_secs(30 * 24 * 60 * 60));
+        assert!(hub.verdict_at(now).is_none(), "never keeps it running");
+
+        fs::write(&setting, "2").unwrap();
+        hub.idle_since = Some(now - Duration::from_secs(119));
+        assert!(hub.verdict_at(now).is_none());
+        hub.idle_since = Some(now - Duration::from_secs(120));
+        assert!(matches!(hub.verdict_at(now), Some(Verdict::Idle)));
+
+        fs::write(
+            files.state().join("dashboard/tailscale.json"),
+            serde_json::json!({
+                "version": 1,
+                "state": "enabled",
+                "handler": {
+                    "dns_name": "device.tailnet.ts.net",
+                    "https_port": 443,
+                    "owner_login": "owner@example.com",
+                    "backend_port": 1234
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(
+            hub.verdict_at(now).is_none(),
+            "a 2 minute setting must not stop a server that a Tailscale handler points at"
+        );
+        let _ = fs::remove_dir_all(files.state());
+    }
+
+    #[test]
     fn a_busy_schema_read_preserves_other_exit_and_handoff_checks() {
         let files = schema_test_files("schema-precedence");
         let mut hub = schema_test_hub(&files);
@@ -1789,7 +1873,7 @@ mod tests {
         writer.execute_batch("BEGIN EXCLUSIVE").unwrap();
         let now = Instant::now();
         assert!(hub.verdict_at(now).is_none());
-        hub.idle_since = Some(now - hub.idle);
+        hub.idle_since = Some(now - hub.idle.unwrap());
         assert!(matches!(hub.verdict_at(now), Some(Verdict::Idle)));
         fs::remove_file(files.state().join("dashboard/server.json")).unwrap();
         assert!(matches!(

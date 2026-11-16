@@ -4,8 +4,8 @@ use super::{wire::input_failure, *};
 use crate::{
     AgentRuntime, AgentSessionId, SpaceId, WorktreeId,
     mux::{
-        AgentIdentity, AgentKind, AgentState, Badge, Checkout, Gone, Key, MuxEvent, PaneFacts,
-        PaneSlot, PopupScreen, PopupSpec, PromptRequest, Recipient, Retry, SessionClaim,
+        AgentIdentity, AgentKind, AgentState, Badge, Checkout, Gone, Key, MuxEvent, NewPane,
+        PaneFacts, PaneSlot, PopupScreen, PopupSpec, PromptRequest, Recipient, Retry, SessionClaim,
         StateTexts, Style, TerminalId, Wrap,
     },
 };
@@ -914,6 +914,71 @@ fn a_popup_names_the_socket_its_spec_carries_whatever_the_connection() {
         mux.apply(&tour_popup()).unwrap();
         assert_eq!(calls(&mux), [argv]);
     }
+}
+
+/// Each opening and closing runs the command Channels ran before the port,
+/// and reads only the new space or tab and its pane's id and folder.
+#[test]
+fn opening_and_closing_run_today_s_commands() {
+    let mux = herdr(|args| {
+        Ok(match args[..2] {
+            ["workspace", "create"] => json!({"result": {
+                "type": "workspace_created",
+                "workspace": {"workspace_id": "w7", "label": "Proto"},
+                "tab": {"tab_id": "w7:t1"},
+                "root_pane": {"pane_id": "w7:p1", "tab_id": "w7:t1", "workspace_id": "w7",
+                              "terminal_id": "term-1", "cwd": "/repo"},
+            }}),
+            ["tab", "create"] => json!({"result": {
+                "type": "tab_created",
+                "tab": {"tab_id": "w7:t2"},
+                "root_pane": {"pane_id": "w7:p2"},
+            }}),
+            _ => json!({}),
+        }
+        .to_string())
+    });
+    assert_eq!(
+        mux.open_space("/repo", "Proto"),
+        Ok(NewSpace {
+            space: SpaceId::new("w7"),
+            pane: NewPane {
+                id: PaneId::new("w7:p1"),
+                cwd: Some("/repo".into()),
+            },
+        })
+    );
+    assert_eq!(
+        mux.open_tab(&SpaceId::new("w7"), "/repo", "@coder"),
+        Ok(NewTab {
+            tab: TabId::new("w7:t2"),
+            pane: NewPane {
+                id: PaneId::new("w7:p2"),
+                cwd: None,
+            },
+        })
+    );
+    mux.close(&Closing::Space(SpaceId::new("w7"))).unwrap();
+    mux.close(&Closing::Tab(TabId::new("w7:t2"))).unwrap();
+    assert_eq!(
+        calls(&mux),
+        [
+            "workspace create --cwd /repo --label Proto --no-focus",
+            "tab create --workspace w7 --cwd /repo --label @coder --no-focus",
+            "workspace close w7",
+            "tab close w7:t2",
+        ]
+    );
+    let garbled = herdr(|_| Ok("{}".into()));
+    assert!(matches!(
+        garbled.open_space("/repo", "Proto"),
+        Err(MuxError::Protocol(_))
+    ));
+    let refused = herdr(|_| Err(error("server_not_running")));
+    assert_eq!(
+        refused.open_tab(&SpaceId::new("w7"), "/repo", "@coder"),
+        Err(MuxError::Unavailable(error("server_not_running")))
+    );
 }
 
 #[test]

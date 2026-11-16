@@ -11,10 +11,11 @@ mod wire;
 pub use events::{decode_operation_input, plugin_event_data};
 
 use super::{
-    Allowance, Applied, Budget, Depth, Effect, Endpoint, InputKind, InputOutcome, Mux, MuxAct,
-    MuxError, MuxInput, MuxKind, MuxRead, PaneId, PaneInput, PaneProcess, Scope, Screen,
-    ScreenRequest, SpaceView, Survey, TabId,
+    Allowance, Applied, Budget, Closing, Depth, Effect, Endpoint, InputKind, InputOutcome, Mux,
+    MuxAct, MuxError, MuxInput, MuxKind, MuxRead, NewSpace, NewTab, PaneId, PaneInput, PaneProcess,
+    Scope, Screen, ScreenRequest, SpaceView, Survey, TabId,
 };
+use crate::SpaceId;
 use process::Process;
 use std::{
     path::PathBuf,
@@ -219,6 +220,18 @@ impl<T: Transport> MuxAct for HerdrMux<T> {
             Effect::OpenPopup(_) => wire::parse(&reply).map(Applied::Opened),
             _ => Ok(Applied::Done),
         }
+    }
+
+    fn open_space(&self, cwd: &str, label: &str) -> Result<NewSpace, MuxError> {
+        wire::open_space(&self.transport, cwd, label)
+    }
+
+    fn open_tab(&self, space: &SpaceId, cwd: &str, label: &str) -> Result<NewTab, MuxError> {
+        wire::open_tab(&self.transport, space, cwd, label)
+    }
+
+    fn close(&self, closing: &Closing) -> Result<(), MuxError> {
+        wire::close(&self.transport, closing)
     }
 }
 

@@ -182,6 +182,10 @@ print(json.dumps({'result':result}))
                 self.root.display()
             ))
         })
+        .chain([json!(format!(
+            "Read(/{}/channel-images/**)",
+            self.root.display()
+        ))])
         .collect()
     }
     fn bootstrap_rule_for(&self, executable: &Path) -> Value {
@@ -283,6 +287,11 @@ fn activation_preserves_settings_and_adds_managed_command_permissions() {
                 pattern[3..].join(" ")
             ))
         })
+        // Codex reads a file anywhere; only Claude Code needs the image directory allowed.
+        .chain([json!(format!(
+            "Read(/{}/channel-images/**)",
+            f.root.display()
+        ))])
         .collect();
     assert_eq!(&allow[3..], expected);
     assert!(!allow.iter().any(|entry| {
@@ -313,7 +322,7 @@ fn reactivation_is_idempotent_and_deactivation_keeps_identical_user_rules() {
     f.activate();
     assert_eq!(
         f.read()["permissions"]["allow"].as_array().unwrap().len(),
-        23
+        24
     );
     let before = fs::read(f.settings()).unwrap();
     let modified = fs::metadata(f.settings()).unwrap().modified().unwrap();
@@ -345,19 +354,23 @@ fn runtime_path_change_removes_old_managed_rules_only() {
     install_integration_package(&f.home, AgentRuntime::ClaudeCode, &first, &f.root).unwrap();
     assert_eq!(
         f.read()["permissions"]["allow"].as_array().unwrap().len(),
-        23
+        24
     );
     let next = f.root.join("next runtime/namedrop");
     install_integration_package(&f.home, AgentRuntime::ClaudeCode, &next, &f.root).unwrap();
     let allow = f.read()["permissions"]["allow"].as_array().unwrap().clone();
-    assert_eq!(allow.len(), 23);
+    assert_eq!(allow.len(), 24);
     assert_eq!(allow[0], "Read");
     assert!(
         !allow
             .iter()
             .any(|entry| entry.as_str().unwrap().contains("old runtime"))
     );
-    assert_eq!(&allow[1..], f.expected_for(&next));
+    // The image rule names the state directory only, so it stays where it was.
+    let expected = f.expected_for(&next);
+    let (images, commands) = expected.split_last().unwrap();
+    assert_eq!(&allow[1], images);
+    assert_eq!(&allow[2..], commands);
     f.deactivate();
     assert_eq!(f.read()["permissions"]["allow"], json!(["Read"]));
 }
@@ -439,7 +452,7 @@ fn config_directory_override_is_isolated_from_the_default_profile() {
     f.activate();
     assert_eq!(
         f.read()["permissions"]["allow"].as_array().unwrap().len(),
-        23
+        24
     );
     f.deactivate();
     assert_eq!(f.read()["permissions"]["allow"], json!(["Read"]));
@@ -545,7 +558,7 @@ fn deactivating_one_of_two_worktrees_keeps_shared_permissions() {
     assert_eq!(fs::read(f.settings()).unwrap(), before);
     let second = f.run_for("workspace-2", "deactivate", json!({}));
     assert_eq!(second["claude_permissions"]["removed"], true);
-    assert_eq!(second["claude_permissions"]["removed_entries"], 22);
+    assert_eq!(second["claude_permissions"]["removed_entries"], 23);
     assert_eq!(f.read()["permissions"]["allow"], json!([]));
 }
 
@@ -1073,8 +1086,8 @@ fn reactivation_removes_an_owned_environment_bootstrap_rule() {
         !allow.contains(&unsafe_rule),
         "reactivation retained the owned environment bootstrap: {allow:?}"
     );
-    assert_eq!(&allow[..22], f.expected());
-    assert_eq!(allow[22], "Read");
+    assert_eq!(&allow[..23], f.expected());
+    assert_eq!(allow[23], "Read");
     let owned: Value = serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
     assert!(!owned["entries"].as_array().unwrap().contains(&unsafe_rule));
     f.deactivate();

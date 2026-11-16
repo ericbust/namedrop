@@ -5,9 +5,10 @@ use super::Transport;
 use crate::{
     AgentRuntime, AgentSessionId, SpaceId, WorktreeId,
     mux::{
-        AgentIdentity, AgentKind, AgentState, Badge, Checkout, Effect, Gone, InputOutcome, Key,
-        MuxError, PaneFacts, PaneId, PaneProcess, PopupScreen, PopupSpec, Recipient, Retry,
-        ScreenRequest, SessionClaim, SpaceView, Style, TabId, TerminalId, Wrap,
+        AgentIdentity, AgentKind, AgentState, Badge, Checkout, Closing, Effect, Gone, InputOutcome,
+        Key, MuxError, NewPane, NewSpace, NewTab, PaneFacts, PaneId, PaneProcess, PopupScreen,
+        PopupSpec, Recipient, Retry, ScreenRequest, SessionClaim, SpaceView, Style, TabId,
+        TerminalId, Wrap,
     },
 };
 use serde::{Deserialize, de::DeserializeOwned};
@@ -599,6 +600,111 @@ pub(super) fn integration_root(
         .and_then(|plugin| plugin["plugin_root"].as_str())
         .map(std::path::PathBuf::from)
         .filter(|root| root.is_absolute()))
+}
+
+#[derive(Deserialize)]
+struct Created<T> {
+    result: T,
+}
+
+#[derive(Deserialize)]
+struct SpaceCreated {
+    workspace: CreatedSpace,
+    root_pane: RootPane,
+}
+
+#[derive(Deserialize)]
+struct CreatedSpace {
+    workspace_id: String,
+}
+
+#[derive(Deserialize)]
+struct TabCreated {
+    tab: CreatedTab,
+    root_pane: RootPane,
+}
+
+#[derive(Deserialize)]
+struct CreatedTab {
+    tab_id: String,
+}
+
+/// Only the pane's id and folder: Herdr opens in the home folder when it
+/// cannot use the folder it was given, and says so only through `cwd`.
+#[derive(Deserialize)]
+struct RootPane {
+    pane_id: String,
+    #[serde(default)]
+    cwd: Option<String>,
+}
+
+impl RootPane {
+    fn new_pane(self) -> NewPane {
+        NewPane {
+            id: PaneId::new(self.pane_id),
+            cwd: self.cwd,
+        }
+    }
+}
+
+/// `workspace create --cwd <cwd> --label <label> --no-focus`.
+pub(super) fn open_space(
+    transport: &impl Transport,
+    cwd: &str,
+    label: &str,
+) -> Result<NewSpace, MuxError> {
+    let created: Created<SpaceCreated> = parse(&run(
+        transport,
+        &[
+            "workspace",
+            "create",
+            "--cwd",
+            cwd,
+            "--label",
+            label,
+            "--no-focus",
+        ],
+    )?)?;
+    Ok(NewSpace {
+        space: SpaceId::new(created.result.workspace.workspace_id),
+        pane: created.result.root_pane.new_pane(),
+    })
+}
+
+/// `tab create --workspace <id> --cwd <cwd> --label <label> --no-focus`.
+pub(super) fn open_tab(
+    transport: &impl Transport,
+    space: &SpaceId,
+    cwd: &str,
+    label: &str,
+) -> Result<NewTab, MuxError> {
+    let created: Created<TabCreated> = parse(&run(
+        transport,
+        &[
+            "tab",
+            "create",
+            "--workspace",
+            space.as_str(),
+            "--cwd",
+            cwd,
+            "--label",
+            label,
+            "--no-focus",
+        ],
+    )?)?;
+    Ok(NewTab {
+        tab: TabId::new(created.result.tab.tab_id),
+        pane: created.result.root_pane.new_pane(),
+    })
+}
+
+/// `workspace close <id>` or `tab close <id>`.
+pub(super) fn close(transport: &impl Transport, closing: &Closing) -> Result<(), MuxError> {
+    let args = match closing {
+        Closing::Space(space) => ["workspace", "close", space.as_str()],
+        Closing::Tab(tab) => ["tab", "close", tab.as_str()],
+    };
+    run(transport, &args).map(|_| ())
 }
 
 /// Each command an effect runs, in order. A badge list that mixes the

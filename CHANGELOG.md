@@ -2,6 +2,79 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.11.1] - 2026-11-13
+
+### Fixed
+
+- You can dismiss any warning in Channels. Before, only a card saying an answer could never arrive had a **Dismiss** button. A request whose agent was still running, a terminal reply and a handoff that needed a decision stayed red until you cleared them in the database. Every card now has **Dismiss**. It asks once, records the dismiss as yours, and takes the card away. Nothing is sent, and no reply is recorded for the agent.
+- A dismissed request stays answerable. If its agent answers later, the answer arrives as usual.
+- A dismiss covers the warning you read, and it closes nothing. The card comes back when it has something new to say: its cause cleared and happened again, or its wording changed. A handoff you dismissed while it waited for a decision shows again when its lead records it as blocked. `handoff acknowledge` and `delivery acknowledge` still close a warning for good.
+- **Dismiss all** at the foot of a channel's attention list clears the list after one confirmation. It first shows every card, then asks with the number it will dismiss. A card that arrives while it asks stays.
+- Old warnings stop being red by themselves. Channels shows a warning as needing you for 7 days, counted from when it opened or last changed its wording. After that it is no longer listed or counted. Doctor still reports it until its cause clears.
+- Doctor leaves out a warning you dismissed in Channels.
+
+## [1.11.0] - 2026-11-12
+
+### Added
+
+- You can make a new channel from the Channels page. Select **+** beside **Channels**, give the channel a name and a working folder, and select **Create**. Type the folder's full path, or pick one of the folders your other workspaces use. Channels creates the Herdr workspace in that folder, activates Namedrop there and opens the channel. The folder must already exist: Namedrop never creates folders.
+- You can add an agent from the Channels page. Select **Add agent** in a channel's member row, choose Claude Code, Codex or a plain terminal, and give it a name and an optional persona. Channels opens a new tab in that workspace, in the channel's folder, names the pane and runs plain `claude` or `codex` there, with no extra flags, as you would by hand. The form shows the folder, and it stays the channel's folder wherever you `cd` in its panes.
+- An agent that Channels started and that has not connected after 20 seconds shows under **Needs you**, with its pane one click away. It may be asking you to trust the folder or to log in. Channels never answers such a screen for you. **Type to agent** now works for a named agent that has no session yet, so you can answer the screen from the page, including from your phone. A new Codex connects after its first prompt, so type one in its pane.
+- Both forms work over the tailnet link, with the same sign-in and CSRF checks as posting. Errors read plainly in the form: a name that is taken, a folder that doesn't exist, Herdr not reachable.
+
+## [1.10.0] - 2026-11-12
+
+### Added
+
+- Channels plays a sound when an agent messages you, so you hear it from another window or across the room. It plays for a direct message from an agent and for an agent's answer in a channel or thread that is addressed to you. Messages between agents and your own messages stay silent, and so do reminders, nudges and progress notes. A burst plays one sound, at most one a second.
+- Pick a sound for each agent. Click the speaker button in the agent's direct message header or in its Peek panel, and choose Chime, Ping, Pop, Knock, Bell, Blip, Marimba, Soft or None. Each sound has a play button to hear it first. An agent without its own pick plays the Default sound.
+- **Sounds** at the bottom of the sidebar sets the Default sound, Chime at first, and has **Mute all sounds**.
+- Your picks are saved by Namedrop, not by the browser, so Channels on your laptop and on your phone over the tailnet link play the same sounds. A pick follows the agent's pane, so it stays when you rename the agent.
+- Any open Channels tab plays the sound, a background tab too. A browser plays sound only after you click once on the page, so until then a small "Click to turn on sounds" note shows at the bottom of the sidebar.
+- The sounds are made in the page with the browser's Web Audio, so Channels loads no audio files.
+
+## [1.9.1] - 2026-11-12
+
+### Fixed
+
+- A wide diagram in Channels stays readable. A diagram wider than its column was always shrunk to fit, so a long left-to-right flowchart came out about 45 px tall in the thread pane or on a phone. A diagram is now shrunk only down to 0.7 of its drawn size, where its labels are about 10 px. A wider one keeps that size and scrolls sideways inside its own box, by swipe, scrollbar or the arrow keys. The page itself does not scroll sideways, and a click or tap still opens the diagram full size.
+
+## [1.9.0] - 2026-11-12
+
+### Added
+
+- Channels draws Mermaid diagrams. When a message holds a fenced code block tagged `mermaid`, the thread shows the diagram in place of the code, in the page's light or dark colors. Agents already write Markdown, so ask one for a flowchart or a sequence diagram and it appears. This works in channels, threads and direct messages, and on a phone.
+- Under each diagram, **Show source** shows the block as written and **Copy** copies it. A diagram wider than its column is shown smaller to fit, in the thread pane and on a phone too. A click or tap opens it full size.
+- A diagram that cannot be drawn stays a code block, with "Diagram could not be drawn" under it. A message shown shortened, a reply preview and a hook row show the word "Diagram" in place of half a diagram's source.
+- A very large diagram cannot stall the page. A block over 10,000 characters and a message's ninth diagram are shown as their source, with a note. A diagram is drawn when it comes on screen.
+- Mermaid is built into Namedrop, and the page loads it only when a diagram is on screen. The page's first load grows by 6 KB. Nothing is loaded from another site, and the page's Content-Security-Policy is unchanged. The Namedrop binary grows by about 3.6 MB.
+- Channels' own scripts and styles are now kept by the browser. Their names change with their content, so the server lets the browser keep them for good, and a page load downloads them once per release. Before, every load downloaded them again.
+- A diagram is text an agent wrote, so it cannot run script, load anything remote or carry a link. Mermaid runs in its strict mode, the drawing is cleaned, and the page shows it as an image. A diagram cannot change those settings or the page's colors from inside its own text.
+
+## [1.8.1] - 2026-11-12
+
+### Fixed
+
+- The Channels link on your phone comes back by itself after the machine restarts. With tailnet access on, the Channels server was gone after a restart, a Herdr restart or a crash, and the link failed until someone ran `namedrop channels` again. Herdr now starts the server again when Herdr starts, and when a pane opens, moves or closes. It comes back on the same port, and a device that was signed in stays signed in. Herdr has to be running, so after a restart with nobody logged in the link stays down until you open Herdr.
+- `namedrop channels` no longer says the server stops after 10 minutes when it doesn't. With tailnet access on, the server has kept running with no tab open since 1.5.0, but the command still printed "The server stops 10 minutes after the last tab closes". It now prints the rule in force, such as "The server keeps running while Tailscale access is on."
+- Doctor reports a tailnet link whose server is not running (ND-TAILSCALE-001), and gives the command that starts it, `namedrop channels --no-open`. Before, it reported the link as configured while it was down. If another program has taken the server's port, Doctor names the port, and Herdr tries to start the server once a minute, not on every pane event.
+- With tailnet access on, `namedrop channels --ui <dir>` switches a running server to another Channels app. It used to refuse and tell you to kill the server. The server now restarts on the same port with the app you asked for, and signed-in browsers reconnect. Without tailnet access, the command still names the running app and the `kill` command.
+
+### Added
+
+- `namedrop channels --idle <minutes>` sets how long the server keeps running after the last tab closes, and `--idle never` keeps it running. The setting is saved and applies until you change it, across restarts and updates. Without it, the server stops after 10 minutes, as before. The setting has no effect while tailnet access is on, where the server never stops for idleness. Doctor shows a saved setting as ND-CHANNELS-001, and reports one it cannot read.
+
+## [1.8.0] - 2026-11-11
+
+### Added
+
+- You can send images to an agent from Channels. Paste an image into the message box, drop it there, or pick it with the new image button beside Send. Each image shows as a small thumbnail above your text, with a button to remove it. After you send, the thumbnails show under the message in the thread, and a click opens the full image. This works in channels, threads and direct messages, on a phone, and over the tailnet link.
+- A message takes up to 4 images of up to 10 MB each. PNG, JPEG, GIF and WebP are accepted. Channels reads the type from the file's bytes, not its name, and refuses anything else. A message with images still needs some words, and Send stays off until you type them.
+- The agent gets one line per image at the end of your message, `Image: ` and the file's absolute path. Claude Code and Codex open it with their ordinary file tools. No image data travels in the message, so an image costs the agent's prompt one short line until it opens the file.
+- Claude Code opens the image without asking. It normally asks before it reads a file outside its working directory, so activation now adds one read rule for the image directory to Claude Code's settings, beside the command permissions Namedrop already manages. Deactivating the last worktree removes it. If Claude Code asks anyway, as it can right after an update, answer in its pane once and reactivate Namedrop.
+- Images are stored under `channel-images/` in Namedrop's state directory, readable by you only, and named by the SHA-256 of their bytes. The same image sent twice is stored once. An image is deleted 30 days after it was last attached, when Channels starts or when the next image is stored. A thread then shows "Image no longer stored" in its place.
+- A message with no image is sent and shown as before.
+
 ## [1.7.9] - 2026-11-11
 
 ### Added

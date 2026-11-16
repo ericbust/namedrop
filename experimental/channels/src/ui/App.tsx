@@ -93,6 +93,7 @@ import { ChannelsToggle, Sidebar } from "./Sidebar.tsx";
 import { ThreadPane, type ThreadResponse } from "./ThreadPane.tsx";
 import { type Located, Timeline } from "./Timeline.tsx";
 import { useDirectMessages } from "./useDirectMessages.ts";
+import { SoundContext, useSounds } from "./useSounds.ts";
 
 const noGroups: ReadonlyMap<string, ThreadGroup> = new Map();
 const noRows: readonly TimelineRow[] = [];
@@ -179,6 +180,7 @@ export function App() {
     bootState({ visible: !document.hidden, route: routeOf(location) }),
   );
   const dm = useDirectMessages(selectedDm, poster, state.channels);
+  const sounds = useSounds(poster, state.heard, dm.heard);
   const [frameVersion, frameArrived] = useReducer(
     (version: number) => version + 1,
     0,
@@ -1048,9 +1050,13 @@ export function App() {
     }
   }
   const updatedAt = lastUpdate.current;
-  return (
+  const page = (
     <PeekContext value={peekAccess}>
-      <MessageContexts deliveries={deliveryAccess} actions={messageActions}>
+      <MessageContexts
+        deliveries={deliveryAccess}
+        actions={messageActions}
+        uploadImage={poster.uploadImage}
+      >
         <div
           style={panels.style}
           className={`app-shell${pane === null ? "" : ` has-slot has-${pane}`}${drawerOpen ? " drawer-open" : ""}`}
@@ -1073,6 +1079,7 @@ export function App() {
               if (drawerOpen) closeDrawer();
             }}
             onAnnounce={(words) => setMoveSaid({ words })}
+            creator={poster}
             directSelected={selectedDm !== null}
             directMessages={
               <DirectSidebar
@@ -1183,7 +1190,20 @@ export function App() {
                   channel={channel}
                   suffix={channelSuffix(channel, state.channels.values())}
                 />
-                <MemberStrip key={channel.key} members={channel.members} />
+                <MemberStrip
+                  key={channel.key}
+                  members={channel.members}
+                  addAgent={
+                    channel.state === "active"
+                      ? {
+                          add: (request) =>
+                            poster.addAgent(channel.key, request),
+                          folder: (signal) =>
+                            poster.channelFolder(channel.key, signal),
+                        }
+                      : null
+                  }
+                />
                 <NeedsYou
                   channel={channel}
                   directory={directory}
@@ -1400,4 +1420,5 @@ export function App() {
       </MessageContexts>
     </PeekContext>
   );
+  return <SoundContext value={sounds}>{page}</SoundContext>;
 }

@@ -625,6 +625,10 @@ pub struct MessageRow {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub progress_note: bool,
     pub body: SafeText,
+    /// File names of the images the message's last lines name. The body
+    /// leaves those lines out.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<String>,
     pub legs: Vec<DeliveryLeg>,
 }
 
@@ -887,6 +891,7 @@ fn attention_response(item: &rows::AttentionRow) -> AttentionResponse {
 #[serde(rename_all = "snake_case")]
 pub enum AttentionSourceKind {
     AgentStatus,
+    AgentStart,
     #[serde(untagged)]
     Stored(crate::AttentionSourceKind),
 }
@@ -945,7 +950,7 @@ pub fn build(rows: &DashboardRows, label: Option<&str>, now_ms: i64) -> Dashboar
     let messages: Vec<MessageRow> = rows
         .messages
         .iter()
-        .map(|m| message(m, &rows.legs))
+        .map(|m| message(m, &rows.legs, rows.image_directory.as_deref()))
         .collect();
     let participants = participants(rows, &messages, now_ms);
     let in_flight = rows
@@ -957,9 +962,16 @@ pub fn build(rows: &DashboardRows, label: Option<&str>, now_ms: i64) -> Dashboar
         .iter()
         .filter(|p| p.activity == Activity::Working)
         .count();
+    let dismissed = |id: &str, raised_at_ms: u64| {
+        crate::store::attention_dismissed(&rows.dismissals, id, raised_at_ms)
+    };
     let mut attention: Vec<AttentionCard> = rows
         .attention
         .iter()
+        .filter(|item| {
+            !dismissed(item.item.id.as_str(), item.item.opened_at_ms)
+                && attention_expires_at(item).is_none_or(|expiry| now_ms < expiry)
+        })
         .map(|item| AttentionCard {
             attention_id: item.item.id.as_str().to_owned(),
             source_id: item.item.source_id.clone(),
@@ -987,8 +999,17 @@ pub fn build(rows: &DashboardRows, label: Option<&str>, now_ms: i64) -> Dashboar
         })
         .collect();
     attention.extend(rows.addresses.iter().filter_map(|address| {
-        blocked_on_user_at(address).map(|opened_at_ms| AttentionCard {
-            attention_id: format!("agent-status-{}", address.address_id),
+        let opened_at_ms = blocked_on_user_at(address)?;
+        let attention_id = format!(
+            "{}{}",
+            crate::store::AGENT_STATUS_ITEM_PREFIX,
+            address.address_id
+        );
+        if dismissed(&attention_id, u64::try_from(opened_at_ms).unwrap_or(0)) {
+            return None;
+        }
+        Some(AttentionCard {
+            attention_id,
             source_id: address.address_id.clone(),
             thread_id: None,
             actions: Vec::new(),
@@ -1090,6 +1111,98 @@ pub fn build(rows: &DashboardRows, label: Option<&str>, now_ms: i64) -> Dashboar
     }
 }
 
+/// How long an agent Channels started may take to connect before the space
+/// asks the person to look at its pane.
+pub const AGENT_START_GRACE_MS: i64 = 20_000;
+
+/// The agent program Channels started in a pane.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StartedAgent {
+    Claude,
+    Codex,
+}
+
+impl StartedAgent {
+    /// What the person does for an agent that hasn't connected. Claude Code
+    /// connects once its first-run screens are answered; a new Codex connects
+    /// after its first prompt.
+    fn asks(self, alias: &str) -> String {
+        match self {
+            Self::Claude => format!("Finish Claude's setup in @{alias}'s pane"),
+            Self::Codex => format!("Send @{alias} its first message in its pane"),
+        }
+    }
+}
+
+/// An agent Channels started in this space, by address, with when it started.
+pub struct StartingAgent<'a> {
+    pub address_id: &'a str,
+    pub started_at_ms: i64,
+    pub agent: StartedAgent,
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
+pub struct AgentStarts {
+    /// When the next card comes due, so the space is published again then.
+    pub next_due_ms: Option<i64>,
+    /// Addresses no longer waiting for a session: connected, retired or
+    /// unbound. Their launches are over.
+    pub settled: Vec<String>,
+}
+
+impl DashboardSnapshot {
+    pub fn add_agent_start_cards(
+        &mut self,
+        rows: &DashboardRows,
+        starting: &[StartingAgent<'_>],
+        now_ms: i64,
+    ) -> AgentStarts {
+        let mut starts = AgentStarts::default();
+        for agent in starting {
+            let Some(address) = rows.addresses.iter().find(|address| {
+                address.address_id == agent.address_id
+                    && address.pane_type == PaneType::Agent
+                    && address.bound
+                    && !address.occupied
+                    && !address.retired
+            }) else {
+                starts.settled.push(agent.address_id.to_owned());
+                continue;
+            };
+            let due_ms = agent.started_at_ms.saturating_add(AGENT_START_GRACE_MS);
+            if now_ms < due_ms {
+                starts.next_due_ms = Some(starts.next_due_ms.map_or(due_ms, |d| d.min(due_ms)));
+                continue;
+            }
+            self.attention.push(AttentionCard {
+                attention_id: format!("agent-start-{}", address.address_id),
+                source_id: address.address_id.clone(),
+                thread_id: None,
+                actions: Vec::new(),
+                coordination_id: None,
+                conversation: None,
+                response: AttentionResponse::Pane {
+                    address_id: address.address_id.clone(),
+                },
+                source_kind: AttentionSourceKind::AgentStart,
+                summary: SafeText::from_untrusted(&agent.agent.asks(&address.alias), SHORT_CHARS),
+                subject_summary: None,
+                opened_at_ms: due_ms,
+                subject_alias: Some(address.alias.clone()),
+                message_id: None,
+                coordination: None,
+                answer_lost: None,
+            });
+        }
+        if self.space.state == SpaceState::Active && !self.attention.is_empty() {
+            self.health = SpaceHealth::NeedsYou {
+                items: u32::try_from(self.attention.len()).unwrap_or(u32::MAX),
+            };
+        }
+        starts
+    }
+}
+
 fn coordination_detail(rows: &DashboardRows, id: &str, now_ms: i64) -> Option<CoordinationDetail> {
     let warning = rows
         .coordination_warnings
@@ -1134,7 +1247,12 @@ fn health(state: SpaceState, attention: usize, in_flight: usize, working: usize)
     }
 }
 
-pub(crate) fn message(row: &rows::MessageRow, legs: &[rows::LegRow]) -> MessageRow {
+pub(crate) fn message(
+    row: &rows::MessageRow,
+    legs: &[rows::LegRow],
+    image_directory: Option<&std::path::Path>,
+) -> MessageRow {
+    let (text, images) = super::images::split(&row.body, image_directory);
     MessageRow {
         channel: row.channel_to.as_ref().map(|to| ChannelRouting {
             durable: row.channel_state.is_some(),
@@ -1161,8 +1279,12 @@ pub(crate) fn message(row: &rows::MessageRow, legs: &[rows::LegRow]) -> MessageR
         kind: MessageKind::of(&row.grammar_version, row.in_reply_to.is_some()),
         progress_note: row.grammar_version == "final-message/v1"
             && crate::store::is_progress_note(&row.message_id),
+        images: images
+            .iter()
+            .map(|image| image.as_str().to_owned())
+            .collect(),
         body: SafeText::from_untrusted(
-            &row.body,
+            text,
             if matches!(
                 row.grammar_version.as_str(),
                 "terminal-relay/v1" | "final-message/v1"
@@ -1191,13 +1313,26 @@ fn threads(rows: &DashboardRows, messages: &[MessageRow]) -> Vec<ThreadChip> {
         .filter_map(|m| rows.threads.iter().find(|t| t.thread_id == m.thread_id))
         .map(|t| ThreadChip {
             thread_id: t.thread_id.clone(),
-            title: SafeText::from_untrusted(&t.title, SHORT_CHARS),
+            title: SafeText::from_untrusted(
+                super::images::split(&t.title, rows.image_directory.as_deref()).0,
+                SHORT_CHARS,
+            ),
             message_count: t.message_count,
         })
         .collect()
 }
 
 const CLOSED_MEMBER_RETENTION_MS: i64 = 5 * 60 * 1_000;
+
+/// When Channels stops showing a stored warning as needing the person.
+pub(crate) fn attention_expires_at(item: &rows::AttentionRow) -> Option<i64> {
+    i64::try_from(
+        item.item
+            .opened_at_ms
+            .saturating_add(rows::ATTENTION_SHOWN_FOR_MS),
+    )
+    .ok()
+}
 
 pub(crate) fn closed_member_expires_at(address: &rows::AddressRow) -> Option<i64> {
     address
@@ -1357,7 +1492,10 @@ fn participants(rows: &DashboardRows, messages: &[MessageRow], now_ms: i64) -> V
                     delivery_id: entry.delivery_id.clone(),
                     message_id: entry.message_id.clone(),
                     from: at(&entry.author_address_id, entry.author_is_human),
-                    preview: SafeText::from_untrusted(&entry.body, PREVIEW_CHARS),
+                    preview: SafeText::from_untrusted(
+                        super::images::split(&entry.body, rows.image_directory.as_deref()).0,
+                        PREVIEW_CHARS,
+                    ),
                     state: entry.state,
                     since_ms: entry.since_ms,
                     attempts: entry.attempts,

@@ -1,4 +1,5 @@
 use super::{PaneFacts, PaneId, TabId};
+use crate::SpaceId;
 use std::path::PathBuf;
 
 /// Texts a named pane shows for each agent state.
@@ -71,4 +72,31 @@ pub enum Applied {
     Opened(serde_json::Value),
     /// The multiplexer cannot show this effect. Callers ignore it.
     Unsupported,
+}
+
+/// The one pane a new space or tab opens with, and the folder the
+/// multiplexer says it is in.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NewPane {
+    pub id: PaneId,
+    pub cwd: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NewSpace {
+    pub space: SpaceId,
+    pub pane: NewPane,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NewTab {
+    pub tab: TabId,
+    pub pane: NewPane,
+}
+
+/// A space or tab `MuxAct::close` closes, with every pane in it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Closing {
+    Space(SpaceId),
+    Tab(TabId),
 }
