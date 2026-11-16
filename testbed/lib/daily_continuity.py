@@ -62,7 +62,8 @@ def start_hold(r, agent, purpose, rng):
 
 
 def finish_hold(r, label, hold):
-    """The helper answered: the way-back line shows, and the delivery settles once in its thread."""
+    """The helper answered: a later prompt shows the way back, and the delivery settles once in its
+    thread, by the final message of the turn the answer started or by a reply line."""
     channels = r.channels
     r.settle(lambda: dc.replies_to(channels.latest().messages, hold.address, hold.sent.message_id),
              bool, ANSWER_WAIT)

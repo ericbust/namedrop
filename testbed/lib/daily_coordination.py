@@ -248,7 +248,12 @@ SCRIPTED_HOLD_PROMPT = (UNCOACHED_HOLD_PROMPT + " Tell me by running the reply l
                         "delivery, with the word as its body.")
 """Told to use the way-back line, because a real Codex sometimes writes the answer as its final
 message instead, which never reaches the person. check_uncoached_hold reports how that went."""
-SCRIPTED_HELP = "@{helper} Run `sleep 60` in your shell, then reply with the single word {word}."
+SCRIPTED_HELP = ("@{helper} Run `sleep 60` in your shell in the background, and when it finishes, reply with "
+                 "the single word {word}.")
+"""In the background: Claude Code's harness blocks a long standalone sleep in the foreground and offers
+run_in_background instead, and its auto mode classifier refused a Python sleep a collaborator asked
+for. A real Claude told only to run `sleep 60` then either backgrounded it or answered at once, inside
+the holder's turn, which left the hold inconclusive."""
 TOOL_WAIT = 60
 
 
@@ -299,22 +304,41 @@ def judge_hold(label, held):
                                     ("helper requests", held.helper_requests, 1)])
 
 
+WOKEN = "your final message is your answer to delivery {}"
+
+
 def way_back_turns(transcript, attempt):
+    """The turns whose prompts showed the way back to the held delivery: its reply line, or, in the
+    turn its helper's answer started, that the turn's final message is its answer."""
     return tuple(turn for turn in transcript.turns
-                 if any("is still open" in text and attempt in text for text in turn.contexts))
+                 if any(attempt in text and ("is still open" in text or WOKEN.format(attempt) in text)
+                        for text in turn.contexts))
+
+
+RELAY_PREFIX = "terminal-relay:"
+
+
+def final_message_answer(answers, attempt):
+    """The answer is a final message, which Namedrop posted from the Stop of the turn the helper's
+    answer started, rather than a reply the agent ran."""
+    return bool(attempt) and any(row.message_id == RELAY_PREFIX + attempt for row in answers)
 
 
 def judge_late_answer(label, word, hop, answers, thread, way_back, interim, resolved):
-    """interim is shown, not judged: whether a person sees a warning during a long hold is a
-    product question this lane reports."""
+    """A later prompt shows the way back, and the answer lands one of two ways: the turn the helper's
+    answer starts ends with it as its final message, which closes the delivery with no_reply, or the
+    agent runs a reply line, which replies. interim is shown, not judged: whether a person sees a
+    warning during a long hold is a product question this lane reports."""
     answer = answers[0] if answers else du.parse_message({})
-    return [fields(label + " answer", [("way-back prompts", len(way_back) > 0, True),
+    by_final = final_message_answer(answers, hop.attempt_id)
+    return [fields(label + " answer", [("by final message", by_final, None),
+                                       ("way-back prompts", len(way_back) > 0, True),
                                        ("answers", len(answers), 1),
                                        ("same thread", answer.thread_id == thread, True),
                                        ("wire kind", answer.kind, "reply"),
                                        ("word in the answer", word in answer.body, True),
                                        ("attempts", hop.attempts, 1), ("retries", hop.retries, 0),
-                                       ("disposition", hop.disposition, "reply"),
+                                       ("disposition", hop.disposition, "no_reply" if by_final else "reply"),
                                        ("warning open at the end", resolved is False, False)]),
             Check(label + " warning", True, "{}: warning during the hold: {}".format(label, interim or "none"))]
 
@@ -379,7 +403,7 @@ def report_uncoached(label, checks, lost=()):
     if failed:
         return [Check(label, True, "{}: FINDING, the answer did not land: {}".format(
             label, "; ".join([failed[0][:200]] + [du.lost_text(row) for row in lost])))]
-    return [Check(label, True, "{}: the answer landed through the way-back line".format(label))]
+    return [Check(label, True, "{}: the answer landed".format(label))]
 
 
 def run_uncoached_hold(r, rng):
