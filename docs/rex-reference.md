@@ -134,7 +134,7 @@ The module defines these actions in the `Namedrop` category of the Rex command p
 | Namedrop Doctor | `namedrop_doctor` | `alt+shift+cmd+h` | Opens Doctor's report for this session |
 | Agent status | `namedrop_status` | `alt+shift+cmd+s` | Opens Agent status for this pane |
 | Namedrop tour | `namedrop_tour` | `alt+shift+cmd+o` | Opens the tour |
-| Open Namedrop Channels | `namedrop_channels` | None | Opens Channels in your browser. See [Limits](#limits-of-the-experimental-build) |
+| Open Namedrop Channels | `namedrop_channels` | None | Opens Channels in your browser. See [Limits](#limits-of-rex-support) |
 | Pause Namedrop | `namedrop_pause` | None | Pauses all collaboration in this Rex session |
 | Resume Namedrop | `namedrop_resume` | None | Resumes collaboration in this Rex session |
 | Deactivate Namedrop | `namedrop_deactivate` | None | Deactivates Namedrop in this Rex session and keeps its data |
@@ -420,7 +420,7 @@ Each label in the explanation lists one or more of these conditions:
 
 `ND-THREAD-001` is not Rex-only. On Rex it is how you continue a thread that the Automatic Reply Limit paused, because Rex has no Namedrop screen for it. Its repair is a `namedrop thread continue` command with the thread's ID.
 
-## Limits of the experimental build
+## Limits of Rex support
 
 - **Experimental.** Rex is a preview, and Namedrop's Rex support can change between releases. Namedrop 1.12.0 is the first release that includes it.
 - **Channels names Herdr.** **Open Namedrop Channels** opens a page that tells a Rex user to open Herdr: "Open this workspace in Herdr and choose Namedrop setup from the command palette to repair the integration.", "Open this workspace in Herdr and choose Namedrop Doctor to review this item.", "Answer it in its pane in Herdr.", "Rename it in Herdr.", and "This workspace has no label in Herdr." Rex has no counterpart for these Herdr steps. The palette actions and `namedrop` commands do that work on Rex.

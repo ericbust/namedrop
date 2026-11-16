@@ -15,8 +15,8 @@ import urllib.request
 
 DAY_MS = 86_400_000
 LIMIT = 65_536
-# The first release that ships scripts/install.sh. It stays this release in
-# every later one (docs/releasing.md). A standalone install is offered no
+# The first release that ships scripts/install.sh. Leave it at this value in
+# every later release (docs/releasing.md). A standalone install is offered no
 # older tag, because an older tag has no installer.
 INSTALLER_FLOOR = '1.12.0'
 

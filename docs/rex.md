@@ -61,7 +61,7 @@ Namedrop runs from its own copy of the runtime in the state directory, not from 
 
 If the Rex session is not active yet, **Name this pane** offers to activate it first: `Namedrop is not active in this session. Press Enter to activate it, or Esc to cancel.`
 
-Namedrop has not been tested in the Rex app's own palette or with its keys. See [Limits of the experimental build](rex-reference.md#limits-of-the-experimental-build). If the palette does not work for you, use a shell in a Rex pane of the same Rex session:
+Namedrop has not been tested in the Rex app's own palette or with its keys. See [Limits of Rex support](rex-reference.md#limits-of-rex-support). If the palette does not work for you, use a shell in a Rex pane of the same Rex session:
 
 1. Activate the Rex session:
 

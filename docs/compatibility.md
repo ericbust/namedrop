@@ -4,7 +4,7 @@
 
 | Platform | Status |
 |---|---|
-| macOS on Apple silicon | Supported. Tested by hand on 2026-09-10. |
+| macOS on Apple silicon | Supported. Tested with real agents on 2026-11-16. |
 | Linux x86_64 (glibc) | Supported. Tested with real agents on 2026-11-08. |
 | Linux aarch64 (glibc) | Builds and passes CI, but hasn't been tested by hand yet. |
 
@@ -27,7 +27,7 @@ Nobody has tried musl (Alpine), NixOS or other Linux setups.
 - **Linux x86_64 (Omarchy), 2026-10-28**, Namedrop 1.4.2 from the `chore/remove-dashboard` branch, tested at commit c07f928 before the version bump: Herdr 0.9.1, Codex 0.164.0 with gpt-6-sol, and Claude Code 2.1.310 with claude-opus-5-5. Codex's shared app-server warning appeared and cleared after its fix. Mentions went both ways between Claude and Codex, and each reply arrived once. @shell ran a command for Claude.
 - **Linux x86_64 (Omarchy), 2026-11-07**, Namedrop 1.6.0 from the `feat/message-efficiency` branch at commit 7d0aa09: Herdr 0.9.1, Codex 0.167.0 with gpt-6-sol, and Claude Code 2.1.319 with claude-opus-5-5. Codex's shared app-server warning appeared and cleared after its fix. Mentions went both ways between Claude and Codex, and each reply arrived once. @shell ran a command for Claude.
 - **Linux x86_64 (Omarchy), 2026-11-09**, Namedrop 1.7.0 from the `feat/pointer-prompts` branch on top of 1.6.5, at commit 13d91ae: Herdr 0.9.1, Codex 0.167.0 with gpt-6-sol, and Claude Code 2.1.319 with claude-opus-5-5. Codex's shared app-server warning appeared and cleared after its fix. Mentions went both ways between Claude and Codex as pointer prompts, each settled by the agent's final message with no settle command, and each reply arrived once. @shell ran a command for Claude. Channels posts, a thread reply, direct messages and posts naming another agent reached both agents, the named agent's answer arriving inside the pointer, and a Codex session with no prompt hook read its details through `delivery inbox`. The daily-use lane at commit 217c60a passed 13 of 14 checks; the held-turn check was inconclusive because the Claude helper answered before Codex's turn ended. A 1.6.5 profile, at commit 1bd27f9, upgraded live with both agents left running; Codex sessions started before the update lost their hooks, as with any plugin change.
-- **macOS 26.5 on Apple silicon, 2026-11-16**, Namedrop 1.12.0 from the `exp/merge-main` branch, tested at commit ab7f9cf before the version bump: Herdr 0.9.5, Codex 0.163.0 with gpt-6-sol, and Claude Code 2.1.325 with claude-sonnet-5-5. Codex's shared app-server warning appeared and cleared after its fix. Mentions went both ways between Claude and Codex, and each reply arrived once. @shell ran a command for Claude. The same run passed with Herdr as the program of a pane of Rex preview.19. The daily-use lane passed 13 of 14 checks. In the held-turn check, Claude held its turn and then answered, but the answer never reached the person's thread and nothing warned. The same check failed the same way on `experimental` before the merge of 1.11.1.
+- **macOS 26.5 on Apple silicon, 2026-11-16**, Namedrop 1.12.0 from the `exp/merge-main` branch, tested at commit ab7f9cf before the version bump: Herdr 0.9.5, Codex 0.163.0 with gpt-6-sol, and Claude Code 2.1.325 with claude-sonnet-5-5. Codex's shared app-server warning appeared and cleared after its fix. Mentions went both ways between Claude and Codex, and each reply arrived once. @shell ran a command for Claude. The same run passed with Herdr as the program of a pane of Rex preview.19. The daily-use lane passed 13 of 14 checks. In the held-turn check, Claude held its turn and then answered, but the answer never reached the person's thread and nothing warned. The same check failed the same way on `experimental` before the merge of 1.11.1. A run of `main` at 1.11.1, commit eb5b502, also lost the answer with no warning, and then that run's connection to Channels failed.
 
 Herdr 0.7.5 was only checked for loading the plugin and parsing commands. The full runs above used 0.8.2, 0.9.1 and 0.9.5.
 
@@ -107,4 +107,4 @@ Tested on macOS on 2026-11-14 at commit `3c18cb9`: Herdr 0.9.5 as the program of
 
 - The archives aren't signed or notarized, and nobody has checked how macOS treats a downloaded one.
 - Unattended use. Your agent's permission settings can still ask you to approve a command.
-- The macOS run above came before guided updates, tracked coordination and personas. Automated tests cover those with stand-in agents, not real ones.
+- The 2026-09-10 macOS run came before guided updates, tracked coordination and personas. The 2026-11-16 run covered a tracked handoff, and the personas entry covers personas. Automated tests cover guided updates with stand-in agents, not real ones.
