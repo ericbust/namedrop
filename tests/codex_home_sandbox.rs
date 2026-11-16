@@ -100,6 +100,8 @@ fn the_worker_resolves_a_codex_home_it_was_given() {
     // directly under a two-level `HOME`.
     let profile = |name: &str| root.join("profiles").join(name);
     std::os::unix::fs::symlink(profile("linked"), root.join("link")).unwrap();
+    fs::create_dir_all(profile("home-link")).unwrap();
+    std::os::unix::fs::symlink(profile("home-link"), root.join("home-link")).unwrap();
     let layouts = [
         Layout {
             name: "the testbed's profile",
@@ -124,6 +126,14 @@ fn the_worker_resolves_a_codex_home_it_was_given() {
             home: profile("default").join("home"),
             given: None,
             files: profile("default").join("home/.codex"),
+        },
+        // As a HOME under macOS's /tmp is: Codex reads its default home by
+        // the path through the link, which it does not resolve.
+        Layout {
+            name: "the default under a HOME reached through a link",
+            home: root.join("home-link/users/me"),
+            given: None,
+            files: profile("home-link").join("users/me/.codex"),
         },
     ];
     let mut failures = Vec::new();

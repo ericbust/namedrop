@@ -628,6 +628,24 @@ fn deny_exec_profile(
             traversal.push(sandbox_literal(parent)?.to_owned());
         }
     }
+    // A path the worker is given through a link, as macOS gives `/tmp`, is
+    // looked up through the link, which the sandbox checks by the link's
+    // own path, as it checks `/var`. Each link on the way to the temporary
+    // directory, `HOME` and `CODEX_HOME` as given is named, and only the
+    // link: what is behind it stays as the rules above allow.
+    let given = [
+        Some(env::temp_dir()),
+        home.clone(),
+        env::var_os("CODEX_HOME").map(PathBuf::from),
+    ];
+    for path in given.into_iter().flatten() {
+        for link in links_on_the_way(&path) {
+            let link = sandbox_literal(&link)?.to_owned();
+            if !traversal.contains(&link) {
+                traversal.push(link);
+            }
+        }
+    }
     let traversal = traversal
         .iter()
         .map(|path| format!("  (literal \"{path}\")"))
@@ -659,6 +677,25 @@ fn deny_exec_profile(
          (allow file-read*\n{subpaths}\n{traversal})\n\
          {ancestors}"
     ))
+}
+
+/// Each symbolic link a lookup of `path` passes through, by the path that
+/// reaches it, in order, following each link to what it names.
+#[cfg(target_os = "macos")]
+fn links_on_the_way(path: &Path) -> Vec<PathBuf> {
+    let mut links = Vec::new();
+    let mut walked = PathBuf::new();
+    for component in path.components() {
+        walked.push(component);
+        if fs::symlink_metadata(&walked).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            links.push(walked.clone());
+            match walked.canonicalize() {
+                Ok(real) => walked = real,
+                Err(_) => break,
+            }
+        }
+    }
+    links
 }
 
 /// The fixed question one kind of worker asks. Only the payload varies per call.
