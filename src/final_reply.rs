@@ -887,33 +887,54 @@ fn find_claim(
     (directory, claim)
 }
 
-/// What `session`'s claim says at `now_ms` about its answer to `attempt`,
-/// whose pane was seen idle at `idle_since_ms`. An open claim is decided by
-/// its Stop's worker within `STOPPED_GRACE_MS` of the Stop, or by a Stop
-/// that arrives within `STOP_ARRIVAL_GRACE_MS` of the pane going idle.
+/// What `session`'s claim says at `now_ms` about its answer to `attempt`.
+/// An open claim is decided by its Stop's worker within `STOPPED_GRACE_MS`
+/// of the Stop, or by a Stop that arrives within `STOP_ARRIVAL_GRACE_MS` of
+/// the pane going idle, which is when its attempt settled, as `settled_at`
+/// says. A held claim whose helper's answer started a turn waits the same
+/// way for that turn's Stop, from when the answer's attempt settled: a turn
+/// interrupted with Esc, or ended by an API error, lost the held answer too.
 pub(crate) fn answer_claim<E>(
     state: &Path,
     namespace: &crate::StateNamespace,
     session: &crate::AgentSessionId,
     attempt: &crate::DeliveryAttemptId,
-    idle_since_ms: impl FnOnce() -> Result<u64, E>,
+    settled_at: impl FnOnce(&crate::DeliveryAttemptId) -> Result<Option<u64>, E>,
     now_ms: u64,
 ) -> Result<AnswerClaim, E> {
-    let (directory, claim) = find_claim(state, namespace, session, attempt);
-    Ok(match claim.map(|claim| (claim.state, claim.turn)) {
-        Some((ClaimState::Open, turn)) => {
-            let until_ms = match stopped_at(&directory, &turn) {
-                Some(at) => at.saturating_add(STOPPED_GRACE_MS),
-                None => idle_since_ms()?.saturating_add(STOP_ARRIVAL_GRACE_MS),
-            };
-            if now_ms < until_ms {
-                AnswerClaim::Deciding { until_ms }
-            } else {
-                AnswerClaim::Neither
-            }
-        }
-        Some((ClaimState::Left(LeaveReason::Held), _)) => AnswerClaim::Held,
-        _ => AnswerClaim::Neither,
+    let directory = session_directory(state, &namespace.session_socket_id, session.as_str());
+    let claims = read_claims(&directory);
+    let Some(claim) = claims
+        .iter()
+        .find(|claim| claim.attempt_id == *attempt && claim.namespace == *namespace)
+    else {
+        return Ok(AnswerClaim::Neither);
+    };
+    let (turn, idle) = match (claim.state, &claim.answered_turn) {
+        (ClaimState::Open, _) => (&claim.turn, attempt),
+        (ClaimState::Left(LeaveReason::Held), Some(turn)) => match claims
+            .iter()
+            .find(|answer| answer.state == ClaimState::Open && answer.turn == *turn)
+        {
+            Some(answer) => (turn, &answer.attempt_id),
+            None => return Ok(AnswerClaim::Held),
+        },
+        (ClaimState::Left(LeaveReason::Held), None) => return Ok(AnswerClaim::Held),
+        _ => return Ok(AnswerClaim::Neither),
+    };
+    let until_ms = match stopped_at(&directory, turn) {
+        Some(at) => at.saturating_add(STOPPED_GRACE_MS),
+        None => match settled_at(idle)? {
+            Some(at) => at.saturating_add(STOP_ARRIVAL_GRACE_MS),
+            // The turn the helper's answer started is still running.
+            None if claim.state != ClaimState::Open => return Ok(AnswerClaim::Held),
+            None => STOP_ARRIVAL_GRACE_MS,
+        },
+    };
+    Ok(if now_ms < until_ms {
+        AnswerClaim::Deciding { until_ms }
+    } else {
+        AnswerClaim::Neither
     })
 }
 
@@ -930,7 +951,8 @@ pub(crate) fn answer_held(
 }
 
 /// The attempts in `namespace` whose claims of `session` still wait for a
-/// Stop to decide them.
+/// Stop to decide them: an open claim's own, or a held claim's whose
+/// helper's answer started a turn.
 pub(crate) fn open_claims(
     state: &Path,
     namespace: &crate::StateNamespace,
@@ -942,7 +964,12 @@ pub(crate) fn open_claims(
         session.as_str(),
     ))
     .into_iter()
-    .filter(|claim| claim.state == ClaimState::Open && claim.namespace == *namespace)
+    .filter(|claim| {
+        (claim.state == ClaimState::Open
+            || (claim.state == ClaimState::Left(LeaveReason::Held)
+                && claim.answered_turn.is_some()))
+            && claim.namespace == *namespace
+    })
     .map(|claim| claim.attempt_id)
     .collect()
 }

@@ -1801,6 +1801,34 @@ impl Space {
             .map(|row| row[2].clone())
             .collect()
     }
+
+    /// The stage Channels draws on the reviewer's arrow of `question`.
+    fn question_leg(&self, question: &Value) -> String {
+        let rows = StateStore::open(&self.directory.state)
+            .unwrap()
+            .dashboard_rows(&namespace())
+            .unwrap();
+        let snapshot = serde_json::to_value(namedrop::dashboard::snapshot::build(
+            &rows,
+            Some("namedrop/dashboard"),
+            1,
+        ))
+        .unwrap();
+        snapshot["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["message_id"] == question["message_id"])
+            .unwrap()["legs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|leg| leg["to"] == "address-reviewer")
+            .unwrap()["stage"]["stage"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
 }
 
 fn woken_for(attempt: &str) -> String {
@@ -2017,6 +2045,50 @@ fn an_answer_queued_into_a_turn_about_another_delivery_wakes_nothing() {
         .find(|claim| claim["attempt_id"] == attempt)
         .unwrap();
     assert_eq!(held["state"], json!({"left":"held"}));
+}
+
+/// The turn the lead's answer starts is interrupted with Esc, or ended by an
+/// API error, and never stops. Once its pane has sat idle past the Stop's
+/// grace, the person is told the held delivery went unanswered, with no later
+/// prompt needed, and Channels stops showing it as still being worked on.
+#[test]
+fn an_answer_turn_that_never_stops_warns_about_the_held_delivery() {
+    let space = Space::new();
+    let (question, ask, answer) = space.held_on_the_lead();
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap();
+    let turn = ("prompt_id", "answer-turn");
+    space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        turn,
+        &answer.to_string(),
+    );
+    let warned = || {
+        space.rows(&format!(
+            "SELECT summary FROM attention_items WHERE source_kind = 'agent_disposition'
+               AND source_id = '{attempt}' AND resolved_at_ms IS NULL"
+        ))
+    };
+    let due = space.observe_at(IDLE);
+    assert!(
+        warned().is_empty(),
+        "warned before a racing Stop could arrive"
+    );
+    assert_eq!(due, Some(IDLE + STOP_ARRIVAL_GRACE_MS));
+    assert_eq!(space.question_leg(&question), "working");
+    space.observe_at(IDLE + STOP_ARRIVAL_GRACE_MS);
+    let warnings = warned();
+    assert_eq!(
+        warnings.len(),
+        1,
+        "a held answer lost with its turn warned nothing"
+    );
+    assert!(
+        warnings[0][0].contains("ended its turn without a reply"),
+        "{warnings:?}"
+    );
+    assert_ne!(space.question_leg(&question), "working");
+    assert!(space.answers_to(&question).is_empty());
 }
 
 /// A reply the agent sends during the turn opens no request, even to an

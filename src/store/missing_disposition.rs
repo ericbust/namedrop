@@ -473,12 +473,13 @@ impl StateTransaction<'_> {
             .unwrap_or(false))
     }
 
-    /// When the attempt settled, which is when its pane was seen idle.
+    /// When the attempt settled, which is when its pane was seen idle, if
+    /// it has.
     fn settled_at(
         &self,
         ns: &StateNamespace,
         attempt: &crate::DeliveryAttemptId,
-    ) -> Result<u64, StoreError> {
+    ) -> Result<Option<u64>, StoreError> {
         let at: Option<i64> = self.transaction.query_row(
             "SELECT MAX(occurred_at_ms) FROM transition_facts
              WHERE session_socket_id = ?1 AND worktree_id = ?2
@@ -492,7 +493,7 @@ impl StateTransaction<'_> {
             ],
             |row| row.get(0),
         )?;
-        Ok(at.map_or(0, |at| u64::try_from(at).unwrap_or(0)))
+        Ok(at.map(|at| u64::try_from(at).unwrap_or(0)))
     }
 
     /// Judges a settled attempt again. A held answer's open warning that a
@@ -839,7 +840,7 @@ impl StateTransaction<'_> {
             ns,
             &session,
             attempt,
-            || self.settled_at(ns, attempt),
+            |idle| self.settled_at(ns, idle),
             now_ms,
         )?;
         Ok(MissingDispositionFacts {

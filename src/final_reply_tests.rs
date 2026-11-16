@@ -2223,16 +2223,24 @@ fn a_helpers_answer_holds_its_claim_through_the_turn_and_that_turns_stop_answers
     let answer_prompt = |state: &StateDirectory, answers: &str| {
         answer_as(state, answers, Armed::NoReply(NoReplyCase::AnswersOwn))
     };
-    let held = |state: &StateDirectory, now_ms: u64| {
+    // The held attempt settled at 2, when the hold's pane went idle. The
+    // answer's attempt settles once the turn it started goes idle, if it has.
+    let held_at = |state: &StateDirectory, answer_settled_at: Option<u64>, now_ms: u64| {
         answer_claim(
             &state.0,
             &crate::StateNamespace::for_space("socket", "workspace"),
             &crate::AgentSessionId::new("session"),
             &crate::DeliveryAttemptId::new("attempt-1"),
-            || Ok::<_, ()>(2),
+            |attempt| {
+                Ok::<_, ()>(match attempt.as_str() {
+                    "attempt-1" => Some(2),
+                    _ => answer_settled_at,
+                })
+            },
             now_ms,
         )
     };
+    let held = |state: &StateDirectory, now_ms: u64| held_at(state, None, now_ms);
 
     let state = StateDirectory::new();
     held_on(&state);
@@ -2246,6 +2254,19 @@ fn a_helpers_answer_holds_its_claim_through_the_turn_and_that_turns_stop_answers
     // The answer stays held while its turn runs, which may be long after the
     // held delivery's attempt settled, so nothing judges it unanswered.
     assert_eq!(held(&state, 60_000), Ok(AnswerClaim::Held));
+    // Reconciliation judges it with the answer's own claim, as one that waits
+    // for a Stop.
+    assert_eq!(
+        open_claims(
+            &state.0,
+            &crate::StateNamespace::for_space("socket", "workspace"),
+            &crate::AgentSessionId::new("session"),
+        ),
+        [
+            crate::DeliveryAttemptId::new("attempt-1"),
+            crate::DeliveryAttemptId::new("attempt-2")
+        ]
+    );
     // Another prompt of the same turn, a message queued into it, leaves the
     // claim to that turn's Stop and shows no way back.
     let queued = observe_prompt(
@@ -2310,8 +2331,33 @@ fn a_helpers_answer_holds_its_claim_through_the_turn_and_that_turns_stop_answers
     assert_eq!(observed.woken, None);
     assert_eq!(observed.left_open.len(), 1);
 
-    // A turn the answer started that never stops leaves the next prompt to
-    // end the claim as interrupted, which warns, and show its way back.
+    // A turn the answer started that goes idle and never stops, interrupted
+    // with Esc or ended by an API error, lost the held answer: once a Stop
+    // could no longer arrive, the held delivery is judged unanswered, as the
+    // answer's own is.
+    let state = StateDirectory::new();
+    held_on(&state);
+    answer_prompt(&state, "request-1");
+    assert_eq!(
+        held_at(&state, Some(50_000), 52_000),
+        Ok(AnswerClaim::Deciding {
+            until_ms: 50_000 + STOP_ARRIVAL_GRACE_MS
+        })
+    );
+    assert_eq!(
+        held_at(&state, Some(50_000), 50_000 + STOP_ARRIVAL_GRACE_MS),
+        Ok(AnswerClaim::Neither)
+    );
+    // A Stop that came gives its worker the worker's grace.
+    mark_stopped(&state.0, "socket", "session", &turn("answer-turn"), 51_000);
+    assert_eq!(
+        held_at(&state, Some(50_000), 60_000),
+        Ok(AnswerClaim::Deciding {
+            until_ms: 51_000 + STOPPED_GRACE_MS
+        })
+    );
+    // The next prompt ends the claim as interrupted, which warns, and shows
+    // its way back.
     let state = StateDirectory::new();
     held_on(&state);
     answer_prompt(&state, "request-1");
