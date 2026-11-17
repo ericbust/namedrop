@@ -1745,10 +1745,6 @@ fn add_operation<M, C, I>(
         issue.repair.command = Some(command);
     }
 }
-/// `ND-REX-001`: the module the server loaded, as `rex_ui::inspect` read
-/// it. Only a confirmed module is information; any other is a notice, with a
-/// reload for a module the server loaded before a refresh rewrote it, and a
-/// reinstall otherwise.
 /// What starts a stopped tailnet server again. Herdr's startup command also
 /// does; nothing in a Rex home runs it.
 fn tailnet_start_repair(kind: crate::mux::MuxKind) -> &'static str {
@@ -1758,6 +1754,10 @@ fn tailnet_start_repair(kind: crate::mux::MuxKind) -> &'static str {
     )
 }
 
+/// `ND-REX-001`: the module the server loaded, as `rex_ui::inspect` read
+/// it. Only a confirmed module is information; any other is a notice, with a
+/// reload for a module the server loaded before a refresh rewrote it, and a
+/// reinstall otherwise.
 fn rex_module_issue(inspected: Result<serde_json::Value, String>) -> HealthIssue {
     let (confirmed, mut explanation, diagnostic) = match inspected {
         Ok(diagnostic) => (
