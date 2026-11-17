@@ -147,12 +147,13 @@ where
     let delivery = carried
         .as_ref()
         .and_then(|carried| crate::integration::authenticate_delivery_prompt(carried, runtime));
-    let (armed, held) = observe_final_reply(&input, delivery.as_ref(), runtime);
+    let (armed, held, woken) = observe_final_reply(&input, delivery.as_ref(), runtime);
     if let Some(delivery) = delivery {
         return Some(delivery_hook_output(
             &delivery,
             reader,
             armed.as_ref(),
+            woken.as_ref(),
             &held,
             runtime,
         ));
@@ -455,6 +456,7 @@ fn delivery_hook_output<M, C, I>(
     delivery: &AuthenticatedDelivery,
     reader: Option<Reader<'_>>,
     armed: Option<&crate::final_reply::Armed>,
+    woken: Option<&crate::DeliveryAttemptId>,
     held: &[String],
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Value
@@ -491,7 +493,7 @@ where
         .sum::<usize>();
     let commands = control.and_then(|control| {
         armed
-            .and_then(|armed| crate::integration::final_reply_guidance(control, armed))
+            .and_then(|armed| crate::integration::final_reply_guidance(control, armed, woken))
             .or_else(|| {
                 crate::integration::delivery_command_guidance(
                     control,
@@ -532,12 +534,18 @@ where
 /// Keeps the session's final-reply claims in step with this prompt, and arms
 /// one for `delivery` when it can. The returned plan is what the hook may
 /// promise; `None` keeps today's explicit commands. Each text says how to
-/// answer a delivery a Stop held that is still open.
+/// answer a delivery a Stop held that is still open. The attempt is the held
+/// delivery this turn's final message answers, because `delivery` answers
+/// the helper it waited on.
 fn observe_final_reply<M, C, I>(
     input: &UserPromptSubmitInput,
     delivery: Option<&AuthenticatedDelivery>,
     runtime: &LifecycleRuntime<'_, M, C, I>,
-) -> (Option<crate::final_reply::Armed>, Vec<String>)
+) -> (
+    Option<crate::final_reply::Armed>,
+    Vec<String>,
+    Option<crate::DeliveryAttemptId>,
+)
 where
     M: crate::mux::Mux,
     C: Clock,
@@ -550,7 +558,7 @@ where
             input.turn_id.as_deref(),
         ),
     ) else {
-        return (None, Vec::new());
+        return (None, Vec::new(), None);
     };
     let now_ms = runtime.clock.now_unix_ms();
     let claim = delivery.and_then(|delivery| {
@@ -581,6 +589,7 @@ where
                     }),
             news,
             delivery: delivery.is_some(),
+            answers: delivery.and_then(|delivery| delivery.answers.as_ref()),
         },
         now_ms,
     );
@@ -589,6 +598,7 @@ where
         crate::integration::left_open_guidance(&observed.left_open, || {
             crate::integration::inbox_line(runtime)
         }),
+        observed.woken,
     )
 }
 
