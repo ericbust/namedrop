@@ -306,7 +306,26 @@ def check_hold_judges():
                     dco.judge_late_answer("h", "amber1", hop._replace(attempts=2), (answer,), "t", (open_turn,), "", True),
                     dco.judge_late_answer("h", "amber1", hop, (answer,), "t", (open_turn,), "agent_disposition", False)):
         assert not all(check.ok for check in changed)
-    return "daily hold judges: a post during the hold, a lost way-back line or a doubled answer each fail"
+    woken = live.Turn("p", ("Namedrop commands: … your final message is your answer to delivery a1, and",),
+                      (), (), 1)
+    assert dco.way_back_turns(live.Transcript("claude", "s", "p", (), (woken,), frozenset()), "a1") == (woken,)
+    assert not dco.way_back_turns(live.Transcript("claude", "s", "p", (), (woken,), frozenset()), "a2")
+    relayed = answer._replace(message_id="terminal-relay:a1")
+    closed = hop._replace(disposition="no_reply")
+    by_final = dco.judge_late_answer("h", "amber1", closed, (relayed,), "t", (woken,), "", True)
+    assert all(check.ok for check in by_final), "the final message of the answer's turn is the answer"
+    assert "by final message True" in by_final[0].detail
+    assert all(check.ok for check in dco.judge_late_answer("h", "amber1", hop, (answer,), "t", (woken,), "",
+                                                           True)), "a reply line run in the woken turn"
+    for changed in (dco.judge_late_answer("h", "amber1", hop, (relayed,), "t", (woken,), "", True),
+                    dco.judge_late_answer("h", "amber1", closed, (answer,), "t", (woken,), "", True),
+                    dco.judge_late_answer("h", "amber1", closed, (relayed,), "t", (), "", True),
+                    dco.judge_late_answer("h", "amber1", closed, (relayed, answer), "t", (woken,), "", True),
+                    dco.judge_late_answer("h", "amber1", closed._replace(attempt_id="a2"), (relayed,), "t",
+                                          (woken,), "", True)):
+        assert not all(check.ok for check in changed)
+    return ("daily hold judges: a post during the hold, a lost answer by final message or way-back line, "
+            "or a doubled answer each fail")
 
 
 def check_uncoached_report():

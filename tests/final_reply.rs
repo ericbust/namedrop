@@ -23,7 +23,7 @@ use namedrop::{
     final_reply::{BoundOperation, FinalText, HostTurn, StopFacts, mark_stopped, settle_at_stop},
     issue_registration_challenge,
     mux::{
-        AgentKind, Depth, Effect, InputOutcome, MuxError,
+        AgentKind, AgentState, Depth, Effect, InputOutcome, MuxError,
         fake::{
             CHECKOUT_LISTINGS, FakeMux, Read, ScopeKind, SentInput, StrictSpace, Surveyed, Takes,
         },
@@ -546,7 +546,7 @@ fn an_ask_and_its_answer_settle_from_final_messages_with_no_settle_command() {
     );
     assert!(
         context.contains(
-            "Namedrop commands: your final message is your reply to @lead. Namedrop sends it when your turn ends, so run no settle command and write no status line. If your turn ends while you wait on a helper, Namedrop sends nothing and you reply later. If it ends while background work you started this turn runs, Namedrop holds your final message, and your final message in the turn that work's notice starts is the reply. If the notice arrives during another turn, or another delivery reaches the turn it starts, answer with the line Namedrop shows. For no reply, run this line first."
+            "Namedrop commands: your final message is your reply to @lead. Namedrop sends it when your turn ends, so run no settle command and write no status line. If your turn ends while you wait on a helper, Namedrop sends nothing, and your final message in the turn that the helper's answer starts is the reply. If it ends while background work you started this turn runs, Namedrop holds your final message, and your final message in the turn that work's notice starts is the reply. Whenever a later turn shows a line to answer this delivery, answer with that line. For no reply, run this line first."
         ),
         "{context}"
     );
@@ -1243,7 +1243,7 @@ fn a_message_from_the_person_is_answered_in_its_thread_by_the_final_message() {
     );
     assert!(
         context.ends_with(
-            "\n\nNamedrop commands: your final message goes to the person when your turn ends, so run no settle command and write no status line. If your turn ends while you wait on a helper, Namedrop sends nothing and you reply later. If it ends while background work you started this turn runs, Namedrop holds your final message, and your final message in the turn that work's notice starts is the reply. If the notice arrives during another turn, or another delivery reaches the turn it starts, answer with the line Namedrop shows."
+            "\n\nNamedrop commands: your final message goes to the person when your turn ends, so run no settle command and write no status line. If your turn ends while you wait on a helper, Namedrop sends nothing, and your final message in the turn that the helper's answer starts is the reply. If it ends while background work you started this turn runs, Namedrop holds your final message, and your final message in the turn that work's notice starts is the reply. Whenever a later turn shows a line to answer this delivery, answer with that line."
         ),
         "{context}"
     );
@@ -1437,8 +1437,8 @@ fn a_turn_that_ends_waiting_on_a_helper_holds_the_delivery() {
             "a held delivery left the inbox"
         );
 
-        // Every later turn says how to answer it: the helper's answer, and
-        // a prompt typed into the pane alike.
+        // A later turn the person starts says how to answer it. The turn the
+        // helper's answer starts answers it by its final message instead.
         let way_back = |context: &str| {
             let (head, line) = context.rsplit_once('\n').unwrap();
             head.ends_with(&format!(
@@ -1446,37 +1446,6 @@ fn a_turn_that_ends_waiting_on_a_helper_holds_the_delivery() {
             )) && line.starts_with("reply: ")
                 && line.contains(&format!(r#""attempt_id":"{attempt}""#))
         };
-        // The agent going idle settles the attempt's state without a
-        // disposition, as reconciliation does, so the mailbox moves on.
-        StateStore::open(&space.directory.state)
-            .unwrap()
-            .transaction(|transaction| {
-                transaction.transition_delivery_attempt(
-                    &namespace(),
-                    &namedrop::DeliveryAttemptId::new(&attempt),
-                    namedrop::DeliveryState::Settled,
-                    &MutationAttribution::new(ActorKind::Plugin, "test", 42),
-                )
-            })
-            .unwrap();
-        let helper = space.herdr.envelope_for("pane-lead");
-        dispatch::message(
-            "reply",
-            bound_reply(&space, &helper, "@reviewer Yes, it is safe."),
-            &space.runtime("pane-lead"),
-        )
-        .unwrap();
-        let answer = space.herdr.envelope_for("pane-reviewer");
-        assert_eq!(answer["untrusted_body"], "Yes, it is safe.");
-        let turn = ("prompt_id", "answer-turn");
-        let context = space.prompt(
-            "pane-reviewer",
-            "session-reviewer",
-            turn,
-            &answer.to_string(),
-        );
-        assert!(way_back(&context), "{context}");
-        space.stop("session-reviewer", turn, "The lead says option B is safe.");
         let typed = space.prompt(
             "pane-reviewer",
             "session-reviewer",
@@ -1521,6 +1490,949 @@ fn a_turn_that_ends_waiting_on_a_helper_holds_the_delivery() {
     space.stop_with("session-reviewer", CLAUDE, "The build is running.", true);
     assert!(space.relayed().is_empty());
     assert_eq!(space.claims()[0]["state"], json!({"left":"held"}));
+}
+
+impl Space {
+    /// The person asks the reviewer, the reviewer asks the lead, and its turn
+    /// ends with a status: the person's delivery is held. Then the lead
+    /// answers. Returns the person's message, its delivery, and the lead's
+    /// answer as the reviewer's next delivery.
+    fn held_on_the_lead(&self) -> (Value, Value, Value) {
+        let question = self.send_as_person(
+            "question",
+            "@reviewer Is option B safe? Ask the lead.",
+            None,
+        );
+        let ask = self.herdr.envelope_for("pane-reviewer");
+        let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
+        self.prompt(
+            "pane-reviewer",
+            "session-reviewer",
+            CLAUDE,
+            &ask.to_string(),
+        );
+        dispatch::message(
+            "send",
+            json!({"request_id":"helper","source":"@lead Is option B safe?",
+                   "author_kind":"agent_session"}),
+            &self.runtime("pane-reviewer"),
+        )
+        .unwrap();
+        self.stop(
+            "session-reviewer",
+            CLAUDE,
+            "I asked @lead and will answer when it replies.",
+        );
+        assert_eq!(self.claims()[0]["state"], json!({"left":"held"}));
+        // The agent going idle settles the attempt without a disposition, as
+        // reconciliation does, so the mailbox moves on to the lead's answer.
+        StateStore::open(&self.directory.state)
+            .unwrap()
+            .transaction(|transaction| {
+                transaction.transition_delivery_attempt(
+                    &namespace(),
+                    &namedrop::DeliveryAttemptId::new(&attempt),
+                    namedrop::DeliveryState::Settled,
+                    &MutationAttribution::new(ActorKind::Plugin, "test", 42),
+                )
+            })
+            .unwrap();
+        let helper = self.herdr.envelope_for("pane-lead");
+        dispatch::message(
+            "reply",
+            bound_reply(self, &helper, "@reviewer Yes, it is safe."),
+            &self.runtime("pane-lead"),
+        )
+        .unwrap();
+        let answer = self.herdr.envelope_for("pane-reviewer");
+        assert_eq!(answer["untrusted_body"], "Yes, it is safe.");
+        (question, ask, answer)
+    }
+
+    /// The person's thread as the reviewer answered it, without its notes.
+    fn reviewer_posts(&self, question: &Value) -> Vec<Vec<String>> {
+        self.rows(&format!(
+            "SELECT message_id, in_reply_to, body FROM collaboration_messages
+             WHERE thread_id = '{}' AND author_address_id = 'address-reviewer'
+               AND message_id NOT LIKE 'progress-note:%' ORDER BY created_at_ms, rowid",
+            question["thread_id"].as_str().unwrap()
+        ))
+    }
+
+    /// The context of a prompt the person types into the reviewer's pane.
+    fn typed_context(&self, turn: &str, prompt: &str) -> String {
+        execute_user_prompt_submit_hook(
+            &json!({"hook_event_name":"UserPromptSubmit","session_id":"session-reviewer",
+                    "prompt_id":turn,"prompt":prompt})
+            .to_string(),
+            &self.runtime("pane-reviewer"),
+        )
+        .and_then(|output| {
+            output["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .map(str::to_owned)
+        })
+        .unwrap_or_default()
+    }
+}
+
+/// The helper's answer starts the turn whose final message is the held
+/// answer, as a background task's notice does: Namedrop sends that final
+/// message to the person's thread and closes the helper's answer without a
+/// reply. An agent that runs the reply line instead still answers once. A
+/// turn that ends with no final message warns the person, and the way back
+/// shows again. Nothing ends held and silent once the helper has answered.
+#[test]
+fn the_turn_a_helpers_answer_starts_answers_the_held_delivery() {
+    for runs_the_line in [false, true] {
+        let space = Space::new();
+        let (question, ask, answer) = space.held_on_the_lead();
+        let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
+        let answer_attempt = answer["control"]["attempt_id"].as_str().unwrap();
+        let turn = ("prompt_id", "answer-turn");
+        let context = space.prompt(
+            "pane-reviewer",
+            "session-reviewer",
+            turn,
+            &answer.to_string(),
+        );
+        assert!(!context.contains("is still open"), "{context}");
+        assert!(
+            context.contains(&format!(
+                "your final message is your answer to delivery {attempt}"
+            )),
+            "{context}"
+        );
+        if runs_the_line {
+            dispatch::message(
+                "reply",
+                bound_reply(&space, &ask, "@operator The lead says option B is safe."),
+                &space.runtime("pane-reviewer"),
+            )
+            .unwrap();
+        }
+        space.stop("session-reviewer", turn, "The lead says option B is safe.");
+        let posts = space.reviewer_posts(&question);
+        assert_eq!(posts.len(), 1, "{runs_the_line}: {posts:?}");
+        assert_eq!(posts[0][1], question["message_id"].as_str().unwrap());
+        assert_eq!(posts[0][2], "The lead says option B is safe.");
+        let held_and_answer: Vec<_> = space
+            .dispositions()
+            .into_iter()
+            .filter(|row| row[0] == attempt || row[0] == answer_attempt)
+            .collect();
+        let held_kind = if runs_the_line { "reply" } else { "no_reply" };
+        assert_eq!(
+            held_and_answer,
+            [
+                vec![attempt.clone(), held_kind.to_owned()],
+                vec![answer_attempt.to_owned(), "no_reply".to_owned()],
+            ],
+            "{runs_the_line}"
+        );
+        assert!(space.unresolved_disposition_warnings().is_empty());
+        let typed = space.typed_context("typed-turn", "Thanks.");
+        assert!(!typed.contains("is still open"), "{typed}");
+    }
+
+    // The answer's turn ends with no final message, or is interrupted and
+    // never stops: the person is warned, and the way back shows again.
+    for stops in [true, false] {
+        let space = Space::new();
+        let (question, ask, answer) = space.held_on_the_lead();
+        let attempt = ask["control"]["attempt_id"].as_str().unwrap();
+        let turn = ("prompt_id", "answer-turn");
+        space.prompt(
+            "pane-reviewer",
+            "session-reviewer",
+            turn,
+            &answer.to_string(),
+        );
+        if stops {
+            space.stop("session-reviewer", turn, "  ");
+        }
+        let typed = space.typed_context("typed-turn", "Did you hear back?");
+        assert!(space.reviewer_posts(&question).is_empty());
+        let warned = space.rows(&format!(
+            "SELECT summary FROM attention_items WHERE source_kind = 'agent_disposition'
+               AND source_id = '{attempt}' AND resolved_at_ms IS NULL"
+        ));
+        assert_eq!(
+            warned.len(),
+            1,
+            "{stops}: a held answer whose turn came and went without it warns"
+        );
+        assert!(
+            typed.contains(&format!(
+                "Namedrop: delivery {attempt} from an earlier turn is still open"
+            )),
+            "{stops}: {typed}"
+        );
+    }
+}
+
+impl Space {
+    /// `pane`'s runtime at `now_ms`, for a test in which the order of the
+    /// messages matters.
+    fn pane_at<'a>(
+        &'a self,
+        pane: &'a str,
+        clock: &'a At,
+    ) -> LifecycleRuntime<'a, FakeMux, At, SequenceIds> {
+        LifecycleRuntime {
+            current_pane_id: Some(pane),
+            ..self.runtime_at(clock)
+        }
+    }
+
+    /// The person asks the reviewer at `now_ms`, and the reviewer's turn asks
+    /// the lead and ends with a status: the person's delivery is held, and
+    /// its attempt settles as the pane goes idle. Returns the person's message
+    /// and the held attempt.
+    fn held_at(&self, now_ms: u64, question: &str) -> (Value, String) {
+        self.held_on_at(now_ms, question, &[question])
+    }
+
+    /// As `held_at`, with the turn asking the lead each of `requests`.
+    fn held_on_at(&self, now_ms: u64, question: &str, requests: &[&str]) -> (Value, String) {
+        let clock = At(now_ms);
+        let mut runtime = self.pane_at("pane-lead", &clock);
+        runtime.current_pane_id = None;
+        runtime.workspace_id = Some("workspace-1");
+        let asked = send_operator_message(
+            &format!("person-{now_ms}"),
+            &format!("@reviewer {question} Ask the lead."),
+            None,
+            &runtime,
+        )
+        .unwrap();
+        dispatch::wake(&runtime);
+        let ask = self.herdr.envelope_for("pane-reviewer");
+        let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
+        let turn = format!("turn-{now_ms}");
+        self.reviewer_prompt_at(now_ms + 10, &turn, &ask.to_string());
+        for (at, request) in (now_ms + 20..).zip(requests) {
+            self.reviewer_sends_at(at, &format!("@lead {request}"));
+        }
+        self.reviewer_stop_at(
+            now_ms + 30,
+            &turn,
+            "I asked @lead and will answer when it replies.",
+        );
+        self.settle_attempt_at(&attempt, now_ms + 31);
+        (asked, attempt)
+    }
+
+    /// The context of a reviewer's prompt at `now_ms`.
+    fn reviewer_prompt_at(&self, now_ms: u64, turn: &str, prompt: &str) -> String {
+        let input = json!({"hook_event_name":"UserPromptSubmit","prompt":self.as_typed(prompt),
+                           "session_id":"session-reviewer","prompt_id":turn});
+        execute_user_prompt_submit_hook(
+            &input.to_string(),
+            &self.pane_at("pane-reviewer", &At(now_ms)),
+        )
+        .and_then(|output| {
+            output["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .map(str::to_owned)
+        })
+        .unwrap_or_default()
+    }
+
+    fn reviewer_stop_at(&self, now_ms: u64, turn: &str, text: &str) {
+        let stop = stop_facts("session-reviewer", ("prompt_id", turn), text, false);
+        settle_at_stop(
+            &self.directory.state,
+            "socket-a",
+            &stop,
+            now_ms,
+            &mut |bound| self.run(bound),
+        );
+    }
+
+    /// A request the reviewer sends at `now_ms`, with a new `send`.
+    fn reviewer_sends_at(&self, now_ms: u64, source: &str) {
+        dispatch::message(
+            "send",
+            json!({"request_id":format!("reviewer-{now_ms}"),"source":source,
+                   "author_kind":"agent_session"}),
+            &self.pane_at("pane-reviewer", &At(now_ms)),
+        )
+        .unwrap();
+    }
+
+    fn settle_attempt_at(&self, attempt: &str, now_ms: u64) {
+        StateStore::open(&self.directory.state)
+            .unwrap()
+            .transaction(|transaction| {
+                transaction.transition_delivery_attempt(
+                    &namespace(),
+                    &namedrop::DeliveryAttemptId::new(attempt),
+                    namedrop::DeliveryState::Settled,
+                    &MutationAttribution::new(ActorKind::Plugin, "test", now_ms),
+                )
+            })
+            .unwrap();
+    }
+
+    /// The lead answers the request its pane holds now, which asked `asked`.
+    /// Returns that answer as the reviewer's next delivery.
+    fn lead_answers_at(&self, now_ms: u64, asked: &str, answer: &str) -> Value {
+        let helper = self.herdr.envelope_for("pane-lead");
+        assert_eq!(
+            helper["untrusted_body"], asked,
+            "the lead's current request"
+        );
+        dispatch::message(
+            "reply",
+            bound_reply(self, &helper, &format!("@reviewer {answer}")),
+            &self.pane_at("pane-lead", &At(now_ms)),
+        )
+        .unwrap();
+        let delivered = self.herdr.envelope_for("pane-reviewer");
+        assert_eq!(delivered["untrusted_body"], answer);
+        delivered
+    }
+
+    /// Herdr shows the reviewer's agent working on a turn, or idle again.
+    fn reviewer_working(&self, working: bool) {
+        let state = if working {
+            AgentState::Working
+        } else {
+            AgentState::Idle
+        };
+        self.herdr.space.set_state("pane-reviewer", state);
+    }
+
+    /// The summaries of the open ND-DELIVERY-003 warnings on `attempt`.
+    fn warnings_on(&self, attempt: &str) -> Vec<String> {
+        self.rows(&format!(
+            "SELECT summary FROM attention_items WHERE source_kind = 'agent_disposition'
+               AND source_id = '{attempt}' AND resolved_at_ms IS NULL"
+        ))
+        .into_iter()
+        .map(|row| row[0].clone())
+        .collect()
+    }
+
+    /// Rewrites the claims on `attempts` as an older build left them: with
+    /// no requests recorded.
+    fn as_older_build(&self, attempts: &[&str]) {
+        let mut claims: Value =
+            serde_json::from_slice(&fs::read(self.claims_file()).unwrap()).unwrap();
+        for claim in claims.as_array_mut().unwrap() {
+            if attempts.contains(&claim["attempt_id"].as_str().unwrap()) {
+                let claim = claim.as_object_mut().unwrap();
+                claim.remove("helpers");
+                claim.remove("answered_turn");
+            }
+        }
+        fs::write(self.claims_file(), claims.to_string()).unwrap();
+    }
+
+    /// The answers in the person's thread, without the progress notes.
+    fn answers_to(&self, question: &Value) -> Vec<String> {
+        self.reviewer_posts(question)
+            .into_iter()
+            .map(|row| row[2].clone())
+            .collect()
+    }
+
+    /// The stage Channels draws on the reviewer's arrow of `question`.
+    fn question_leg(&self, question: &Value) -> String {
+        let rows = StateStore::open(&self.directory.state)
+            .unwrap()
+            .dashboard_rows(&namespace())
+            .unwrap();
+        let snapshot = serde_json::to_value(namedrop::dashboard::snapshot::build(
+            &rows,
+            Some("namedrop/dashboard"),
+            1,
+        ))
+        .unwrap();
+        snapshot["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["message_id"] == question["message_id"])
+            .unwrap()["legs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|leg| leg["to"] == "address-reviewer")
+            .unwrap()["stage"]["stage"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+}
+
+fn woken_for(attempt: &str) -> String {
+    format!("your final message is your answer to delivery {attempt}")
+}
+
+/// The person asks two questions, and the reviewer holds each on its own
+/// request to the lead. Each of the lead's answers wakes the delivery that
+/// waited on it, and lands once, in that delivery's thread: a request the
+/// later question's turn sent is not one the earlier question waits on.
+#[test]
+fn two_holds_on_one_helper_each_take_their_own_answer() {
+    let space = Space::new();
+    let (first, first_attempt) = space.held_at(100, "Question one?");
+    let (second, second_attempt) = space.held_at(200, "Question two?");
+    assert_ne!(first["thread_id"], second["thread_id"]);
+
+    let answer = space.lead_answers_at(300, "Question one?", "One is yes.");
+    let context = space.reviewer_prompt_at(310, "answer-1", &answer.to_string());
+    assert!(context.contains(&woken_for(&first_attempt)), "{context}");
+    space.reviewer_stop_at(320, "answer-1", "ANSWER-ONE: yes.");
+    assert_eq!(space.answers_to(&first), ["ANSWER-ONE: yes."]);
+
+    let answer = space.lead_answers_at(400, "Question two?", "Two is no.");
+    let context = space.reviewer_prompt_at(410, "answer-2", &answer.to_string());
+    assert!(context.contains(&woken_for(&second_attempt)), "{context}");
+    assert!(!context.contains("is still open"), "{context}");
+    space.reviewer_stop_at(420, "answer-2", "ANSWER-TWO: no.");
+    assert_eq!(space.answers_to(&first), ["ANSWER-ONE: yes."]);
+    assert_eq!(space.answers_to(&second), ["ANSWER-TWO: no."]);
+    assert!(
+        space
+            .claims()
+            .iter()
+            .all(|claim| claim["state"] != json!({"left":"held"})),
+        "{:?}",
+        space.claims()
+    );
+    assert!(space.unresolved_disposition_warnings().is_empty());
+}
+
+/// The person types a task into the held pane, and its turn asks the lead
+/// something else. That request is the typed turn's: it neither holds the
+/// delivery again when the held question's answer arrives, nor answers it
+/// when its own answer does.
+#[test]
+fn a_request_a_typed_turn_sent_is_not_the_held_deliverys() {
+    let space = Space::new();
+    let (question, attempt) = space.held_at(100, "Question one?");
+    space.reviewer_prompt_at(200, "typed-task", "Also check the deploy with the lead.");
+    space.reviewer_sends_at(210, "@lead Is the deploy green?");
+    space.reviewer_stop_at(220, "typed-task", "Asked the lead about the deploy.");
+
+    let answer = space.lead_answers_at(300, "Question one?", "One is yes.");
+    let context = space.reviewer_prompt_at(310, "answer-1", &answer.to_string());
+    assert!(context.contains(&woken_for(&attempt)), "{context}");
+    space.reviewer_stop_at(320, "answer-1", "ANSWER-ONE: yes.");
+    assert_eq!(space.answers_to(&question), ["ANSWER-ONE: yes."]);
+
+    let answer = space.lead_answers_at(400, "Is the deploy green?", "Deploy is green.");
+    let context = space.reviewer_prompt_at(410, "answer-2", &answer.to_string());
+    assert!(!context.contains(&woken_for(&attempt)), "{context}");
+    space.reviewer_stop_at(420, "answer-2", "DEPLOY: green.");
+    assert_eq!(space.answers_to(&question), ["ANSWER-ONE: yes."]);
+    assert!(space.unresolved_disposition_warnings().is_empty());
+}
+
+/// The turn the lead's answer starts asks it a follow-up and ends waiting
+/// again: the delivery is held again on that request, and its answer wakes
+/// it. A request the person's typed turn sent in between changes neither.
+#[test]
+fn a_turn_the_answer_starts_can_ask_again_and_hold_until_that_is_answered() {
+    for typed_request_between in [false, true] {
+        let space = Space::new();
+        let (question, attempt) = space.held_at(100, "Question one?");
+        if typed_request_between {
+            space.reviewer_prompt_at(200, "typed-task", "Also check the deploy with the lead.");
+            space.reviewer_sends_at(210, "@lead Is the deploy green?");
+            space.reviewer_stop_at(220, "typed-task", "Asked the lead about the deploy.");
+        }
+        let answer = space.lead_answers_at(300, "Question one?", "It depends on X.");
+        let context = space.reviewer_prompt_at(310, "answer-1", &answer.to_string());
+        assert!(
+            context.contains(&woken_for(&attempt)),
+            "{typed_request_between}: {context}"
+        );
+        space.reviewer_sends_at(315, "@lead And what is X?");
+        space.reviewer_stop_at(320, "answer-1", "Asked a follow-up.");
+        assert_eq!(
+            space.claims()[0]["state"],
+            json!({"left":"held"}),
+            "{typed_request_between}"
+        );
+        assert!(
+            space.answers_to(&question).is_empty(),
+            "{typed_request_between}"
+        );
+        if typed_request_between {
+            let answer = space.lead_answers_at(350, "Is the deploy green?", "Deploy is green.");
+            let context = space.reviewer_prompt_at(355, "deploy", &answer.to_string());
+            assert!(!context.contains(&woken_for(&attempt)), "{context}");
+            assert!(
+                context.contains(&format!(
+                    "delivery {attempt} from an earlier turn is still open"
+                )),
+                "{context}"
+            );
+            space.reviewer_stop_at(360, "deploy", "DEPLOY: green.");
+            assert!(space.answers_to(&question).is_empty());
+        }
+        let answer = space.lead_answers_at(400, "And what is X?", "X is 4.");
+        let context = space.reviewer_prompt_at(410, "answer-2", &answer.to_string());
+        assert!(
+            context.contains(&woken_for(&attempt)),
+            "{typed_request_between}: {context}"
+        );
+        space.reviewer_stop_at(420, "answer-2", "FINAL: yes, since X is 4.");
+        assert_eq!(
+            space.answers_to(&question),
+            ["FINAL: yes, since X is 4."],
+            "{typed_request_between}"
+        );
+        assert!(space.unresolved_disposition_warnings().is_empty());
+    }
+}
+
+/// A delivery an older build held on a helper records no requests. After
+/// the update, the helper's answer still starts the turn whose final
+/// message answers it.
+#[test]
+fn a_hold_an_older_build_left_takes_its_helpers_answer_after_the_update() {
+    let space = Space::new();
+    let (question, ask, answer) = space.held_on_the_lead();
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap();
+    space.as_older_build(&[attempt]);
+    let turn = ("prompt_id", "answer-turn");
+    let context = space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        turn,
+        &answer.to_string(),
+    );
+    assert!(context.contains(&woken_for(attempt)), "{context}");
+    assert!(!context.contains("is still open"), "{context}");
+    space.stop("session-reviewer", turn, "The lead says option B is safe.");
+    assert_eq!(
+        space.answers_to(&question),
+        ["The lead says option B is safe."]
+    );
+    assert!(space.unresolved_disposition_warnings().is_empty());
+}
+
+/// An older build's hold takes only the answer to a request its own turn
+/// sent. The lead first answers a request the session sent before the hold:
+/// that answer's turn is for the person, and the hold's own answer still
+/// lands in its thread.
+#[test]
+fn an_older_hold_ignores_the_answer_to_a_request_sent_before_it() {
+    let space = Space::new();
+    space.reviewer_prompt_at(50, "typed-task", "Check the deploy with the lead.");
+    space.reviewer_sends_at(60, "@lead Is the deploy green?");
+    space.reviewer_stop_at(70, "typed-task", "Asked the lead about the deploy.");
+    let (question, attempt) = space.held_at(100, "Question one?");
+    space.as_older_build(&[&attempt]);
+
+    let answer = space.lead_answers_at(300, "Is the deploy green?", "Deploy is green.");
+    let context = space.reviewer_prompt_at(310, "answer-deploy", &answer.to_string());
+    assert!(!context.contains(&woken_for(&attempt)), "{context}");
+    assert!(
+        context.contains(&format!(
+            "delivery {attempt} from an earlier turn is still open"
+        )),
+        "{context}"
+    );
+    space.reviewer_stop_at(320, "answer-deploy", "DEPLOY: green.");
+    assert!(space.answers_to(&question).is_empty());
+
+    let answer = space.lead_answers_at(400, "Question one?", "One is yes.");
+    let context = space.reviewer_prompt_at(410, "answer-one", &answer.to_string());
+    assert!(context.contains(&woken_for(&attempt)), "{context}");
+    space.reviewer_stop_at(420, "answer-one", "ANSWER-ONE: yes.");
+    assert_eq!(space.answers_to(&question), ["ANSWER-ONE: yes."]);
+}
+
+/// A hold 1.11 left behind: its helper answered under that build, which
+/// dropped the answer's final message and kept the delivery held. Hours
+/// after the update, a turn the person types asks the lead something else:
+/// that answer is not the stale hold's, and its thread gets nothing.
+#[test]
+fn a_hold_an_older_build_left_stale_ignores_a_later_turns_request() {
+    let space = Space::new();
+    let (question, attempt) = space.held_at(100, "Question one?");
+    // The older build's turn for the answer saw no hold of this build's, so
+    // its final message reached only the pane.
+    let file = space.claims_file();
+    let stale = fs::read(&file).unwrap();
+    fs::remove_file(&file).unwrap();
+    let answer = space.lead_answers_at(200, "Question one?", "One is yes.");
+    space.reviewer_prompt_at(210, "old-answer", &answer.to_string());
+    space.reviewer_stop_at(220, "old-answer", "ANSWER-ONE: yes.");
+    assert!(space.answers_to(&question).is_empty());
+    let mut claims: Value = serde_json::from_slice(&stale).unwrap();
+    let later: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    claims
+        .as_array_mut()
+        .unwrap()
+        .extend(later.as_array().unwrap().iter().cloned());
+    fs::write(&file, claims.to_string()).unwrap();
+    space.as_older_build(&[&attempt]);
+
+    let hours = 3 * 3_600_000;
+    space.reviewer_prompt_at(hours, "typed-task", "Check the deploy with the lead.");
+    space.reviewer_sends_at(hours + 10, "@lead Is the deploy green?");
+    space.reviewer_stop_at(hours + 20, "typed-task", "Asked the lead about the deploy.");
+    let answer = space.lead_answers_at(hours + 100, "Is the deploy green?", "Deploy is green.");
+    let context = space.reviewer_prompt_at(hours + 110, "answer-deploy", &answer.to_string());
+    assert!(!context.contains(&woken_for(&attempt)), "{context}");
+    space.reviewer_stop_at(hours + 120, "answer-deploy", "DEPLOY: green.");
+    assert!(
+        space.answers_to(&question).is_empty(),
+        "{:?}",
+        space.answers_to(&question)
+    );
+}
+
+/// Two holds an older build left, each on its own request to the lead,
+/// answered in the other order: each answer lands in its own question's
+/// thread.
+#[test]
+fn two_older_holds_each_take_their_own_answer_in_either_order() {
+    let space = Space::new();
+    let (first, first_attempt) = space.held_at(100, "Question one?");
+    let (second, second_attempt) = space.held_at(200, "Question two?");
+    space.as_older_build(&[&first_attempt, &second_attempt]);
+    // The lead's turn on the first request ends with no reply yet, and its
+    // mailbox moves on to the second.
+    let asked_first = space.herdr.envelope_for("pane-lead");
+    assert_eq!(asked_first["untrusted_body"], "Question one?");
+    space.settle_attempt_at(asked_first["control"]["attempt_id"].as_str().unwrap(), 250);
+    dispatch::wake(&space.pane_at("pane-lead", &At(260)));
+
+    let answer = space.lead_answers_at(300, "Question two?", "Two is no.");
+    let context = space.reviewer_prompt_at(310, "answer-2", &answer.to_string());
+    assert!(context.contains(&woken_for(&second_attempt)), "{context}");
+    space.reviewer_stop_at(320, "answer-2", "ANSWER-TWO: no.");
+    assert!(space.answers_to(&first).is_empty());
+    assert_eq!(space.answers_to(&second), ["ANSWER-TWO: no."]);
+
+    dispatch::message(
+        "reply",
+        bound_reply(&space, &asked_first, "@reviewer One is yes."),
+        &space.pane_at("pane-lead", &At(400)),
+    )
+    .unwrap();
+    let answer = space.herdr.envelope_for("pane-reviewer");
+    assert_eq!(answer["untrusted_body"], "One is yes.");
+    let context = space.reviewer_prompt_at(410, "answer-1", &answer.to_string());
+    assert!(context.contains(&woken_for(&first_attempt)), "{context}");
+    space.reviewer_stop_at(420, "answer-1", "ANSWER-ONE: yes.");
+    assert_eq!(space.answers_to(&first), ["ANSWER-ONE: yes."]);
+    assert_eq!(space.answers_to(&second), ["ANSWER-TWO: no."]);
+}
+
+/// The turn that held the delivery asked the lead two things. The first
+/// answer's turn ends with the second still unanswered, so it holds the
+/// delivery again, and the second answer's turn answers it.
+#[test]
+fn a_hold_on_two_requests_waits_for_both_answers() {
+    let space = Space::new();
+    let (question, attempt) = space.held_on_at(100, "Two questions?", &["First?", "Second?"]);
+    let answer = space.lead_answers_at(300, "First?", "One is yes.");
+    let context = space.reviewer_prompt_at(310, "answer-1", &answer.to_string());
+    assert!(context.contains(&woken_for(&attempt)), "{context}");
+    space.reviewer_stop_at(320, "answer-1", "One is yes; still waiting on the second.");
+    assert_eq!(space.claims()[0]["state"], json!({"left":"held"}));
+    assert!(space.answers_to(&question).is_empty());
+    let answer = space.lead_answers_at(400, "Second?", "Two is no.");
+    let context = space.reviewer_prompt_at(410, "answer-2", &answer.to_string());
+    assert!(context.contains(&woken_for(&attempt)), "{context}");
+    space.reviewer_stop_at(420, "answer-2", "BOTH: yes, then no.");
+    assert_eq!(space.answers_to(&question), ["BOTH: yes, then no."]);
+    assert!(space.unresolved_disposition_warnings().is_empty());
+}
+
+/// A delivery held on background work records its task, not a request, so
+/// the answer to a request the session sends later is not its answer: only
+/// that work's notice wakes it, and the answer's prompt shows its way back.
+#[test]
+fn an_answer_wakes_no_hold_on_background_work() {
+    let space = Space::new();
+    let ask = space.held_on_first_task();
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap();
+    space.settle_attempt(&ask);
+    dispatch::message(
+        "send",
+        json!({"request_id":"later","source":"@lead Is the deploy green?",
+               "author_kind":"agent_session"}),
+        &space.runtime("pane-reviewer"),
+    )
+    .unwrap();
+    let helper = space.herdr.envelope_for("pane-lead");
+    assert_eq!(helper["untrusted_body"], "Is the deploy green?");
+    dispatch::message(
+        "reply",
+        bound_reply(&space, &helper, "@reviewer Deploy is green."),
+        &space.runtime("pane-lead"),
+    )
+    .unwrap();
+    let answer = space.herdr.envelope_for("pane-reviewer");
+    assert_eq!(answer["untrusted_body"], "Deploy is green.");
+    let context = space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        ("prompt_id", "answer-turn"),
+        &answer.to_string(),
+    );
+    assert!(!context.contains(&woken_for(attempt)), "{context}");
+    assert!(
+        context.contains(&format!(
+            "delivery {attempt} from an earlier turn is still open"
+        )),
+        "{context}"
+    );
+    space.stop(
+        "session-reviewer",
+        ("prompt_id", "answer-turn"),
+        "Deploy is green.",
+    );
+    assert_eq!(space.claims()[0]["state"], json!({"left":"held"}));
+}
+
+/// The lead's answer reaches a turn that is about another delivery, so its
+/// final message can't also be the held one's answer: that delivery's way
+/// back shows, and it stays held.
+#[test]
+fn an_answer_queued_into_a_turn_about_another_delivery_wakes_nothing() {
+    let space = Space::new();
+    let (question, attempt) = space.held_at(100, "Question one?");
+    let clock = At(200);
+    let mut runtime = space.pane_at("pane-lead", &clock);
+    runtime.current_pane_id = None;
+    runtime.workspace_id = Some("workspace-1");
+    let other =
+        send_operator_message("person-other", "@reviewer Question two?", None, &runtime).unwrap();
+    dispatch::wake(&runtime);
+    let ask = space.herdr.envelope_for("pane-reviewer");
+    space.reviewer_prompt_at(210, "turn-b", &ask.to_string());
+    space.settle_attempt_at(ask["control"]["attempt_id"].as_str().unwrap(), 211);
+
+    let answer = space.lead_answers_at(300, "Question one?", "One is yes.");
+    let context = space.reviewer_prompt_at(310, "turn-b", &answer.to_string());
+    assert!(!context.contains(&woken_for(&attempt)), "{context}");
+    assert!(
+        context.contains(&format!(
+            "delivery {attempt} from an earlier turn is still open"
+        )),
+        "{context}"
+    );
+    space.reviewer_stop_at(320, "turn-b", "Two is fine. And one is yes.");
+    assert_eq!(space.answers_to(&other), ["Two is fine. And one is yes."]);
+    assert!(space.answers_to(&question).is_empty());
+    let held = space
+        .claims()
+        .into_iter()
+        .find(|claim| claim["attempt_id"] == attempt)
+        .unwrap();
+    assert_eq!(held["state"], json!({"left":"held"}));
+}
+
+/// The turn the lead's answer starts is interrupted with Esc, or ended by an
+/// API error, and never stops. Once its pane has sat idle past the Stop's
+/// grace, the person is told the held delivery went unanswered, with no later
+/// prompt needed, and Channels stops showing it as still being worked on.
+#[test]
+fn an_answer_turn_that_never_stops_warns_about_the_held_delivery() {
+    let space = Space::new();
+    let (question, ask, answer) = space.held_on_the_lead();
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap();
+    let turn = ("prompt_id", "answer-turn");
+    space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        turn,
+        &answer.to_string(),
+    );
+    let warned = || {
+        space.rows(&format!(
+            "SELECT summary FROM attention_items WHERE source_kind = 'agent_disposition'
+               AND source_id = '{attempt}' AND resolved_at_ms IS NULL"
+        ))
+    };
+    let due = space.observe_at(IDLE);
+    assert!(
+        warned().is_empty(),
+        "warned before a racing Stop could arrive"
+    );
+    assert_eq!(due, Some(IDLE + STOP_ARRIVAL_GRACE_MS));
+    assert_eq!(space.question_leg(&question), "working");
+    space.observe_at(IDLE + STOP_ARRIVAL_GRACE_MS);
+    let warnings = warned();
+    assert_eq!(
+        warnings.len(),
+        1,
+        "a held answer lost with its turn warned nothing"
+    );
+    assert!(
+        warnings[0][0].contains("ended its turn without a reply"),
+        "{warnings:?}"
+    );
+    assert_ne!(space.question_leg(&question), "working");
+    assert!(space.answers_to(&question).is_empty());
+}
+
+/// The turn the lead's answer starts replies to the lead with the line its
+/// text offers, and works on. That reply settles the answer's attempt, but
+/// the turn is not over: nothing warns while its pane works, and its Stop
+/// answers the held delivery. Interrupted instead, it warns once its pane
+/// has sat idle past the Stop's grace.
+#[test]
+fn a_reply_to_the_helper_while_the_answer_turn_runs_warns_nothing() {
+    for interrupted in [false, true] {
+        let space = Space::new();
+        let (question, ask, answer) = space.held_on_the_lead();
+        let attempt = ask["control"]["attempt_id"].as_str().unwrap();
+        let answer_attempt = answer["control"]["attempt_id"].as_str().unwrap();
+        space.reviewer_working(true);
+        let context = space.reviewer_prompt_at(100_000, "answer-turn", &answer.to_string());
+        assert!(context.contains(&woken_for(attempt)), "{context}");
+        dispatch::message(
+            "reply",
+            bound_reply(&space, &answer, "@lead Thanks, that settles it."),
+            &space.pane_at("pane-reviewer", &At(102_000)),
+        )
+        .unwrap();
+        space.observe_at(102_500);
+        space.observe_at(102_000 + STOP_ARRIVAL_GRACE_MS + 1_000);
+        space.observe_at(102_000 + STOPPED_GRACE_MS + 1_000);
+        assert_eq!(space.warnings_on(attempt), Vec::<String>::new());
+        assert_eq!(space.question_leg(&question), "working");
+        if interrupted {
+            space.reviewer_working(false);
+            let due = space.observe_at(200_000);
+            assert_eq!(space.warnings_on(attempt), Vec::<String>::new());
+            assert_eq!(due, Some(200_000 + STOP_ARRIVAL_GRACE_MS));
+            space.observe_at(200_000 + STOP_ARRIVAL_GRACE_MS);
+            let warnings = space.warnings_on(attempt);
+            assert_eq!(warnings.len(), 1, "{warnings:?}");
+            assert!(
+                warnings[0].contains("ended its turn without a reply"),
+                "{warnings:?}"
+            );
+            assert!(space.answers_to(&question).is_empty());
+        } else {
+            space.reviewer_stop_at(200_000, "answer-turn", "FINAL: option B is safe.");
+            space.reviewer_working(false);
+            space.observe_at(200_500);
+            assert_eq!(space.answers_to(&question), ["FINAL: option B is safe."]);
+            // The lead never settles the reply it got, so only the reviewer's
+            // deliveries count here.
+            assert_eq!(space.warnings_on(attempt), Vec::<String>::new());
+            assert_eq!(space.warnings_on(answer_attempt), Vec::<String>::new());
+        }
+    }
+}
+
+/// The turn the lead's answer starts replies to the lead, asks it a
+/// follow-up, and ends waiting: the delivery is held again, with no warning
+/// for the whole second hold, and the follow-up's answer answers it.
+#[test]
+fn a_turn_that_replies_to_the_helper_and_asks_again_holds_without_a_warning() {
+    let space = Space::new();
+    let (question, ask, answer) = space.held_on_the_lead();
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap();
+    space.reviewer_working(true);
+    space.reviewer_prompt_at(100_000, "answer-turn", &answer.to_string());
+    dispatch::message(
+        "reply",
+        bound_reply(&space, &answer, "@lead Thanks. One more question coming."),
+        &space.pane_at("pane-reviewer", &At(102_000)),
+    )
+    .unwrap();
+    space.reviewer_sends_at(103_000, "@lead And what about option C?");
+    space.observe_at(108_000);
+    space.reviewer_stop_at(120_000, "answer-turn", "Asked a follow-up; waiting.");
+    space.reviewer_working(false);
+    assert_eq!(space.claims()[0]["state"], json!({"left":"held"}));
+    space.observe_at(121_000);
+    space.observe_at(3_700_000);
+    assert_eq!(space.warnings_on(attempt), Vec::<String>::new());
+    assert_eq!(space.question_leg(&question), "working");
+
+    let answer = space.lead_answers_at(3_800_000, "And what about option C?", "C is unsafe.");
+    let context = space.reviewer_prompt_at(3_800_100, "answer-2", &answer.to_string());
+    assert!(context.contains(&woken_for(attempt)), "{context}");
+    space.reviewer_stop_at(3_800_200, "answer-2", "FINAL: B is safe, C is not.");
+    assert_eq!(space.answers_to(&question), ["FINAL: B is safe, C is not."]);
+    assert_eq!(space.warnings_on(attempt), Vec::<String>::new());
+}
+
+/// The turn the lead's answer starts sits idle with no Stop past the grace,
+/// so the person is warned. Then its Stop arrives after all and holds the
+/// delivery again on a follow-up: the warning goes, and Channels shows the
+/// delivery held again.
+#[test]
+fn a_late_stop_that_holds_the_answer_again_withdraws_its_warning() {
+    let space = Space::new();
+    let (question, ask, answer) = space.held_on_the_lead();
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap();
+    space.reviewer_prompt_at(1_000, "answer-turn", &answer.to_string());
+    space.reviewer_sends_at(2_000, "@lead And what about option C?");
+    space.observe_at(IDLE);
+    space.observe_at(IDLE + STOP_ARRIVAL_GRACE_MS);
+    assert_eq!(space.warnings_on(attempt).len(), 1);
+    space.reviewer_stop_at(IDLE + 20_000, "answer-turn", "Asked a follow-up; waiting.");
+    assert_eq!(space.claims()[0]["state"], json!({"left":"held"}));
+    assert_eq!(space.warnings_on(attempt), Vec::<String>::new());
+    space.observe_at(IDLE + 21_000);
+    assert_eq!(space.warnings_on(attempt), Vec::<String>::new());
+    assert_eq!(space.question_leg(&question), "working");
+}
+
+/// Another Stop hook blocks the first Stop of the turn the lead's answer
+/// starts, and the turn goes on, its pane working. Namedrop's Stop hook
+/// recorded that Stop before its worker saw it blocked, yet nothing warns
+/// however long the turn runs, and its real Stop answers the held delivery.
+/// Interrupted instead, it warns once its pane has sat idle past the grace.
+#[test]
+fn a_stop_another_hook_blocked_warns_nothing_while_the_answer_turn_runs() {
+    for interrupted in [false, true] {
+        let space = Space::new();
+        let (question, ask, answer) = space.held_on_the_lead();
+        let attempt = ask["control"]["attempt_id"].as_str().unwrap();
+        space.reviewer_working(true);
+        space.reviewer_prompt_at(100_000, "answer-turn", &answer.to_string());
+        let turn = HostTurn::from_ids(Some("answer-turn"), None).unwrap();
+        mark_stopped(
+            &space.directory.state,
+            "socket-a",
+            "session-reviewer",
+            &turn,
+            100_200,
+        );
+        space.observe_at(100_200 + STOPPED_GRACE_MS + 100);
+        space.observe_at(700_000);
+        assert_eq!(space.warnings_on(attempt), Vec::<String>::new());
+        assert_eq!(space.question_leg(&question), "working");
+        if interrupted {
+            space.reviewer_working(false);
+            let due = space.observe_at(800_000);
+            assert_eq!(space.warnings_on(attempt), Vec::<String>::new());
+            assert_eq!(due, Some(800_000 + STOP_ARRIVAL_GRACE_MS));
+            space.observe_at(800_000 + STOP_ARRIVAL_GRACE_MS);
+            assert_eq!(space.warnings_on(attempt).len(), 1);
+        } else {
+            mark_stopped(
+                &space.directory.state,
+                "socket-a",
+                "session-reviewer",
+                &turn,
+                800_000,
+            );
+            space.reviewer_stop_at(800_000, "answer-turn", "FINAL: option B is safe.");
+            space.reviewer_working(false);
+            space.observe_at(800_500);
+            assert_eq!(space.answers_to(&question), ["FINAL: option B is safe."]);
+            assert!(space.unresolved_disposition_warnings().is_empty());
+        }
+    }
 }
 
 /// A reply the agent sends during the turn opens no request, even to an
@@ -5595,8 +6507,8 @@ fn a_held_pointer_turn_leaves_the_delivery_open_and_shows_the_way_back() {
         armed.contains(
             "If it ends while background work you started this turn runs, Namedrop holds your \
              final message, and your final message in the turn that work's notice starts is the \
-             reply. If the notice arrives during another turn, or another delivery reaches the \
-             turn it starts, answer with the line Namedrop shows."
+             reply. Whenever a later turn shows a line to answer this delivery, answer with that \
+             line."
         ),
         "{armed}"
     );

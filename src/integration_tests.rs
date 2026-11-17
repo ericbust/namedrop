@@ -339,10 +339,10 @@ fn a_final_reply_delivery_says_what_the_stop_does_and_shows_only_the_other_line(
         template: Value::Null,
         tracked: false,
     };
-    let claude = final_reply_guidance(&control, &reply).unwrap();
+    let claude = final_reply_guidance(&control, &reply, None).unwrap();
     assert!(
         claude.starts_with(
-            "Namedrop commands: your final message is your reply to @lead. Namedrop sends it when your turn ends, so run no settle command and write no status line. If your turn ends while you wait on a helper, Namedrop sends nothing and you reply later. If it ends while background work you started this turn runs, Namedrop holds your final message, and your final message in the turn that work's notice starts is the reply. If the notice arrives during another turn, or another delivery reaches the turn it starts, answer with the line Namedrop shows. For no reply, run this line first."
+            "Namedrop commands: your final message is your reply to @lead. Namedrop sends it when your turn ends, so run no settle command and write no status line. If your turn ends while you wait on a helper, Namedrop sends nothing, and your final message in the turn that the helper's answer starts is the reply. If it ends while background work you started this turn runs, Namedrop holds your final message, and your final message in the turn that work's notice starts is the reply. Whenever a later turn shows a line to answer this delivery, answer with that line. For no reply, run this line first."
         ),
         "{claude}"
     );
@@ -358,6 +358,7 @@ fn a_final_reply_delivery_says_what_the_stop_does_and_shows_only_the_other_line(
             template: Value::Null,
             tracked: true,
         },
+        None,
     )
     .unwrap();
     assert!(tracked.contains(FINAL_REPLY_OUTCOME), "{tracked}");
@@ -366,7 +367,8 @@ fn a_final_reply_delivery_says_what_the_stop_does_and_shows_only_the_other_line(
         "{tracked}"
     );
 
-    let own = final_reply_guidance(&control, &Armed::NoReply(NoReplyCase::AnswersOwn)).unwrap();
+    let own =
+        final_reply_guidance(&control, &Armed::NoReply(NoReplyCase::AnswersOwn), None).unwrap();
     assert!(
         own.contains("To answer @lead instead, run this line."),
         "{own}"
@@ -377,26 +379,70 @@ fn a_final_reply_delivery_says_what_the_stop_does_and_shows_only_the_other_line(
         "{own}"
     );
 
-    for (case, text) in [
-        (NoReplyCase::ReportToHuman, REPORT_TO_HUMAN_GUIDANCE),
-        (NoReplyCase::ResultSet, RESULT_SET_GUIDANCE),
+    let held = crate::DeliveryAttemptId::new("attempt-held");
+    let woken = final_reply_guidance(
+        &control,
+        &Armed::NoReply(NoReplyCase::AnswersOwn),
+        Some(&held),
+    )
+    .unwrap();
+    // What the final message does comes first, and the line, which goes to
+    // the helper, is described right before it.
+    assert!(
+        woken.starts_with(
+            "Namedrop commands: this answers your message. Delivery attempt-held from an earlier turn waited on it, so your final message is your answer to delivery attempt-held, and Namedrop sends it there: run no settle command and write no status line. If this does not answer delivery attempt-held yet, send a new request rather than a reply, and end your turn while you wait for its answer. If your turn ends while you wait on a helper, Namedrop sends nothing, and your final message in the turn that the helper's answer starts is the reply. If it ends while background work you started this turn runs, Namedrop holds your final message, and your final message in the turn that work's notice starts is the reply. Whenever a later turn shows a line to answer delivery attempt-held, answer with that line. Namedrop closes this answer without a reply when your turn ends. To reply to @lead as well, run this line: it goes only to @lead, and your final message still answers delivery attempt-held."
+        ),
+        "{woken}"
+    );
+    assert_eq!(rendered_tokens(&woken), ["reply"]);
+    for (case, text, woken) in [
+        (
+            NoReplyCase::ReportToHuman,
+            REPORT_TO_HUMAN_GUIDANCE,
+            REPORT_TO_HUMAN_WOKEN,
+        ),
+        (
+            NoReplyCase::ResultSet,
+            RESULT_SET_GUIDANCE,
+            RESULT_SET_GUIDANCE,
+        ),
     ] {
         assert_eq!(
-            final_reply_guidance(&control, &Armed::NoReply(case)).unwrap(),
+            final_reply_guidance(&control, &Armed::NoReply(case), None).unwrap(),
             text
         );
+        assert_eq!(
+            final_reply_guidance(&control, &Armed::NoReply(case), Some(&held)).unwrap(),
+            format!("{woken} {}", woken_sentence(&held, false))
+        );
     }
+    // A terminal's result answers the held delivery, which another agent may
+    // have asked: the text never sends that answer to the person. It shows
+    // no line that replies, so it asks again only with a new request.
+    let result = final_reply_guidance(
+        &control,
+        &Armed::NoReply(NoReplyCase::ReportToHuman),
+        Some(&held),
+    )
+    .unwrap();
+    assert!(!result.contains("the person"), "{result}");
+    assert!(
+        result.contains("yet, send a new request, and end your turn")
+            && !result.contains("rather than a reply"),
+        "{result}"
+    );
     let relayed = Armed::NoReply(NoReplyCase::Relayed);
     assert_eq!(
-        final_reply_guidance(&control, &relayed).unwrap(),
-        format!("{RELAYED_GUIDANCE} {FINAL_REPLY_WAITING}")
+        final_reply_guidance(&control, &relayed, None).unwrap(),
+        format!("{RELAYED_GUIDANCE} {}", final_reply_waiting(THIS_DELIVERY))
     );
     let mut channel = control.clone();
     channel["reply_mode"] = json!("channel");
-    let channel = final_reply_guidance(&channel, &relayed).unwrap();
+    let channel = final_reply_guidance(&channel, &relayed, None).unwrap();
     assert!(
         channel.starts_with(&format!(
-            "{RELAYED_GUIDANCE} {FINAL_REPLY_WAITING}{RELAYED_CHANNEL}"
+            "{RELAYED_GUIDANCE} {}{RELAYED_CHANNEL}",
+            final_reply_waiting(THIS_DELIVERY)
         )),
         "{channel}"
     );
