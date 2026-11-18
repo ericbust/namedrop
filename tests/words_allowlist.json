@@ -563,10 +563,10 @@
       "reason": "Maintainer release tooling, which no home runs.",
       "literals": [
         [6, "version  prints the release version after checking Cargo.toml, Cargo.lock and herdr-plugin.toml agree."],
-        [19, "$namedrop_root/herdr-plugin.toml"],
-        [21, "herdr-plugin.toml has version '$manifest' but Cargo.toml has '$version'. Set the same version in both."],
-        [86, "Experimental version $version cannot be released to main. Choose a stable version for main in Cargo.toml, herdr-plugin.toml and Cargo.lock."],
-        [94, "Raise the version in Cargo.toml, herdr-plugin.toml and Cargo.lock (see docs/releasing.md#choose-the-version)."]
+        [20, "$namedrop_root/herdr-plugin.toml"],
+        [22, "herdr-plugin.toml has version '$manifest' but Cargo.toml has '$version'. Set the same version in both."],
+        [138, "Experimental version $version cannot be released to main. Choose a stable version for main in Cargo.toml, herdr-plugin.toml and Cargo.lock."],
+        [147, "Raise the version in Cargo.toml, herdr-plugin.toml and Cargo.lock (see docs/releasing.md#choose-the-version)."]
       ]
     },
     {
@@ -1053,11 +1053,11 @@
       "file": "src/main.rs",
       "reason": "Herdr's plugin event hook, which Herdr alone sends.",
       "literals": [
-        [1357, "HERDR_PLUGIN_EVENT_JSON"],
-        [1371, "HERDR_PLUGIN_EVENT"],
-        [1372, "HERDR_PLUGIN_EVENT is required for an event hook"],
-        [1756, "HERDR_PLUGIN_EVENT_JSON"],
-        [1757, "HERDR_PLUGIN_EVENT_JSON is required for an event hook"]
+        [1366, "HERDR_PLUGIN_EVENT_JSON"],
+        [1380, "HERDR_PLUGIN_EVENT"],
+        [1381, "HERDR_PLUGIN_EVENT is required for an event hook"],
+        [1765, "HERDR_PLUGIN_EVENT_JSON"],
+        [1766, "HERDR_PLUGIN_EVENT_JSON is required for an event hook"]
       ]
     },
     {
@@ -1065,7 +1065,7 @@
       "file": "src/main.rs",
       "reason": "An environment or config name read or set, never printed.",
       "literals": [
-        [1610, "PLUGIN_ROOT"]
+        [1619, "PLUGIN_ROOT"]
       ]
     },
     {
@@ -1073,7 +1073,7 @@
       "file": "src/main.rs",
       "reason": "An internal invariant that no input reaches.",
       "literals": [
-        [1464, "a Herdr home has a location"]
+        [1473, "a Herdr home has a location"]
       ]
     },
     {
@@ -1081,7 +1081,7 @@
       "file": "src/main.rs",
       "reason": "The hidden dashboard-server's own argv, which `channels` builds with a state.",
       "literals": [
-        [1706, "--plugin-state, HERDR_PLUGIN_STATE_DIR or NAMEDROP_STATE_DIR is required"]
+        [1715, "--plugin-state, HERDR_PLUGIN_STATE_DIR or NAMEDROP_STATE_DIR is required"]
       ]
     },
     {

@@ -101,10 +101,10 @@ def herdr_lists_namedrop(home, herdr):
 
 
 def supports_rex(launcher):
-    """Whether the runtime behind `launcher` installs the Rex module: its
-    contract names rex_ui, from U7 on."""
+    """Whether the runtime behind `launcher` installs the Rex module. From
+    1.12.0 on its --capabilities names rex_ui; an older one exits 64 on the flag."""
     try:
-        result = subprocess.run([str(launcher), '--runtime-info'], capture_output=True, text=True,
+        result = subprocess.run([str(launcher), '--capabilities'], capture_output=True, text=True,
                                 stdin=subprocess.DEVNULL)
         return result.returncode == 0 and json.loads(result.stdout).get('rex_ui') == 1
     except (OSError, ValueError, AttributeError):

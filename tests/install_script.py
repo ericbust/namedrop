@@ -35,6 +35,14 @@ def capture(surface, text):
         with open(CAPTURE, 'a') as log:
             log.write(json.dumps({'surface': surface, 'text': text}) + '\n')
 
+# A launcher from before 1.12.0, as 1.11.1 answers: its contract, and exit
+# 64 with an invalid request for any argument it does not know.
+OLD_LAUNCHER = f'''#!/bin/sh
+[ "$*" = --runtime-info ] && {{ echo '{json.dumps(CONTRACT, separators=(',', ':'))}'; exit 0; }}
+echo '{{"status":"error","error":{{"code":"invalid_request"}}}}'
+exit 64
+'''
+
 STUB = '''#!{python} -B
 import json, os, shutil, sqlite3, sys
 from pathlib import Path
@@ -52,6 +60,8 @@ if args == ['--version']:
     print('namedrop {version}')
 elif args == ['--runtime-info']:
     print({contract!r})
+elif args == ['--capabilities']:
+    print('{{"rex_ui":1}}')
 elif args == ['--install-preview']:
     if mode == 'no-server':
         print('Namedrop found no running Rex server: could not reach Rex. Start Rex, or set REX_SERVER to its '
@@ -197,7 +207,7 @@ class Installer(unittest.TestCase):
         if capable:
             shutil.copy2(self.binary, launcher)
         else:
-            launcher.write_text('#!/bin/sh\necho \'{"runtime_protocol":1}\'\n')
+            launcher.write_text(OLD_LAUNCHER)
             launcher.chmod(0o755)
         if legacy:
             (runtime / 'current').mkdir()
@@ -277,7 +287,7 @@ class Installer(unittest.TestCase):
             self.assertIn(line, output)
         self.unchanged(before)
         self.no_cache()
-        self.assertEqual([call[1:] for call in self.calls()], [['--runtime-info'], ['--install-preview']])
+        self.assertEqual([call[1:] for call in self.calls()], [['--capabilities'], ['--install-preview']])
         (self.root / 'calls').unlink()
         self.env['NAMEDROP_STATE_DIR'] = str(self.root / 'must not create')
         output = self.ok(self.run_install(answer='yes\n'))
@@ -455,9 +465,9 @@ class Installer(unittest.TestCase):
         self.registry(['namedrop'])
         self.refused(f'Namedrop is already installed in Herdr ({herdr}). '
                      'Run Activate Namedrop in Herdr first, then run sh scripts/install.sh again.')
-        self.assertEqual([call[1:] for call in self.calls()], [['--runtime-info']])
-        # A launcher without rex_ui, or none, is a release to update.
-        (herdr / 'runtime/namedrop').write_text('#!/bin/sh\necho \'{"runtime_protocol":1}\'\n')
+        self.assertEqual([call[1:] for call in self.calls()], [['--capabilities']])
+        # A release before 1.12.0, or no launcher, is a release to update.
+        (herdr / 'runtime/namedrop').write_text(OLD_LAUNCHER)
         self.refused('Update Namedrop in Herdr first, then run sh scripts/install.sh again.')
         (herdr / 'runtime/namedrop').unlink()
         self.refused('Update Namedrop in Herdr first, then run sh scripts/install.sh again.')
