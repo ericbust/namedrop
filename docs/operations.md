@@ -358,19 +358,27 @@ Without a retained Tailscale handler, the server stops 10 minutes after the last
 
 ### Restart Channels after an update
 
-On macOS, a Channels server that `namedrop channels` or Herdr started keeps running on the release that started it after an update, unless the update migrates the state schema. The old server keeps serving Channels and delivering posts. Changes that the new release makes to Channels apply only after it stops. A server that an earlier update's handoff started sees the new release and stops, as on Linux. On Linux, the server sees the new release during the update. It hands off to the new release, or exits when no tab is open and tailnet access is off.
+On macOS, a Channels server that `namedrop channels` or Herdr started keeps running on the release that started it after an update, unless the update migrates the state schema. The old server keeps serving Channels and delivering posts. Changes that the new release makes to Channels apply only after it stops. A server that a handoff started, in an earlier update or a `--ui` switch, sees the new release and hands off or exits, as on Linux. On Linux, the server sees the new release during the update. It hands off to the new release, or exits when no tab is open and tailnet access is off.
 
 Without tailnet access, the old server stops 10 minutes after the last Channels tab closes, or after the minutes set with `--idle`. The next `namedrop channels` then starts the new release's server. With tailnet access on, or with `--idle never`, the old server never stops by itself.
 
-To stop the old server now, run these commands in a workspace shell tab, at a moment when nothing is being sent. Stopping the server works like a crash: a post that is being routed at that moment fails, and a **Type to agent** send or an upload in progress is cut off. The commands read the server's process ID from `dashboard/server.json` in Namedrop's state directory. `~/.config/namedrop/state-directory` names that directory. If that file is missing, set `state` to Herdr's Namedrop state directory instead, by default `~/.local/state/herdr/plugins/namedrop`.
+To stop the old server now, run these commands in a workspace shell tab, at a moment when nothing is being sent. Stopping the server works like a crash: a post that is being routed at that moment fails, and a **Type to agent** send or an upload in progress is cut off. The commands read the server's process ID from `dashboard/server.json` in Namedrop's state directory. `~/.config/namedrop/state-directory` names that directory.
 
 ```sh
 state="$(cat ~/.config/namedrop/state-directory)"
 pid=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["pid"])' "$state/dashboard/server.json")
-ps -o command= -p "$pid"
+ps -ww -o command= -p "$pid"
 ```
 
-`server.json` stays after the server stops, so check the process before you stop it. If `ps` prints a line that contains `namedrop` and `dashboard-server`, run `kill "$pid"`. If it prints nothing, the server has already stopped. Then run:
+If `~/.config/namedrop/state-directory` is missing, replace the first line with `state="${XDG_STATE_HOME:-$HOME/.local/state}/herdr/plugins/namedrop"`, which is Herdr's Namedrop state directory.
+
+`server.json` stays after the server stops, so check the process before you stop it:
+
+- If `ps` prints a line that contains `namedrop` and `dashboard-server`, run `kill "$pid"`.
+- If it prints nothing, the server has already stopped.
+- If it prints any other line, the process ID now belongs to another program. Do not stop it. The server has already stopped.
+
+Then run:
 
 ```sh
 namedrop channels
