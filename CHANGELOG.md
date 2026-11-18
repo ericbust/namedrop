@@ -41,7 +41,7 @@ Namedrop now runs in Rex as well as in Herdr. Rex support is experimental. In He
 ### Upgrade
 
 - In Herdr, update with **Update Namedrop**. The update runs live. The state schema stays at 8, and agent sessions and pending deliveries keep running.
-- Restart each Codex session that was running before the update. The hook wrappers changed, and Codex refuses to run a plugin's hooks once the plugin's files change. Until you restart it, the session can lose its hooks, answer only in its terminal and raise `ND-DELIVERY-003`. Its screen shows `plugin contents changed; hook approval required`, and Doctor names it in `ND-SETUP-005` if it ran a hook on 1.6.5 or later. In the new session, trust the Namedrop hooks at **Hooks need review**.
+- Restart each Codex session that was running before the update. The hook wrappers changed, and Codex refuses to run a plugin's hooks once the plugin's files change. Until you restart it, the session can lose its hooks, answer only in its terminal and raise `ND-DELIVERY-003`. Its screen shows `Hook failed` with `No such file or directory (os error 2)` on Codex 0.169.0, or `plugin contents changed; hook approval required` on older Codex, and Doctor names it in `ND-SETUP-005` if it ran a hook on 1.6.5 or later. In the new session, trust the Namedrop hooks at **Hooks need review**.
 - If you ran Rex support from the `experimental` branch, run `sh scripts/install.sh` from this release's archive. It prints `Namedrop Rex install: update` and keeps your names and messages. If your relay database has a layout from an unreleased build, Namedrop sets it aside and starts a new one, and Doctor names the old file in `ND-RELAY-004`. Messages to other machines that were in flight stay in that file.
 
 ## [1.11.1] - 2026-11-13
