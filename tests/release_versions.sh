@@ -118,8 +118,8 @@ sh "$test_root/scripts/release.sh" check main > /dev/null
 set_floor 1.5.1
 floor_fails 1.6.0 main 'no release tag v1.5.1 ships scripts/install.sh'
 
-# runtime.json: running processes of the old release read the new one through
-# runtime/current, so a live update must not change it (1.12.0's rex_ui).
+# runtime.json: on macOS, running processes of the old release read the new one
+# through runtime/current, so a live update must not change it (1.12.0's rex_ui).
 cp "$(dirname "$0")/../scripts/runtime.py" "$(dirname "$0")/../scripts/update.py" "$test_root/scripts/"
 contract() {
   printf '{"runtime_protocol":1,"live_upgrade_epoch":%s,"state_schema":%s,"collaboration_protocol":"collab/v1","command_gate":1,"live_migrate_from":[%s],"helper_gate":1%s}\n' \
@@ -131,10 +131,18 @@ contract 1 8 3,4,5,6,7
 commit 'a release with runtime.json'
 contract_fails() {
   if sh "$test_root/scripts/release.sh" check "$1" > "$test_root/output" 2>&1; then
-    printf 'release check accepted runtime.json %s against %s\n' "$(cat "$test_root/runtime.json")" "$1" >&2
+    printf 'release check accepted runtime.json %s against %s\n' "$(cat "$test_root/runtime.json" 2>&1)" "$1" >&2
     exit 1
   fi
   grep -F "$2" "$test_root/output" > /dev/null || {
+    cat "$test_root/output" >&2
+    exit 1
+  }
+}
+# A runtime.json it cannot read fails closed on one line that names the problem.
+contract_unreadable() {
+  contract_fails main "$1"
+  [ "$(wc -l < "$test_root/output")" -eq 1 ] || {
     cat "$test_root/output" >&2
     exit 1
   }
@@ -144,13 +152,23 @@ git -C "$test_root" update-ref refs/heads/experimental HEAD
 set_version 1.6.1
 sh "$test_root/scripts/release.sh" check main > /dev/null
 contract 1 8 3,4,5,6,7 ',"rex_ui":1'
-contract_fails main 'Running processes of the old release read the new runtime.json through runtime/current'
+contract_fails main 'On macOS, running processes of the old release read the new runtime.json through runtime/current'
 grep -F 'Restore runtime.json from main byte for byte' "$test_root/output" > /dev/null
+grep -F 'It needs activation to stop or hand off old Channels servers first, and that is not built yet.' "$test_root/output" > /dev/null
 contract_fails experimental 'runtime.json differs from the one at experimental'
 contract 1 8 3,4,5,6
 contract_fails main 'and the update would still run live.'
+# An epoch increase passes, though on macOS old Channels servers outlive it.
 contract 2 8 3,4,5,6,7 ',"rex_ui":1'
 sh "$test_root/scripts/release.sh" check main > /dev/null
 contract 1 9 3,4,5,6,7,8
 sh "$test_root/scripts/release.sh" check main > /dev/null
+printf '{"runtime_protocol":1,' > "$test_root/runtime.json"
+contract_unreadable 'runtime.json is not valid JSON: '
+printf '[1]\n' > "$test_root/runtime.json"
+contract_unreadable 'runtime.json is not a JSON object.'
+printf '{"runtime_protocol":1}\n' > "$test_root/runtime.json"
+contract_unreadable 'runtime.json has no live_upgrade_epoch.'
+rm "$test_root/runtime.json"
+contract_unreadable 'runtime.json is missing. Restore it from main.'
 printf '%s\n' 'release version checks passed'

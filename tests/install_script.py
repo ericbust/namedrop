@@ -60,7 +60,7 @@ if args == ['--version']:
     print('namedrop {version}')
 elif args == ['--runtime-info']:
     print({contract!r})
-elif args == ['--rex-ui-info']:
+elif args == ['--capabilities']:
     print('{{"rex_ui":1}}')
 elif args == ['--install-preview']:
     if mode == 'no-server':
@@ -287,7 +287,7 @@ class Installer(unittest.TestCase):
             self.assertIn(line, output)
         self.unchanged(before)
         self.no_cache()
-        self.assertEqual([call[1:] for call in self.calls()], [['--rex-ui-info'], ['--install-preview']])
+        self.assertEqual([call[1:] for call in self.calls()], [['--capabilities'], ['--install-preview']])
         (self.root / 'calls').unlink()
         self.env['NAMEDROP_STATE_DIR'] = str(self.root / 'must not create')
         output = self.ok(self.run_install(answer='yes\n'))
@@ -465,7 +465,7 @@ class Installer(unittest.TestCase):
         self.registry(['namedrop'])
         self.refused(f'Namedrop is already installed in Herdr ({herdr}). '
                      'Run Activate Namedrop in Herdr first, then run sh scripts/install.sh again.')
-        self.assertEqual([call[1:] for call in self.calls()], [['--rex-ui-info']])
+        self.assertEqual([call[1:] for call in self.calls()], [['--capabilities']])
         # A release before 1.12.0, or no launcher, is a release to update.
         (herdr / 'runtime/namedrop').write_text(OLD_LAUNCHER)
         self.refused('Update Namedrop in Herdr first, then run sh scripts/install.sh again.')

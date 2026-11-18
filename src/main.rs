@@ -46,11 +46,12 @@ fn main() -> ExitCode {
         println!("{}", include_str!("../runtime.json").trim());
         return ExitCode::SUCCESS;
     }
-    // install.sh asks a Herdr runtime this before adopting it. It is not in
-    // runtime.json, because a running older runtime compares that file, read
-    // through runtime/current, with its own copy and stops working on any
-    // change. Releases before 1.12.0 exit 64 on the flag.
-    if env::args_os().skip(1).eq(["--rex-ui-info"]) {
+    // What this runtime can do beyond runtime.json, which must not change:
+    // a running older runtime compares that file, read through
+    // runtime/current, with its own copy and stops working on any change.
+    // install.sh asks it of a Herdr runtime before adopting it. A new
+    // capability adds a key here. Releases before 1.12.0 exit 64 on the flag.
+    if env::args_os().skip(1).eq(["--capabilities"]) {
         println!(r#"{{"rex_ui":1}}"#);
         return ExitCode::SUCCESS;
     }

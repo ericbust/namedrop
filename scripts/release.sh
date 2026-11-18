@@ -59,25 +59,55 @@ installer_floor() {
       "Set it to $2 if this is the first release with scripts/install.sh, else to the first release that shipped it, and fetch tags first (see docs/releasing.md#publish)."
 }
 
-# A running Namedrop process, a Channels server or a helper, reads the new
-# release's runtime.json through runtime/current after a live update, and
-# stops working when it differs from its own copy. So runtime.json changes
-# only in an update that already expects old processes to stop: one that
-# cannot run live, or one that migrates the store (scripts/runtime.py).
+# On macOS a running Namedrop process, a Channels server or a helper, reads
+# the new release's runtime.json through runtime/current after an update, and
+# stops working when it differs from its own copy. A state_schema change makes
+# old Channels servers hand off and the store refuse old helpers, so it may
+# change the file. An update that cannot run live may too, since this check
+# cannot stop a deliberate live_upgrade_epoch increase, but without a schema
+# change an old Channels server with an open tab outlives it. Activation must
+# first stop or hand off old Channels servers, and that is not built yet.
 runtime_contract() {
   git -C "$namedrop_root" cat-file -e "$1:runtime.json" 2>/dev/null || return 0
-  git -C "$namedrop_root" show "$1:runtime.json" | cmp -s - "$namedrop_root/runtime.json" && return 0
-  git -C "$namedrop_root" show "$1:runtime.json" | python3 -I -c '
+  git -C "$namedrop_root" show "$1:runtime.json" | cmp -s - "$namedrop_root/runtime.json" 2>/dev/null && return 0
+  verdict=0
+  problem=$(git -C "$namedrop_root" show "$1:runtime.json" | python3 -B -I -c '
 import json, sys
-sys.path.insert(0, sys.argv[1] + "/scripts")
+root, base = sys.argv[1:3]
+sys.path.insert(0, root + "/scripts")
 from runtime import live_compatible
-previous, incoming = json.load(sys.stdin), json.load(open(sys.argv[1] + "/runtime.json"))
-sys.exit(0 if not live_compatible(previous, incoming) or previous["state_schema"] != incoming["state_schema"] else 1)
-' "$namedrop_root" ||
-    fail "runtime.json differs from the one at $1, and the update would still run live." \
-      "Running processes of the old release read the new runtime.json through runtime/current and stop working when it differs from their own copy." \
-      "Restore runtime.json from $1 byte for byte, and let the binary answer a new capability with its own query beside --runtime-info in src/main.rs." \
-      "Change runtime.json only in an update that cannot run live, such as a live_upgrade_epoch increase, or with a state_schema migration (see docs/releasing.md#live-update-compatibility)."
+KEYS = ("runtime_protocol", "live_upgrade_epoch", "state_schema", "collaboration_protocol")
+def refuse(problem):
+    print(problem)
+    sys.exit(2)
+def contract(name, read):
+    try:
+        value = json.loads(read())
+    except FileNotFoundError:
+        refuse(f"{name} is missing. Restore it from {base}.")
+    except (OSError, ValueError) as error:
+        refuse(f"{name} is not valid JSON: {error}.")
+    if not isinstance(value, dict):
+        refuse(f"{name} is not a JSON object.")
+    for key in KEYS:
+        if key not in value:
+            refuse(f"{name} has no {key}.")
+    return value
+previous = contract(f"runtime.json at {base}", sys.stdin.buffer.read)
+incoming = contract("runtime.json", lambda: open(root + "/runtime.json", "rb").read())
+live = live_compatible(previous, incoming) and previous["state_schema"] == incoming["state_schema"]
+sys.exit(3 if live else 0)
+' "$namedrop_root" "$1" 2>/dev/null) || verdict=$?
+  case $verdict in
+    0) ;;
+    3) fail "runtime.json differs from the one at $1, and the update would still run live." \
+      "On macOS, running processes of the old release read the new runtime.json through runtime/current and stop working when it differs from their own copy." \
+      "Restore runtime.json from $1 byte for byte, and add a new capability to --capabilities in src/main.rs instead." \
+      "Change runtime.json only with a state_schema migration, which makes old Channels servers hand off and the store refuse old helpers (see docs/releasing.md#live-update-compatibility)." \
+      "An update that cannot run live without a schema change, such as a live_upgrade_epoch increase, passes this check but leaves old Channels servers running on macOS." \
+      "It needs activation to stop or hand off old Channels servers first, and that is not built yet." ;;
+    *) fail "${problem:-Cannot compare runtime.json with the one at $1.}" ;;
+  esac
 }
 
 section() {

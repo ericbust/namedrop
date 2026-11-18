@@ -57,18 +57,17 @@ fn retirement_precedes_every_dispatch_form_and_all_cached_hook_forms() {
         let marker = json!({"reason":reason,"successor":if reason == "removed" {Value::Null} else {json!("/new-herdr")},"at":"2026-11-15T00:00:00Z"});
         fs::write(state.join("runtime/retired.json"), marker.to_string()).unwrap();
         let before = fs::read(state.join("runtime/retired.json")).unwrap();
-        for (query, answer) in [
-            ("--runtime-info", include_str!("../runtime.json")),
-            ("--rex-ui-info", "{\"rex_ui\":1}\n"),
-        ] {
-            let info = f.run(&[query]);
-            assert_eq!(info.status.code(), Some(0), "{reason} {query}: {info:?}");
-            assert_eq!(
-                String::from_utf8_lossy(&info.stdout),
-                answer,
-                "{reason}: {query} answers a retired state's updater"
-            );
-        }
+        let info = f.run(&["--runtime-info"]);
+        assert_eq!(info.status.code(), Some(0), "{reason}: {info:?}");
+        let capabilities = f.run(&["--capabilities"]);
+        assert_eq!(
+            (
+                capabilities.status.code(),
+                &*String::from_utf8_lossy(&capabilities.stdout)
+            ),
+            (Some(0), "{\"rex_ui\":1}\n"),
+            "{reason}: --capabilities answers a retired state's install.sh: {capabilities:?}"
+        );
         for args in [
             vec!["doctor"],
             vec!["activate"],

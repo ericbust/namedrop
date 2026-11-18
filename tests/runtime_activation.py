@@ -318,6 +318,19 @@ class ActivationChecks(unittest.TestCase):
         self.assertEqual(hashlib.sha256((REPO / 'scripts/run.sh').read_bytes()).hexdigest(),
                          'f71ed068a60e14590a1d056b5fe7dd8ce96ec8f229c0dab3cdc9896c047fadc7')
 
+    def test_runtime_json_is_the_released_one(self):
+        # This is runtime.json in v1.11.1, byte for byte. On macOS a running
+        # process of an older release reads the new release's runtime.json
+        # through runtime/current, compares it with its own copy, and stops
+        # working when they differ. A new capability goes in --capabilities.
+        self.assertEqual(
+            (REPO / 'runtime.json').read_bytes(),
+            b'{"runtime_protocol":1,"live_upgrade_epoch":1,"state_schema":8,"collaboration_protocol":"collab/v1",'
+            b'"command_gate":1,"live_migrate_from":[3,4,5,6,7],"helper_gate":1}\n',
+            'Change runtime.json only with a state_schema migration, which makes old Channels servers hand off and '
+            'old helpers refuse the store: on macOS a running older process reads it through runtime/current and '
+            'stops working when it differs from its own copy (docs/releasing.md#live-update-compatibility).')
+
     def test_scripts_import_no_socket_module(self):
         # macOS's system Python caches each newly imported module under HOME;
         # update.py imports socket only when a Rex session needs checking.
