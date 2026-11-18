@@ -25,18 +25,6 @@ def load(path, drop):
         if line.startswith("## "): section = line; stream = ""
         elif line in ("--stdout", "--stderr"): stream = line
         cleaned = clean(line, drop)
-        if "--allow-rex-ui" in sys.argv:
-            if section == "## runtime-info" and stream == "--stdout" and cleaned.startswith('{'):
-                value = json.loads(cleaned)
-                if type(value.get("rex_ui")) is int and value["rex_ui"] == 1: del value["rex_ui"]
-                cleaned = json.dumps(value, sort_keys=True)
-            elif section == "## files (set)" and cleaned.startswith('{'):
-                value = json.loads(cleaned)
-                if value.get("path", "").endswith("/runtime.json") and isinstance(value.get("text"), str):
-                    contract = json.loads(value["text"])
-                    if type(contract.get("rex_ui")) is int and contract["rex_ui"] == 1: del contract["rex_ui"]
-                    value["text"] = json.dumps(contract, sort_keys=True)
-                    cleaned = json.dumps(value, sort_keys=True)
         if not section.endswith("(set)"):
             steps.append((section, stream, cleaned))
             continue

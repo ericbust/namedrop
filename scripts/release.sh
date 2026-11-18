@@ -6,6 +6,7 @@ usage() {
     'version  prints the release version after checking Cargo.toml, Cargo.lock and herdr-plugin.toml agree.' \
     'check    fails unless the version is above the one at BASE-REF and CHANGELOG.md has a section for it,' \
     '         and, for main, unless INSTALLER_FLOOR names a release that ships scripts/install.sh.' \
+    '         It also fails when runtime.json differs from the one at BASE-REF in an update that runs live.' \
     'notes    prints the CHANGELOG.md section for VERSION without its heading.'
 }
 fail() { printf '%s\n' "$@" >&2; exit 65; }
@@ -58,6 +59,27 @@ installer_floor() {
       "Set it to $2 if this is the first release with scripts/install.sh, else to the first release that shipped it, and fetch tags first (see docs/releasing.md#publish)."
 }
 
+# A running Namedrop process, a Channels server or a helper, reads the new
+# release's runtime.json through runtime/current after a live update, and
+# stops working when it differs from its own copy. So runtime.json changes
+# only in an update that already expects old processes to stop: one that
+# cannot run live, or one that migrates the store (scripts/runtime.py).
+runtime_contract() {
+  git -C "$namedrop_root" cat-file -e "$1:runtime.json" 2>/dev/null || return 0
+  git -C "$namedrop_root" show "$1:runtime.json" | cmp -s - "$namedrop_root/runtime.json" && return 0
+  git -C "$namedrop_root" show "$1:runtime.json" | python3 -I -c '
+import json, sys
+sys.path.insert(0, sys.argv[1] + "/scripts")
+from runtime import live_compatible
+previous, incoming = json.load(sys.stdin), json.load(open(sys.argv[1] + "/runtime.json"))
+sys.exit(0 if not live_compatible(previous, incoming) or previous["state_schema"] != incoming["state_schema"] else 1)
+' "$namedrop_root" ||
+    fail "runtime.json differs from the one at $1, and the update would still run live." \
+      "Running processes of the old release read the new runtime.json through runtime/current and stop working when it differs from their own copy." \
+      "Restore runtime.json from $1 byte for byte, and let the binary answer a new capability with its own query beside --runtime-info in src/main.rs." \
+      "Change runtime.json only in an update that cannot run live, such as a live_upgrade_epoch increase, or with a state_schema migration (see docs/releasing.md#live-update-compatibility)."
+}
+
 section() {
   awk -v heading="## [$1] - " '
     index($0, heading) == 1 && substr($0, length(heading) + 1) ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$/ {found=1; next}
@@ -89,6 +111,7 @@ case "$1" in
       fail "Can't read Cargo.toml at '$base'. Fetch the base branch with full history first."
     base_version=$(printf '%s\n' "$base_toml" | package_version)
     valid_version "$base_version" || fail "Cargo.toml at '$base' has invalid version '$base_version'."
+    runtime_contract "$base"
     [ "$(version_above "$version" "$base_version")" = 1 ] ||
       fail "Version $version is not above $base_version on $base. Every merge to main is a release." \
         "Raise the version in Cargo.toml, herdr-plugin.toml and Cargo.lock (see docs/releasing.md#choose-the-version)." \

@@ -14,4 +14,4 @@ U4 adds, after the base flow and in a profile of its own (`home-runtime`, `state
 
 U5 also runs `ui launch name` and `ui launch doctor` from a pane, after activation. Nothing is pinned.
 
-U7 also reads `--runtime-info`. Pass `--allow-rex-ui` for U7 to permit only the integer `rex_ui: 1` capability in that response and copied `runtime.json` files. Activation with no Rex registration and no standalone owner remains in the base flow without another pin.
+U7 also reads `--runtime-info`. Its answer and every copied `runtime.json` match the base's, because `runtime.json` does not change. Activation with no Rex registration and no standalone owner remains in the base flow. Nothing is pinned.

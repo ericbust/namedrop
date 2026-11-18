@@ -46,6 +46,14 @@ fn main() -> ExitCode {
         println!("{}", include_str!("../runtime.json").trim());
         return ExitCode::SUCCESS;
     }
+    // install.sh asks a Herdr runtime this before adopting it. It is not in
+    // runtime.json, because a running older runtime compares that file, read
+    // through runtime/current, with its own copy and stops working on any
+    // change. Releases before 1.12.0 exit 64 on the flag.
+    if env::args_os().skip(1).eq(["--rex-ui-info"]) {
+        println!(r#"{{"rex_ui":1}}"#);
+        return ExitCode::SUCCESS;
+    }
     // install.sh asks this before its confirmation. Like the contract query,
     // it reads no state and writes nothing.
     if env::args_os().skip(1).eq(["--install-preview"]) {
