@@ -71,7 +71,7 @@ cp "$namedrop_root/scripts/update.sh" "$namedrop_root/scripts/update.py" "$packa
 cp "$namedrop_root/scripts/run.sh" "$namedrop_root/scripts/runtime.py" "$namedrop_root/scripts/runtime_install.py" "$package/scripts/"
 cp "$namedrop_root/scripts/check-linux-prerequisites.sh" "$package/scripts/"
 cp "$namedrop_root/runtime.json" "$package/"
-for doc in operations compatibility releasing; do
+for doc in operations compatibility releasing rex rex-reference channels-testing; do
   cp "$namedrop_root/docs/$doc.md" "$package/docs/"
 done
 chmod 755 "$package/bin/namedrop" "$package/scripts/setup.sh" "$package/scripts/install.sh" "$package/scripts/update.sh"

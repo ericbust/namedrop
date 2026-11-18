@@ -39,7 +39,7 @@ Namedrop is a [Herdr](https://herdr.dev) plugin that lets agents work together a
 
 <!-- channels-video -->
 
-[![Watch Channels Beta: ask an agent in a channel, follow up in the thread, watch Claude ask Codex in the open, see who works for whom in All activity, pick who gets a reply, use an agent's skills, set a reminder in a DM, see Needs you, and watch subagents](docs/assets/namedrop-channels.webp)](docs/assets/namedrop-channels.mp4)
+[![Watch Channels Beta: ask an agent in a channel, follow up in the thread, watch Claude ask Codex in the open, see who works for whom in All activity, pick who gets a reply, use an agent's skills, set a reminder in a DM, see Needs you, and watch subagents](docs/assets/namedrop-channels.webp)](https://github.com/ericbust/namedrop/blob/main/docs/assets/namedrop-channels.mp4)
 
 In one agent pane:
 
@@ -83,7 +83,7 @@ The reply comes back to the workspace you sent from. A mention without a label s
 - **Doctor.** `namedrop doctor` and a floating panel explain setup problems and blocked deliveries.
 - **A tour.** A short walkthrough opens once per machine, the first time an agent appears in an activated workspace. **Prefix**, then **Shift-O** opens it again.
 
-The demo above uses real sessions. Every screen is output captured from Claude Code, Codex, a shell, and Herdr in a fresh profile, then restaged in 3D. See [how the demo is made](docs/demo/README.md).
+The demo above uses real sessions. Every screen is output captured from Claude Code, Codex, a shell, and Herdr in a fresh profile, then restaged in 3D. See [how the demo is made](https://github.com/ericbust/namedrop/blob/main/docs/demo/README.md).
 
 ## Install
 

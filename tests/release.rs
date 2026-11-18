@@ -750,6 +750,9 @@ fn the_archive_bundles_every_declared_entrypoint_including_the_naming_popup() {
         "docs/operations.md",
         "docs/compatibility.md",
         "docs/releasing.md",
+        "docs/rex.md",
+        "docs/rex-reference.md",
+        "docs/channels-testing.md",
     ];
     for path in expected_files {
         assert!(package.join(path).is_file(), "missing archive file: {path}");
