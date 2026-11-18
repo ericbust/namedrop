@@ -319,6 +319,28 @@ A writer that may not change the shared agent packages reports `ND-INSTALL-002` 
 | Explanation | "An older Herdr release updated the packages without updating the Rex module." |
 | Repair | "Update Namedrop in Herdr, then run Activate Namedrop there again." |
 
+### ND-INTEGRATION-002
+
+`ND-INTEGRATION-002` is not Rex-only. Doctor in Herdr or Rex reports it when `~/.config/namedrop/state-directory` names a state directory that an installed Codex or Claude Code `scripts/session-start` wrapper does not write. When Doctor reports `ND-INSTALL-003`, it leaves this one out.
+
+| Field | Text |
+|---|---|
+| Severity | `notice` |
+| Summary | "The install record names another state directory than the hooks write." |
+| Explanation | "`<record>` names `<state>`, and an installed hook wrapper writes elsewhere, so Namedrop in a `<place>` would read a directory its hooks never write." `<place>` is "Rex block" in Herdr's Doctor and "Rex pane" in Rex's. |
+| Repair | "Activate Namedrop again, which rewrites the wrappers and the record together." |
+
+### ND-INTEGRATION-003
+
+Doctor on Rex reports `ND-INTEGRATION-003` when an installed Codex or Claude Code `scripts/session-start` or `scripts/user-prompt-submit` wrapper sets no `NAMEDROP_HOOK_RUNTIME`. A release before 1.12.0 installed such wrappers.
+
+| Field | Text |
+|---|---|
+| Severity | `blocked` |
+| Summary | "An installed hook wrapper does not name its agent, so its sessions never bind in a Rex pane." |
+| Explanation | "`<wrapper>` sets no NAMEDROP_HOOK_RUNTIME. It was installed by an older Namedrop, and an agent whose hooks do not bind cannot register or receive mentions here." More than one wrapper is listed with " and " between them. |
+| Repair | "Activate Namedrop again, which rewrites the wrappers, then restart the agent." |
+
 ### ND-UPDATE-001 and ND-UPDATE-002
 
 | Code | Severity | Summary | Repair |

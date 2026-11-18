@@ -1,6 +1,6 @@
 # Rex host support: feasibility and plan
 
-Namedrop runs only inside Herdr today. This document records whether Namedrop can also run inside [Rex](https://www.superlogical.com/rex/docs), what the work costs, and the order to do it in. The work happens on the `experimental` branch.
+Namedrop runs inside Herdr and, since 1.12.0, inside [Rex](https://www.superlogical.com/rex/docs). This document records the study that found Namedrop could run inside Rex, what the work cost, and the order it was done in. The work happened on the `experimental` branch, and 1.12.0 includes it. Two operator halves are still open: U14's, under item 9 of [Before the first release](#before-the-first-release), and item 11's.
 
 The research dates from 2026-11-11 on macOS. It used Rex `0.1.0-preview.14` (commit `7e460d0`, API revision 12), Claude Code 2.1.322, and Codex CLI 0.163.0. Rex is an invite-only preview, so check every Rex fact here against the version you run.
 
@@ -89,7 +89,7 @@ TLS to a real remote server, a Linux B, and the operator's own hosts were not te
 
 ## Before the first release
 
-This is the one list of what the first Rex release still needs. Each item names where its evidence lives.
+This is the one list of what the first Rex release needed. 1.12.0 is that release. Two operator halves are still open: U14's, under item 9, and item 11's. Each item names where its evidence lives.
 
 1. **Decide what `from.host` may say.** **Done.** On the real wire only a Tailscale principal names the caller's machine, by its `node`. A peer principal, as through `ssh -L` or the stand-in's forwarder, says `uid 501`. B names the sender by a Tailscale node, and otherwise by `from.host`, with a line in each B thread's first message that the sending machine gave itself that name and Rex did not confirm it (ADAPTER.md, "Who may relay"; PORT.md, "The relay's hardening round").
 2. **Supervise the relay worker.** **Done.** A connected bridge starts again, every 10 s, the worker of each label with an item queued or a thread open whose worker does not hold its lock, and the lock still keeps a second one from working. It reads `rex hosts list` only for a label whose worker stopped (PORT.md, "The relay's hardening round" and its third fix round).
