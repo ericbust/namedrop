@@ -59,9 +59,14 @@ fn retirement_precedes_every_dispatch_form_and_all_cached_hook_forms() {
         let before = fs::read(state.join("runtime/retired.json")).unwrap();
         let info = f.run(&["--runtime-info"]);
         assert_eq!(info.status.code(), Some(0), "{reason}: {info:?}");
-        assert!(
-            String::from_utf8_lossy(&info.stdout).contains("\"rex_ui\""),
-            "{reason}: the contract query answers a retired state's updater"
+        let capabilities = f.run(&["--capabilities"]);
+        assert_eq!(
+            (
+                capabilities.status.code(),
+                &*String::from_utf8_lossy(&capabilities.stdout)
+            ),
+            (Some(0), "{\"rex_ui\":1}\n"),
+            "{reason}: --capabilities answers a retired state's install.sh: {capabilities:?}"
         );
         for args in [
             vec!["doctor"],
