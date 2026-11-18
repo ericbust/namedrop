@@ -622,11 +622,12 @@ impl ServerFiles {
     }
 }
 
-/// The server outlives this command, so it must not keep a descriptor this
-/// command inherited without close-on-exec, such as its caller's output pipe
-/// leaked by another thread's concurrent spawn: that caller would wait on the
-/// pipe until the server exits. This process opens every descriptor of its
-/// own with close-on-exec, so marking all of them is harmless here.
+/// The server outlives the process that starts it, so it must not keep a
+/// descriptor that process inherited without close-on-exec, such as its
+/// caller's output pipe leaked by another thread's concurrent spawn: that
+/// caller would wait on the pipe until the server exits. This process opens
+/// every descriptor of its own with close-on-exec, so marking all of them is
+/// harmless here.
 fn close_inherited_descriptors_on_exec() {
     let Ok(entries) = fs::read_dir("/dev/fd") else {
         return;

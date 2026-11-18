@@ -805,9 +805,17 @@ fn the_started_server_keeps_no_descriptor_its_caller_leaked() {
         unsafe { libc::fcntl(reader.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) },
         0
     );
+    let deadline = Instant::now() + Duration::from_secs(2);
     let mut byte = [0; 1];
+    let read = loop {
+        let read = (&reader).read(&mut byte).map_err(|error| error.kind());
+        if read != Err(std::io::ErrorKind::WouldBlock) || Instant::now() > deadline {
+            break read;
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
     assert_eq!(
-        (&reader).read(&mut byte).map_err(|error| error.kind()),
+        read,
         Ok(0),
         "the server still holds a pipe its caller leaked, so a reader of that pipe waits until the server exits"
     );
