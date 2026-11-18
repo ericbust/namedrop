@@ -1,5 +1,5 @@
 <p align="center">
-  <a href="docs/assets/namedrop-demo.mp4">
+  <a href="https://github.com/ericbust/namedrop/blob/main/docs/assets/namedrop-demo.mp4">
     <img src="docs/assets/namedrop-demo.webp" width="100%" alt="Namedrop demo: @reviewer in Claude Code and @coder in Codex get names. A lead agent asks @reviewer and @tester for help and merges their replies into one answer. Then @coder in Codex and @tester in Claude Code get their own jobs and work as peers with no lead, each message shown as a card: @coder asks @reviewer for a pinned review and gets findings back, @tester runs its tests on a shell named @build and gets the failure back, and once the code moves the stale review is redone and comes back fresh. Agent status shows who is waiting on whom.">
   </a>
 </p>
@@ -9,7 +9,7 @@
 <p align="center"><strong>@mentions for Codex, Claude Code, and your terminal.</strong></p>
 
 <p align="center">
-  <a href="docs/assets/namedrop-overview.mp4"><img height="36" alt="Watch the 2½-minute narrated overview" src="https://img.shields.io/badge/%E2%96%B6%20Watch%20the%20overview-2%C2%BD%20min%20video-7de2d1?style=for-the-badge"></a>
+  <a href="https://github.com/ericbust/namedrop/blob/main/docs/assets/namedrop-overview.mp4"><img height="36" alt="Watch the 2½-minute narrated overview" src="https://img.shields.io/badge/%E2%96%B6%20Watch%20the%20overview-2%C2%BD%20min%20video-7de2d1?style=for-the-badge"></a>
 </p>
 
 <p align="center">
@@ -30,7 +30,7 @@
   <a href="#update-namedrop">Update</a> ·
   <a href="#troubleshooting">Troubleshooting</a> ·
   <a href="#uninstall">Uninstall</a> ·
-  <a href="docs/assets/namedrop-demo.mp4">Watch the demo in HD</a>
+  <a href="https://github.com/ericbust/namedrop/blob/main/docs/assets/namedrop-demo.mp4">Watch the demo in HD</a>
 </p>
 
 Namedrop is a [Herdr](https://herdr.dev) plugin that lets agents work together across panes. Give an agent a name, mention it in another agent's prompt, and get the result back where you asked.
@@ -372,7 +372,7 @@ Only devices signed in as this machine's Tailscale owner can use this link. Chan
 
 The browser keeps its tailnet sign-in cookie for seven days after you last opened or reconnected Channels, including across browser restarts. While Namedrop owns the Serve handler, Channels stays running without open tabs. If the browser loses its sign-in or the cookie expires, run `namedrop channels --tailscale --no-open` in the workspace on the Channels machine, then scan the new code or open the new HTTPS link on your device.
 
-While tailnet access is on, the Channels server never stops for having no tab open, so the link on your phone keeps working. When you turn tailnet access off, the idle rule below applies again. An update that migrates the state schema restarts the server on the same port. On macOS, other updates leave it running on the old release. [Restart Channels after an update](docs/operations.md#restart-channels-after-an-update) says how to stop it. If the machine restarts or the server is killed, Herdr starts the server again when Herdr next starts, and when a pane opens, moves or closes. Devices that are signed in stay signed in. Until then the link fails, and `namedrop doctor` reports that the Channels server is not running. To start it yourself, run `namedrop channels --no-open`. If another program has taken the server's port meanwhile, Doctor names the port and says how to free it or move Channels. Herdr has to be running: after a restart with nobody logged in, the link stays down until you open Herdr.
+While tailnet access is on, the Channels server never stops for having no tab open, so the link on your phone keeps working. When you turn tailnet access off, the idle rule below applies again. An update that migrates the state schema restarts the server on the same port. On macOS, other updates usually leave it running on the old release. [Restart Channels after an update](docs/operations.md#restart-channels-after-an-update) says how to stop it. If the machine restarts or the server is killed, Herdr starts the server again when Herdr next starts, and when a pane opens, moves or closes. Devices that are signed in stay signed in. Until then the link fails, and `namedrop doctor` reports that the Channels server is not running. To start it yourself, run `namedrop channels --no-open`. If another program has taken the server's port meanwhile, Doctor names the port and says how to free it or move Channels. Herdr has to be running: after a restart with nobody logged in, the link stays down until you open Herdr.
 
 Without tailnet access, the server stops 10 minutes after the last tab closes. To change that, pass `--idle` with a number of minutes, or `never`:
 
