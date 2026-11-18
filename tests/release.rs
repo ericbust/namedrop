@@ -1,3 +1,6 @@
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/executable.rs"]
@@ -15,7 +18,7 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 
 #[test]
 fn release_checks_order_stable_and_experimental_versions() {
-    let output = Command::new("sh")
+    let output = crate::binary::command("sh")
         .arg(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/release_versions.sh"
@@ -47,7 +50,7 @@ impl Fixture {
         path
     }
     fn command(&self, script: &str) -> Command {
-        let mut command = Command::new("/bin/sh");
+        let mut command = crate::binary::command("/bin/sh");
         command.arg(
             Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("scripts")
@@ -161,7 +164,7 @@ printf '%s\n' "$*" >> "${{NAMEDROP_TEST_ENTRYPOINT_LOG:-/dev/null}}"
         }
         let checkout = checkout.canonicalize().unwrap();
         self.script("cargo", CARGO);
-        let mut command = Command::new("/bin/sh");
+        let mut command = crate::binary::command("/bin/sh");
         command
             .arg(checkout.join("scripts/setup.sh"))
             .env("PATH", format!("{}:/usr/bin:/bin", self.0.display()))
@@ -178,7 +181,7 @@ printf '%s\n' "$*" >> "${{NAMEDROP_TEST_ENTRYPOINT_LOG:-/dev/null}}"
             "cargo",
             "#!/bin/sh\nprintf 'cargo-build\\n' >> \"$NAMEDROP_TEST_LOG\"\nexit 99\n",
         );
-        Command::new("sh")
+        crate::binary::command("sh")
             .arg(package.join("scripts/setup.sh"))
             .env("PATH", format!("{}:/usr/bin:/bin", self.0.display()))
             .env("PYTHONPATH", &self.0)
@@ -223,7 +226,7 @@ chmod 755 "$directory/$target/release/namedrop"
 /// ships sha256sum, macOS ships shasum.
 fn sha256_check(directory: &Path, list: &str) -> bool {
     let run = |program: &str, args: &[&str]| {
-        Command::new(program)
+        crate::binary::command(program)
             .args(args)
             .args(["-c", list])
             .current_dir(directory)
@@ -368,6 +371,135 @@ fn setup_uses_herdr_actions_preserves_context_and_never_relinks_on_check() {
         fs::read_to_string(log).unwrap(),
         "/isolated socket\nspace-1\npane-1\npane\nlist\n"
     );
+}
+
+#[test]
+fn setup_shows_what_a_handoff_from_rex_did() {
+    let fixture = Fixture::new();
+    fixture.host();
+    let mut report: serde_json::Value = serde_json::from_str(&activation_output(true)).unwrap();
+    report["data"]["handoff"] = serde_json::json!([{
+        "state": "/rex/state",
+        "notice": "The names made on Rex stay in /rex/state and were not carried over.",
+        "invalid_bindings": ["/rex/state/rex/sessions/broken.json"],
+        "module": {"status": "not_confirmed", "error": "Rex did not answer", "sealed": false}
+    }]);
+    let output = success(
+        fixture
+            .command("setup.sh")
+            .arg("activate")
+            .env("HERDR_SOCKET_PATH", "/isolated socket")
+            .env("HERDR_WORKSPACE_ID", "space-1")
+            .env("HERDR_PANE_ID", "pane-1")
+            .env(
+                "NAMEDROP_TEST_LOG_RESPONSE",
+                action_response("activate", 0, &report.to_string()),
+            )
+            .output()
+            .unwrap(),
+    );
+    let shown = output.split_whitespace().collect::<Vec<_>>().join(" ");
+    for line in [
+        "Namedrop on Rex",
+        "The names made on Rex stay in /rex/state and were not carried over.",
+        "The Rex module is not confirmed: Rex did not answer",
+        "Could not read the Rex session binding /rex/state/rex/sessions/broken.json",
+        "An agent turn that was running during the move may show Hook failed. If one does, restart that agent.",
+    ] {
+        assert!(shown.contains(line), "{line:?} missing from {output}");
+    }
+    // The U13 review's F6: a path the person copies stays on one line, and
+    // shapes the binary never writes print what they can.
+    let long =
+        "/Users/someone/.namedrop-testbed/profiles/rex-u13-r1/state/namedrop-rex-first-scenario";
+    for (handoff, shows, hides) in [
+        (
+            serde_json::json!([{
+                "state": long,
+                "notice": format!("The names made on Rex stay in {long} and were not carried over."),
+                "invalid_bindings": [format!("{long}/rex/sessions/a-broken-binding-file.json")],
+                "module": {"status": "not_confirmed", "sealed": false}
+            }]),
+            vec![
+                long.to_owned(),
+                format!("{long}/rex/sessions/a-broken-binding-file.json"),
+                "The Rex module is not confirmed.".to_owned(),
+            ],
+            vec!["None"],
+        ),
+        (
+            serde_json::Value::Null,
+            vec![],
+            vec!["Namedrop on Rex", "Hook failed"],
+        ),
+        (
+            serde_json::json!(7),
+            vec![],
+            vec!["Namedrop on Rex", "Hook failed"],
+        ),
+        (
+            serde_json::json!([
+                {"state": "/rex/state", "notice": "Moved.", "invalid_bindings": null, "module": null},
+                {"state": "/rex/other", "notice": "Moved too.", "invalid_bindings": "/rex/other/x.json",
+                    "module": "confirmed"},
+                7
+            ]),
+            vec![
+                "Moved.".to_owned(),
+                "Moved too.".to_owned(),
+                "Hook failed".to_owned(),
+            ],
+            vec!["Could not read", "None"],
+        ),
+    ] {
+        report["data"]["handoff"] = handoff.clone();
+        let output = success(
+            fixture
+                .command("setup.sh")
+                .arg("activate")
+                .env("HERDR_SOCKET_PATH", "/isolated socket")
+                .env("HERDR_WORKSPACE_ID", "space-1")
+                .env("HERDR_PANE_ID", "pane-1")
+                .env(
+                    "NAMEDROP_TEST_LOG_RESPONSE",
+                    action_response("activate", 0, &report.to_string()),
+                )
+                .output()
+                .unwrap(),
+        );
+        // The hint is the move's, once however many states moved (round A's
+        // review, F5).
+        let moves = usize::from(!shows.is_empty());
+        for text in shows {
+            assert!(
+                output.lines().any(|line| line.contains(&text)),
+                "{handoff}: {text:?} is not whole on one line of {output}"
+            );
+        }
+        for text in hides {
+            assert!(!output.contains(text), "{handoff}: {text:?} in {output}");
+        }
+        assert_eq!(
+            output.matches("may show Hook failed").count(),
+            moves,
+            "{handoff}: {output}"
+        );
+    }
+    let plain = success(
+        fixture
+            .command("setup.sh")
+            .arg("activate")
+            .env("HERDR_SOCKET_PATH", "/isolated socket")
+            .env("HERDR_WORKSPACE_ID", "space-1")
+            .env("HERDR_PANE_ID", "pane-1")
+            .env(
+                "NAMEDROP_TEST_LOG_RESPONSE",
+                action_response("activate", 0, &activation_output(true)),
+            )
+            .output()
+            .unwrap(),
+    );
+    assert!(!plain.contains("Rex"), "{plain}");
 }
 
 #[test]
@@ -603,10 +735,12 @@ fn the_archive_bundles_every_declared_entrypoint_including_the_naming_popup() {
         "herdr-plugin.toml",
         "runtime.json",
         "scripts/setup.sh",
+        "scripts/install.sh",
         "scripts/update.sh",
         "scripts/update.py",
         "scripts/run.sh",
         "scripts/runtime.py",
+        "scripts/runtime_install.py",
         "scripts/check-linux-prerequisites.sh",
         "SHA256SUMS",
         "README.md",
@@ -616,6 +750,9 @@ fn the_archive_bundles_every_declared_entrypoint_including_the_naming_popup() {
         "docs/operations.md",
         "docs/compatibility.md",
         "docs/releasing.md",
+        "docs/rex.md",
+        "docs/rex-reference.md",
+        "docs/channels-testing.md",
     ];
     for path in expected_files {
         assert!(package.join(path).is_file(), "missing archive file: {path}");
@@ -637,7 +774,7 @@ fn the_archive_bundles_every_declared_entrypoint_including_the_naming_popup() {
             "the archive ships a source-build input: {path}"
         );
     }
-    for path in ["bin/namedrop", "scripts/setup.sh"] {
+    for path in ["bin/namedrop", "scripts/setup.sh", "scripts/install.sh"] {
         assert_ne!(
             fs::metadata(package.join(path))
                 .unwrap()
@@ -755,7 +892,7 @@ fn the_archive_bundles_every_declared_entrypoint_including_the_naming_popup() {
             continue;
         }
         assert!(
-            Command::new("/bin/sh")
+            crate::binary::command("/bin/sh")
                 .args(["-c", r#"exec "$@""#, "sh"])
                 .args(command)
                 .args(extra)
@@ -872,7 +1009,7 @@ fn the_archive_installs_from_a_directory_containing_spaces() {
 
     let invocations = fixture.0.join("spaced-entrypoint-call");
     success(
-        Command::new("/bin/sh")
+        crate::binary::command("/bin/sh")
             .args(["-c", r#"exec "$@""#, "sh", "./bin/namedrop", "reconcile"])
             .current_dir(&package)
             .env("PATH", "/usr/bin:/bin")

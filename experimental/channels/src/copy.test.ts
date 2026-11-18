@@ -6,6 +6,8 @@ import {
   avatarHue,
   composerCopy,
   composerPlaceholder,
+  createCopy,
+  createFailureCopy,
   dayBounds,
   dayLabel,
   disabledChannelCopy,
@@ -218,8 +220,11 @@ test("a reply-limit item the browser can continue or stop says why the agents pa
       "Continue or stop this thread from its pane.",
       JSON.stringify(extra),
     );
-  const { status, ...words } = threadControlCopy;
+  const { status, confirmDismissAll, dismissCount, ...words } =
+    threadControlCopy;
   assert.equal(status(404), "HTTP 404");
+  assert.equal(confirmDismissAll(4), "Dismiss these 4? Nothing else changes.");
+  assert.equal(dismissCount(4), "Dismiss 4");
   assert.deepEqual(words, {
     continue: {
       label: "Allow 10 more replies",
@@ -236,17 +241,18 @@ test("a reply-limit item the browser can continue or stop says why the agents pa
     dismiss: {
       label: "Dismiss",
       pending: "Dismissing…",
-      title: "Removes this card. The request stays in the thread as ended.",
+      title: "Removes this card. Nothing is sent.",
       failed: "Couldn't dismiss it. Try again.",
     },
     confirm: "Stop this thread for good?",
     confirmStop: "Stop",
     confirmDismissQuestion: "Dismiss this? Its answer can't arrive.",
+    confirmDismissWarning: "Dismiss this? Nothing else changes.",
     confirmDismiss: "Dismiss",
+    dismissAll: "Dismiss all",
     cancel: "Cancel",
     gone: "This thread is no longer in this workspace.",
-    requestGone: "This request is no longer in this workspace.",
-    stillAnswerable: "The agent can still answer this, so it stays.",
+    requestGone: "This is no longer in this workspace.",
     nothingToDismiss:
       "This was already cleared. The card goes away on the next update.",
   });
@@ -959,4 +965,96 @@ test("an unanswered-request card whose held answer can't arrive says why in plai
     },
     "an ordinary unanswered request keeps its words",
   );
+});
+
+test("create failures: the server's sentence shows as is, an expired session reads as it does for a post, and anything else asks to try again", () => {
+  const sentence = (status: number, message: string) =>
+    createFailureCopy({ status, message });
+  for (const [status, message] of [
+    [400, "That folder doesn't exist. Namedrop never creates folders."],
+    [404, "This channel's workspace is closed."],
+    [409, "Another channel is already named #web. Pick a different name."],
+    [500, "Herdr couldn't create the workspace. Try again."],
+    [
+      503,
+      "Herdr isn't reachable. Check that Herdr is running, then try again.",
+    ],
+  ] as const)
+    assert.equal(sentence(status, ` ${message} `), message, `status ${status}`);
+  const expired = "Your session expired. Reload the page to keep posting.";
+  assert.equal(sentence(401, "No session."), expired);
+  assert.equal(sentence(403, "Forbidden."), expired);
+  assert.equal(
+    sendErrorCopy({ status: 403, message: "" }),
+    expired,
+    "the same words a refused post shows",
+  );
+  for (const [status, message] of [
+    [0, ""],
+    [409, ""],
+    [413, "Too large."],
+    [201, ""],
+  ] as const)
+    assert.equal(sentence(status, message), createCopy.failed, `${status}`);
+  assert.equal(createCopy.failed, "Namedrop couldn't do that. Try again.");
+});
+
+test("create copy: no string says operator or carries a long dash", () => {
+  const strings = Object.values(createCopy).flatMap((value) =>
+    typeof value === "string"
+      ? [value]
+      : typeof value === "function"
+        ? [value("name")]
+        : Object.values(value),
+  );
+  for (const text of strings) {
+    assert.equal(/operator/i.test(text), false, text);
+    assert.equal(/[\u2013\u2014]/.test(text), false, text);
+  }
+});
+
+test("a new agent's card says what to do in the server's words, hints at the first-run screens, and offers the pane", () => {
+  const item: Attention = {
+    rowKey: "agent-start-a9",
+    sourceId: "a9",
+    source: "agent_start",
+    summary: {
+      text: "Finish Claude's setup in @reviewer's pane",
+      truncated: false,
+    },
+    subjectSummary: null,
+    openedAt: 1,
+    subjectAlias: "@reviewer",
+    messageId: null,
+    threadId: null,
+    actions: [],
+    response: { kind: "pane", addressId: "a9" as AddressId },
+  };
+  const hint =
+    "Open its pane. It may first ask you to trust the folder or to log in.";
+  assert.deepEqual(attentionCopy(item), {
+    title: "Finish Claude's setup in @reviewer's pane",
+    hint,
+    hintTitle: null,
+    details: null,
+  });
+  const codex = "Send @reviewer its first message in its pane";
+  assert.equal(
+    attentionCopy({ ...item, summary: { text: codex, truncated: false } })
+      .title,
+    codex,
+  );
+  const silent = { ...item, summary: { text: "", truncated: false } };
+  assert.deepEqual(attentionCopy(silent), {
+    title: "Finish @reviewer's setup in its pane",
+    hint,
+    hintTitle: null,
+    details: "",
+  });
+  assert.equal(
+    attentionCopy({ ...silent, subjectAlias: null }).title,
+    "Finish a new agent's setup in its pane",
+  );
+  assert.equal(attentionKind(item), "Finish a new agent's setup in its pane");
+  assert.equal(responseCopy.pane("@reviewer"), "See @reviewer's screen");
 });

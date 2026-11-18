@@ -3,7 +3,6 @@ use crate::cleanup;
 use std::{
     env,
     path::{Path, PathBuf},
-    process::Command,
 };
 
 const ROOT: &str = "NAMEDROP_UPDATE_TEST_ROOT";
@@ -17,7 +16,7 @@ pub fn isolate(root: &Path, home: &Path) -> bool {
         return false;
     }
     let thread = std::thread::current();
-    let output = Command::new(env::current_exe().unwrap())
+    let output = crate::binary::command(env::current_exe().unwrap())
         .args(["--exact", thread.name().unwrap(), "--nocapture"])
         .env(ROOT, root)
         .env("HOME", home)

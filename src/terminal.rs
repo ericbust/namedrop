@@ -1,32 +1,31 @@
 use crate::lifecycle::locate_agent_session_pane;
+use crate::locator::{Locator, Name};
+use crate::mux::{MuxError, MuxRead, PaneId, PaneProcess};
 use crate::{ActorKind, Clock, DeliveryAttemptId, IdGenerator, MutationAttribution, StateStore};
-use crate::{
-    HerdrCommandExecutor, LifecycleRuntime, PaneType, discover_worktree,
-    discover_worktree_for_workspace,
-};
-use serde::Deserialize;
+use crate::{LifecycleRuntime, PaneType, discover_worktree, discover_worktree_for_workspace};
 use std::{
     io::{Read, Write},
     process::{Command, Stdio},
     thread,
 };
 
-pub(crate) fn runner_command<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub(crate) fn runner_command<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     workspace: &str,
     pane: &str,
     attempt: &DeliveryAttemptId,
 ) -> Result<String, String> {
     let quote = |s: &str| format!("'{}'", s.replace('\'', "'\"'\"'"));
+    let name = Name::for_endpoint(runtime.session_socket_id);
     Ok([
         crate::collaboration_executable()?,
         "--plugin-state".to_owned(),
         runtime.state_directory.display().to_string(),
-        "--herdr-socket".to_owned(),
+        Locator::Endpoint.flag_for(name).to_owned(),
         runtime.session_socket_id.to_owned(),
-        "--herdr-workspace".to_owned(),
+        Locator::Space.flag_for(name).to_owned(),
         workspace.to_owned(),
-        "--herdr-pane".to_owned(),
+        Locator::Pane.flag_for(name).to_owned(),
         pane.to_owned(),
         "terminal-execute".to_owned(),
         attempt.as_str().to_owned(),
@@ -39,28 +38,29 @@ pub(crate) fn runner_command<E, C, I>(
 
 /// Runs inside the target terminal. The atomic claim rejects replay and binds
 /// execution to the physical terminal, not a potentially recycled pane label.
-pub fn execute_terminal<E: HerdrCommandExecutor, C: Clock, I: IdGenerator>(
+pub fn execute_terminal<M: MuxRead, C: Clock, I: IdGenerator>(
     attempt: &str,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<i32, String> {
     let discovered = match runtime.workspace_id {
-        Some(id) => discover_worktree_for_workspace(runtime.herdr, id)?,
-        None => discover_worktree(runtime.herdr, runtime.cwd)?,
+        Some(id) => discover_worktree_for_workspace(runtime.mux, id)?,
+        None => discover_worktree(runtime.mux, runtime.cwd)?,
     };
     let ns = discovered.namespace(runtime.session_socket_id);
     let pane = discovered
         .panes
         .iter()
         .find(|p| Some(p.pane_id.as_str()) == runtime.current_pane_id)
-        .ok_or("terminal runner requires its current Herdr pane")?;
-    if pane.agent.is_some() || pane.agent_session_id.is_some() {
+        .ok_or(runtime.mux.endpoint().kind.text(
+            "terminal runner requires its current Herdr pane",
+            "terminal runner requires its current Rex pane",
+        ))?;
+    if pane.agent.is_some() {
         return Err("terminal pane now contains an agent; command was not executed".to_owned());
     }
-    if !process_info(runtime.herdr, &pane.pane_id).is_some_and(|p| {
-        p.foreground_processes
-            .iter()
-            .any(|p| p.pid == std::process::id())
-    }) {
+    if !process_info(runtime.mux, &pane.pane_id)
+        .is_some_and(|p| p.foreground_pids.contains(&std::process::id()))
+    {
         return Err(
             "terminal runner must be running in the target pane's foreground process group"
                 .to_owned(),
@@ -151,36 +151,30 @@ fn copy_output(mut reader: impl Read, mut writer: impl Write) -> Result<String, 
     Ok(text)
 }
 
-#[derive(Deserialize)]
-struct ProcessInfo {
-    shell_pid: u64,
-    foreground_process_group_id: u64,
-    #[serde(default)]
-    foreground_processes: Vec<Process>,
-}
-#[derive(Deserialize)]
-struct Process {
-    pid: u32,
+pub(crate) fn shell_is_available(mux: &impl MuxRead, pane_id: &str) -> bool {
+    process_info(mux, pane_id).is_some_and(|p| p.shell_pid > 0 && p.shell_pid == p.foreground_group)
 }
 
-pub(crate) fn shell_is_available(herdr: &impl HerdrCommandExecutor, pane_id: &str) -> bool {
-    process_info(herdr, pane_id)
-        .is_some_and(|p| p.shell_pid > 0 && p.shell_pid == p.foreground_process_group_id)
+/// A process reply that names both the shell and the foreground group. The
+/// terminal checks have always read a reply missing either as no reply.
+struct ShellProcess {
+    shell_pid: u32,
+    foreground_group: u32,
+    foreground_pids: Vec<u32>,
 }
 
-fn process_info(herdr: &impl HerdrCommandExecutor, pane_id: &str) -> Option<ProcessInfo> {
-    herdr
-        .execute(&["pane", "process-info", "--pane", pane_id])
-        .ok()
-        .and_then(|out| parse_process_info(&out.stdout))
-}
-
-fn parse_process_info(stdout: &str) -> Option<ProcessInfo> {
-    serde_json::from_str::<serde_json::Value>(stdout)
-        .ok()
-        .and_then(|v| {
-            serde_json::from_value::<ProcessInfo>(v["result"]["process_info"].clone()).ok()
+impl ShellProcess {
+    fn from_reply(process: PaneProcess) -> Option<Self> {
+        Some(Self {
+            shell_pid: process.shell_pid?,
+            foreground_group: process.foreground_group?,
+            foreground_pids: process.foreground_pids,
         })
+    }
+}
+
+fn process_info(mux: &impl MuxRead, pane_id: &str) -> Option<ShellProcess> {
+    ShellProcess::from_reply(mux.process(&PaneId::new(pane_id)).ok()?)
 }
 
 /// A pane ID inherited from the environment only identifies this process when
@@ -190,33 +184,41 @@ fn parse_process_info(stdout: &str) -> Option<ProcessInfo> {
 /// started from, so the inherited value can name a pane the caller left long
 /// ago. Acting as that pane is a silent identity error, so the check refuses
 /// instead of falling back. When Herdr does not answer, nothing was learned
-/// about the pane, so its own error is the reason given.
+/// about the pane, so its own error is the reason given. `name` says which
+/// variable held the pane ID.
 pub fn verify_inherited_pane(
-    herdr: &impl HerdrCommandExecutor,
+    mux: &impl MuxRead,
+    name: Name,
     pane_id: &str,
     agent_session_ids: &[&str],
 ) -> Result<(), String> {
-    let remedy = "Pass --herdr-pane <pane-id> to say which pane this command acts for.";
-    let output = herdr
-        .execute(&["pane", "process-info", "--pane", pane_id])
-        .map_err(|error| {
-            format!("could not verify the inherited HERDR_PANE_ID={pane_id}: {error} {remedy}")
-        })?;
-    let shell_pid = parse_process_info(&output.stdout)
-        .map(|p| p.shell_pid)
-        .filter(|pid| *pid > 0)
-        .ok_or_else(|| {
-            format!(
-                "HERDR_PANE_ID={pane_id} was inherited from the environment, but Herdr reports \
-                 no shell for pane {pane_id}, so the pane could not be verified. {remedy}"
-            )
-        })?;
+    let variable = Locator::Pane.var(name);
+    let remedy = format!(
+        "Pass {} <pane-id> to say which pane this command acts for.",
+        Locator::Pane.flag_for(name)
+    );
+    let shell_pid = match mux.process(&PaneId::new(pane_id)) {
+        Ok(process) => ShellProcess::from_reply(process).map(|p| p.shell_pid),
+        Err(MuxError::Protocol(_)) => None,
+        Err(error) => {
+            return Err(format!(
+                "could not verify the inherited {variable}={pane_id}: {error} {remedy}"
+            ));
+        }
+    }
+    .filter(|pid| *pid > 0)
+    .ok_or_else(|| {
+        format!(
+            "{variable}={pane_id} was inherited from the environment, but Herdr reports \
+             no shell for pane {pane_id}, so the pane could not be verified. {remedy}"
+        )
+    })?;
     let caller = std::process::id();
-    if ancestor_pids(caller).any(|pid| u64::from(pid) == shell_pid) {
+    if ancestor_pids(caller).any(|pid| pid == shell_pid) {
         return Ok(());
     }
     if agent_session_ids.iter().any(|session| {
-        locate_agent_session_pane(herdr, session).is_some_and(|(_, pane)| pane == pane_id)
+        locate_agent_session_pane(mux, session).is_some_and(|(_, pane)| pane == pane_id)
     }) {
         return Ok(());
     }
@@ -231,7 +233,7 @@ pub fn verify_inherited_pane(
         )
     };
     Err(format!(
-        "HERDR_PANE_ID={pane_id} was inherited from the environment, but this process (pid \
+        "{variable}={pane_id} was inherited from the environment, but this process (pid \
          {caller}) is not running inside pane {pane_id}: the pane's shell (pid {shell_pid}) is \
          not one of its ancestors. {sessions} A background daemon keeps the pane variables it \
          was started with. {remedy}"
@@ -245,12 +247,8 @@ pub(crate) fn ancestor_pids(pid: u32) -> impl Iterator<Item = u32> {
 
 /// The pids Herdr reports in a pane's foreground process group, or `None` when
 /// Herdr does not answer.
-pub(crate) fn foreground_process_ids(
-    herdr: &impl HerdrCommandExecutor,
-    pane_id: &str,
-) -> Option<Vec<u32>> {
-    process_info(herdr, pane_id)
-        .map(|info| info.foreground_processes.iter().map(|p| p.pid).collect())
+pub(crate) fn foreground_process_ids(mux: &impl MuxRead, pane_id: &str) -> Option<Vec<u32>> {
+    process_info(mux, pane_id).map(|info| info.foreground_pids)
 }
 
 /// A process's argv, or `None` when the process is gone or unreadable.
@@ -390,40 +388,48 @@ fn parent_pid(pid: u32) -> Option<u32> {
 }
 
 /// Detection never infers a terminal merely from a missing native session ID.
-pub fn detect_pane_type<E: HerdrCommandExecutor, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub fn detect_pane_type<M: MuxRead, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Option<PaneType>, String> {
     let discovered = match runtime.workspace_id {
-        Some(id) => discover_worktree_for_workspace(runtime.herdr, id)?,
-        None => discover_worktree(runtime.herdr, runtime.cwd)?,
+        Some(id) => discover_worktree_for_workspace(runtime.mux, id)?,
+        None => discover_worktree(runtime.mux, runtime.cwd)?,
     };
     let pane = discovered
         .panes
         .iter()
         .find(|p| Some(p.pane_id.as_str()) == runtime.current_pane_id)
-        .ok_or_else(|| "name must run from the Herdr pane being named".to_owned())?;
-    if pane.agent.is_some() || pane.agent_session_id.is_some() {
+        .ok_or_else(|| {
+            runtime
+                .mux
+                .endpoint()
+                .kind
+                .text(
+                    "name must run from the Herdr pane being named",
+                    "name must run from the Rex pane being named",
+                )
+                .to_owned()
+        })?;
+    if pane.agent.is_some() {
         return Ok(Some(PaneType::Agent));
     }
-    Ok(process_info(runtime.herdr, &pane.pane_id)
+    Ok(process_info(runtime.mux, &pane.pane_id)
         .is_some_and(|p| {
             p.shell_pid > 0
-                && (p.shell_pid == p.foreground_process_group_id
-                    || p.foreground_processes
-                        .iter()
-                        .any(|p| p.pid == std::process::id()))
+                && (p.shell_pid == p.foreground_group
+                    || p.foreground_pids.contains(&std::process::id()))
         })
         .then_some(PaneType::Terminal))
 }
 
 /// Both naming surfaces retain a saved type before considering live detection.
 /// Opening/cancelling a prompt must not create or migrate persisted state.
-pub fn default_pane_type<E: HerdrCommandExecutor, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub fn default_pane_type<M: MuxRead, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Option<PaneType>, String> {
     let discovered = match runtime.workspace_id {
-        Some(id) => discover_worktree_for_workspace(runtime.herdr, id)?,
-        None => discover_worktree(runtime.herdr, runtime.cwd)?,
+        Some(id) => discover_worktree_for_workspace(runtime.mux, id)?,
+        None => discover_worktree(runtime.mux, runtime.cwd)?,
     };
     if let Some(mut store) =
         StateStore::open_read_only(runtime.state_directory).map_err(|e| e.to_string())?
@@ -440,4 +446,47 @@ pub fn default_pane_type<E: HerdrCommandExecutor, C, I>(
         return Ok(Some(kind));
     }
     detect_pane_type(runtime)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ProcessIds, SystemClock, mux::fake::FakeMux};
+    use std::path::Path;
+
+    /// The line a terminal attempt types names its location with the flags of
+    /// the endpoint's kind: Herdr's for Herdr, as before, and the neutral
+    /// ones for Rex.
+    #[test]
+    fn a_runner_line_passes_its_location_with_the_flags_of_the_endpoint_s_kind() {
+        let mux = FakeMux::world().build();
+        let ids = ProcessIds::default();
+        let line = |endpoint: &str| {
+            let runtime = LifecycleRuntime {
+                state_directory: Path::new("/state"),
+                home_directory: None,
+                agent_config: Default::default(),
+                cwd: Path::new("/repo"),
+                workspace_id: None,
+                current_pane_id: None,
+                session_socket_id: endpoint,
+                mux: &mux,
+                clock: &SystemClock,
+                ids: &ids,
+            };
+            let line = runner_command(&runtime, "s1", "p1", &DeliveryAttemptId::new("a1")).unwrap();
+            let executable = crate::collaboration_executable().unwrap();
+            line.strip_prefix(&format!("'{executable}' "))
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(
+            line("/tmp/h.sock"),
+            "'--plugin-state' '/state' '--herdr-socket' '/tmp/h.sock' '--herdr-workspace' 's1' '--herdr-pane' 'p1' 'terminal-execute' 'a1'"
+        );
+        assert_eq!(
+            line("rex:/tmp/r.sock"),
+            "'--plugin-state' '/state' '--endpoint' 'rex:/tmp/r.sock' '--space' 's1' '--pane' 'p1' 'terminal-execute' 'a1'"
+        );
+    }
 }

@@ -1,9 +1,8 @@
 use crate::{
     ActorKind, AgentSessionId, Clock, ContextGrantDraft, ContextGrantId, ContextGrantRecord,
-    ContextGrantState, ContextSnapshotId, EvidenceKind, EvidencePointer, HerdrCommandExecutor,
-    IdGenerator, LifecycleRuntime, MessageId, MutationAttribution, PaneAddressId, StateNamespace,
-    StateStore, StoreError, StoreErrorKind, ThreadId, discover_worktree,
-    discover_worktree_for_workspace,
+    ContextGrantState, ContextSnapshotId, EvidenceKind, EvidencePointer, IdGenerator,
+    LifecycleRuntime, MessageId, MutationAttribution, PaneAddressId, StateNamespace, StateStore,
+    StoreError, StoreErrorKind, ThreadId, discover_worktree, discover_worktree_for_workspace,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -252,40 +251,42 @@ enum ContextInvocation {
     Human,
 }
 
-pub fn execute_context_operation<E, C, I>(
+pub fn execute_context_operation<M, C, I>(
     operation: &str,
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
     execute_context_operation_as(ContextInvocation::AgentSession, operation, input, runtime)
+        .map_err(|error| runtime.mux.endpoint().kind.authored_error(error))
 }
 
-pub fn execute_human_context_operation<E, C, I>(
+pub fn execute_human_context_operation<M, C, I>(
     operation: &str,
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
     execute_context_operation_as(ContextInvocation::Human, operation, input, runtime)
+        .map_err(|error| runtime.mux.endpoint().kind.authored_error(error))
 }
 
-fn execute_context_operation_as<E, C, I>(
+fn execute_context_operation_as<M, C, I>(
     invocation: ContextInvocation,
     operation: &str,
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
@@ -296,9 +297,10 @@ where
         "context.revoke" if invocation == ContextInvocation::Human => {
             revoke_human_grant(input, runtime)
         }
-        "context.grant" | "context.revoke" => {
-            Err(format!("{operation} requires a Herdr-managed human action"))
-        }
+        "context.grant" | "context.revoke" => Err(format!(
+            "{operation} requires a {}-managed human action",
+            runtime.mux.endpoint().kind.title()
+        )),
         "snapshot.publish" if invocation == ContextInvocation::AgentSession => {
             publish_snapshot(input, runtime)
         }
@@ -311,12 +313,12 @@ where
     }
 }
 
-fn create_human_grant<E, C, I>(
+fn create_human_grant<M, C, I>(
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
@@ -360,12 +362,12 @@ where
     Ok(json!({"grants": grants}))
 }
 
-fn revoke_human_grant<E, C, I>(
+fn revoke_human_grant<M, C, I>(
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
@@ -391,12 +393,12 @@ where
     .map_err(|error| error.to_string())
 }
 
-fn publish_snapshot<E, C, I>(
+fn publish_snapshot<M, C, I>(
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
@@ -433,9 +435,17 @@ where
             return Err(error);
         }
     };
-    let pane_id = runtime
-        .current_pane_id
-        .ok_or_else(|| "the current Herdr pane is required for snapshot publication".to_owned())?;
+    let pane_id = runtime.current_pane_id.ok_or_else(|| {
+        runtime
+            .mux
+            .endpoint()
+            .kind
+            .text(
+                "the current Herdr pane is required for snapshot publication",
+                "the current Rex pane is required for snapshot publication",
+            )
+            .to_owned()
+    })?;
     let attribution = MutationAttribution::new(
         ActorKind::AgentSession,
         "current-agent-session",
@@ -675,12 +685,12 @@ where
     })
 }
 
-pub(crate) fn record_snapshot_activation_failure<E, C, I>(
+pub(crate) fn record_snapshot_activation_failure<M, C, I>(
     grant_ids: &[String],
     error: &str,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
@@ -711,13 +721,13 @@ pub(crate) fn record_snapshot_activation_failure<E, C, I>(
     }
 }
 
-fn inspect_context<E, C, I>(
+fn inspect_context<M, C, I>(
     input: Value,
     invocation: ContextInvocation,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
@@ -730,9 +740,10 @@ where
         .transaction(|transaction| {
             let reader = if invocation == ContextInvocation::AgentSession {
                 let pane_id = runtime.current_pane_id.ok_or_else(|| {
-                    StoreError::invalid_input(
+                    StoreError::invalid_input(runtime.mux.endpoint().kind.text(
                         "the current Herdr pane is required for context inspection",
-                    )
+                        "the current Rex pane is required for context inspection",
+                    ))
                 })?;
                 Some(registered_current_address(
                     transaction,
@@ -862,13 +873,13 @@ where
         .map_err(|error| error.to_string())
 }
 
-fn read_context<E, C, I>(
+fn read_context<M, C, I>(
     input: Value,
     invocation: ContextInvocation,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
@@ -881,9 +892,10 @@ where
         .transaction(|transaction| {
             let reader = if invocation == ContextInvocation::AgentSession {
                 let pane_id = runtime.current_pane_id.ok_or_else(|| {
-                    StoreError::invalid_input(
+                    StoreError::invalid_input(runtime.mux.endpoint().kind.text(
                         "the current Herdr pane is required for Agent Session context reads",
-                    )
+                        "the current Rex pane is required for Agent Session context reads",
+                    ))
                 })?;
                 Some(registered_current_address(
                     transaction,
@@ -963,17 +975,16 @@ where
                         })
                 })
                 .map_err(|error| error.to_string())?;
-            let lines = max_lines.to_string();
-            let output = runtime.herdr.execute(&[
-                "pane",
-                "read",
-                &source,
-                "--source",
-                "recent-unwrapped",
-                "--lines",
-                &lines,
-            ])?;
-            Value::String(redact_disclosure_text(&output.stdout))
+            let request = crate::mux::ScreenRequest {
+                lines: *max_lines,
+                wrap: crate::mux::Wrap::Joined,
+                style: crate::mux::Style::Plain,
+            };
+            let screen = runtime
+                .mux
+                .screen(&crate::mux::PaneId::new(source), request)
+                .map_err(|error| error.to_string())?;
+            Value::String(redact_disclosure_text(&screen.text))
         }
         EvidenceSelection::File {
             locator,
@@ -1185,15 +1196,15 @@ fn absent_context_reference(
     ))
 }
 
-fn discover<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+fn discover<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<(StateNamespace, crate::DiscoveredWorktree), String>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux,
 {
     let discovered = match runtime.workspace_id {
-        Some(workspace_id) => discover_worktree_for_workspace(runtime.herdr, workspace_id)?,
-        None => discover_worktree(runtime.herdr, runtime.cwd)?,
+        Some(workspace_id) => discover_worktree_for_workspace(runtime.mux, workspace_id)?,
+        None => discover_worktree(runtime.mux, runtime.cwd)?,
     };
     Ok((discovered.namespace(runtime.session_socket_id), discovered))
 }
@@ -1230,7 +1241,7 @@ fn require_live_context_session(
         .panes
         .iter()
         .find(|pane| pane.pane_id == pane_id)
-        .and_then(|pane| pane.agent_session_id.as_ref())
+        .and_then(|pane| pane.agent_session_id())
         != Some(session)
     {
         return Err(StoreError::invalid_input(

@@ -1,8 +1,11 @@
+#![cfg(feature = "test-support")]
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/delivered.rs"]
 mod delivered;
 
+use namedrop::mux::fake::{Call, SentInput};
 use namedrop::{
     ActorKind, AgentSessionId, MutationAttribution, PaneAddressId, StateNamespace, StateStore,
     drain_mailboxes, execute_control_operation, execute_handoff_operation,
@@ -1152,13 +1155,11 @@ fn a_single_workspace_tracked_handoff_issues_the_same_herdr_commands() {
             .lock()
             .unwrap()
             .iter()
-            .map(|command| {
-                let command = command.split(" {").next().unwrap();
-                command
-                    .split(" Namedrop message ")
-                    .next()
-                    .unwrap()
-                    .to_owned()
+            .map(|call| match call {
+                Call::Input(attempt) if matches!(attempt.input, SentInput::Prompt(_)) => {
+                    format!("prompt {}", attempt.pane.as_str())
+                }
+                call => format!("{call:?}"),
             })
             .collect::<Vec<_>>()
     };

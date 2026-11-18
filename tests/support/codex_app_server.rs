@@ -94,7 +94,7 @@ pub fn pid_file(codex_home: &Path) -> PathBuf {
 /// A stand-in for a pane's `codex --no-daemon`.
 pub fn in_process_codex() -> Process {
     Process::spawn(
-        Command::new("/bin/sh").args(["-c", "sleep 60; :", "sh", "--no-daemon"]),
+        crate::binary::command("/bin/sh").args(["-c", "sleep 60; :", "sh", "--no-daemon"]),
         "/bin/sh",
     )
 }
@@ -123,7 +123,7 @@ pub fn snapshot(root: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
 /// Codex shared app-server, the way the server runs a session's hooks. The
 /// trailing `:` keeps the shell from replacing itself with the program.
 pub fn inside_server(codex_home: &Path, program: &Path) -> Command {
-    let mut command = Command::new("/bin/sh");
+    let mut command = crate::binary::command("/bin/sh");
     command
         .arg0(server_program(codex_home))
         .args(["-c", "\"$@\"; :", "sh"])

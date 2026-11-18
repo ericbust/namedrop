@@ -9,6 +9,7 @@ import {
 import { flushSync } from "react-dom";
 import {
   bodyCopy,
+  imageCopy,
   noRepliesCopy,
   overflowCopy,
   type ParticipantCopy,
@@ -21,6 +22,7 @@ import {
   routeCopy,
   SHOWN_RECIPIENTS,
 } from "../copy.ts";
+import { imageUrl, splitImages } from "../images.ts";
 import type {
   AddressId,
   Alias,
@@ -195,6 +197,42 @@ function Body({
         <p className="truncation-note">{bodyCopy.shortened}</p>
       )}
     </>
+  );
+}
+function SentImage({ name, label }: { name: string; label: string }) {
+  const [gone, setGone] = useState(false);
+  return gone ? (
+    <span className="msg-image-gone">{imageCopy.gone}</span>
+  ) : (
+    <a
+      href={imageUrl(name)}
+      target="_blank"
+      rel="noreferrer"
+      title={imageCopy.open}
+    >
+      <img
+        src={imageUrl(name)}
+        alt={label}
+        loading="lazy"
+        onError={() => setGone(true)}
+      />
+    </a>
+  );
+}
+// The images a message carries, under its words.
+function SentImages({ names }: { names: readonly string[] }) {
+  if (names.length === 0) return null;
+  return (
+    <ul className="msg-images">
+      {names.map((name, index) => (
+        <li key={name}>
+          <SentImage
+            name={name}
+            label={imageCopy.sent(index + 1, names.length)}
+          />
+        </li>
+      ))}
+    </ul>
   );
 }
 function TerminalOutput({
@@ -833,6 +871,7 @@ export const Message = memo(
               messageId={message.id}
             />
           )}
+          <SentImages names={message.images} />
           {channelChat
             ? chat.route && (
                 <Route
@@ -910,6 +949,7 @@ export function PendingMessage({
   const time = clock(entry.at);
   const stage = entry.phase.kind;
   const copy = pendingCopy[stage];
+  const { text, images } = splitImages(entry.source);
   return (
     <article
       className={`msg pending ${grouped ? "grouped" : "group-start"}`}
@@ -933,7 +973,8 @@ export function PendingMessage({
             )}
           </header>
         )}
-        <Body text={entry.source} truncated={false} variant="text" />
+        <Body text={text} truncated={false} variant="text" />
+        <SentImages names={images.map((image) => image.name)} />
         <ul className="receipt" aria-label="Delivery">
           <li data-stage={stage}>
             <Icon name={copy.icon} className="icon-12" />

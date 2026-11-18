@@ -4,14 +4,14 @@
 #![allow(dead_code)]
 
 use namedrop::{
-    Clock, HerdrCommandExecutor, IdGenerator, LifecycleRuntime, drain_mailboxes,
-    execute_integration_operation, execute_message_operation, spaces_to_wake,
+    Clock, IdGenerator, LifecycleRuntime, drain_mailboxes, execute_integration_operation,
+    execute_message_operation, spaces_to_wake,
 };
 use serde_json::Value;
 
-pub fn wake<E, C, I>(runtime: &LifecycleRuntime<'_, E, C, I>)
+pub fn wake<M, C, I>(runtime: &LifecycleRuntime<'_, M, C, I>)
 where
-    E: HerdrCommandExecutor,
+    M: namedrop::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
@@ -27,13 +27,13 @@ where
     }
 }
 
-pub fn message<E, C, I>(
+pub fn message<M, C, I>(
     operation: &str,
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String>
 where
-    E: HerdrCommandExecutor,
+    M: namedrop::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
@@ -44,13 +44,13 @@ where
     result
 }
 
-pub fn integration<E, C, I>(
+pub fn integration<M, C, I>(
     operation: &str,
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String>
 where
-    E: HerdrCommandExecutor,
+    M: namedrop::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {

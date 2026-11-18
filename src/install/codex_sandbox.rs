@@ -1,4 +1,5 @@
 use super::{conflict, replace_if_changed};
+use crate::installed_runtime::PackageLease;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -76,8 +77,9 @@ fn record(state: &Path) -> Result<Option<Grant>, String> {
     Ok(grant)
 }
 
-fn save(state: &Path, grant: Option<&Grant>) -> Result<(), String> {
+fn save(lease: &PackageLease, state: &Path, grant: Option<&Grant>) -> Result<(), String> {
     replace_if_changed(
+        lease,
         &state.join(RECORD),
         &serde_json::to_string_pretty(&grant).map_err(|e| e.to_string())?,
         Some(0o600),
@@ -267,25 +269,35 @@ impl Config {
         array.remove(index);
         true
     }
-    fn publish(&self) -> Result<(), String> {
+    fn publish(&self, lease: &PackageLease) -> Result<(), String> {
         if read(&self.path)? != self.before {
             return Err(conflict(
                 &self.path,
                 "changed during the sandbox grant update",
             ));
         }
-        replace_if_changed(&self.path, &self.document.to_string(), Some(self.mode))
+        replace_if_changed(
+            lease,
+            &self.path,
+            &self.document.to_string(),
+            Some(self.mode),
+        )
     }
 }
 
-fn recover(state: &Path, mut grant: Grant, config: &Config) -> Result<Option<Grant>, String> {
+fn recover(
+    lease: &PackageLease,
+    state: &Path,
+    mut grant: Grant,
+    config: &Config,
+) -> Result<Option<Grant>, String> {
     if let Some(pending) = &grant.pending {
         let actual = config.before.as_deref().map(hash);
         if actual.as_ref() == Some(&pending.after) {
             grant.pending = None;
-            save(state, Some(&grant))?;
+            save(lease, state, Some(&grant))?;
         } else if actual == pending.before {
-            save(state, None)?;
+            save(lease, state, None)?;
             return Ok(None);
         } else {
             return Err(conflict(
@@ -297,25 +309,26 @@ fn recover(state: &Path, mut grant: Grant, config: &Config) -> Result<Option<Gra
     Ok(Some(grant))
 }
 
-fn remove_owned(state: &Path) -> Result<usize, String> {
+fn remove_owned(lease: &PackageLease, state: &Path) -> Result<usize, String> {
     let Some(grant) = record(state)? else {
         return Ok(0);
     };
     let _config_guard = lock(&grant.config.with_file_name(".namedrop-sandbox.lock"))?;
     let mut config = Config::read(&grant.config)?;
-    let Some(grant) = recover(state, grant, &config)? else {
+    let Some(grant) = recover(lease, state, grant, &config)? else {
         return Ok(0);
     };
     let removed = config.remove(&grant.root);
     if removed {
-        config.publish()?;
+        config.publish(lease)?;
     }
-    save(state, None)?;
+    save(lease, state, None)?;
     Ok(usize::from(removed))
 }
 
 // Lifecycle callers hold the state transaction through activation and this write.
-pub(crate) fn activate(directory: &Path, state: &Path) -> Result<(), String> {
+pub(crate) fn activate(lease: &PackageLease, directory: &Path, state: &Path) -> Result<(), String> {
+    lease.require_write()?;
     if !directory.is_absolute() {
         return Err("CODEX_HOME must be absolute".into());
     }
@@ -325,12 +338,12 @@ pub(crate) fn activate(directory: &Path, state: &Path) -> Result<(), String> {
     let _state_guard = lock(&state.join("codex-sandbox.lock"))?;
     Config::read(&path)?;
     if record(state)?.is_some_and(|g| g.config != path || g.root != root) {
-        remove_owned(state)?;
+        remove_owned(lease, state)?;
     }
     let _config_guard = lock(&directory.join(".namedrop-sandbox.lock"))?;
     let mut config = Config::read(&path)?;
     if let Some(grant) = record(state)? {
-        recover(state, grant, &config)?;
+        recover(lease, state, grant, &config)?;
     }
     config.reject_broad_roots(Path::new(&physical_state(state)?))?;
     fs::DirBuilder::new()
@@ -350,17 +363,23 @@ pub(crate) fn activate(directory: &Path, state: &Path) -> Result<(), String> {
             after: hash(&config.document.to_string()),
         }),
     };
-    save(state, Some(&grant))?;
-    config.publish()?;
+    save(lease, state, Some(&grant))?;
+    config.publish(lease)?;
     grant.pending = None;
-    save(state, Some(&grant))
+    save(lease, state, Some(&grant))
 }
 
-pub(crate) fn remove(state: &Path) -> Result<usize, String> {
+pub(crate) fn remove(lease: &PackageLease, state: &Path) -> Result<usize, String> {
     root(state)?;
-    let (_package_guard, current) = crate::installed_runtime::package_guard()?;
-    if !current {
+    if !lease.writable()? {
         return Ok(0);
+    }
+    if matches!(
+        crate::installed_runtime::retirement(state)?,
+        Some(crate::installed_runtime::Retirement::Removed { .. })
+    ) {
+        let _guard = lock(&state.join("codex-sandbox.lock"))?;
+        return remove_owned(lease, state);
     }
     crate::StateStore::open(state)
         .map_err(|e| e.to_string())?
@@ -370,7 +389,7 @@ pub(crate) fn remove(state: &Path) -> Result<usize, String> {
             }
             let _guard = lock(&state.join("codex-sandbox.lock"))
                 .map_err(crate::StoreError::invalid_input)?;
-            remove_owned(state).map_err(crate::StoreError::invalid_input)
+            remove_owned(lease, state).map_err(crate::StoreError::invalid_input)
         })
         .map_err(|e| e.to_string())
 }
@@ -437,7 +456,12 @@ mod tests {
     #[test]
     fn narrow_grant_excludes_trusted_state_and_creates_spool() {
         let f = Fixture::new();
-        activate(&f.home(), &f.state()).unwrap();
+        activate(
+            &crate::installed_runtime::test_package_lease(),
+            &f.home(),
+            &f.state(),
+        )
+        .unwrap();
         let config = Config::read(&f.home().join("config.toml")).unwrap();
         let spool = f.state().join("deferred-commands");
         assert!(spool.is_dir());
@@ -465,6 +489,7 @@ mod tests {
         ));
         fs::create_dir_all(f.state()).unwrap();
         save(
+            &crate::installed_runtime::test_package_lease(),
             &f.state(),
             Some(&Grant {
                 config: f.home().join("config.toml"),
@@ -486,15 +511,28 @@ mod tests {
                 .contains("stale")
         );
         assert_eq!(f.text(), before);
-        activate(&f.home(), &f.state()).unwrap();
+        activate(
+            &crate::installed_runtime::test_package_lease(),
+            &f.home(),
+            &f.state(),
+        )
+        .unwrap();
         let config = Config::read(&f.home().join("config.toml")).unwrap();
         assert!(!config.contains(f.state().to_str().unwrap()));
         assert!(config.contains(f.state().join("deferred-commands").to_str().unwrap()));
         inspect(&f.home(), &f.state()).unwrap();
         let migrated = f.text();
-        activate(&f.home(), &f.state()).unwrap();
+        activate(
+            &crate::installed_runtime::test_package_lease(),
+            &f.home(),
+            &f.state(),
+        )
+        .unwrap();
         assert_eq!(f.text(), migrated);
-        assert_eq!(remove(&f.state()).unwrap(), 1);
+        assert_eq!(
+            remove(&crate::installed_runtime::test_package_lease(), &f.state()).unwrap(),
+            1
+        );
         assert!(f.text().contains("/user/root"));
         assert!(f.text().contains("model = 'keep'"));
     }
@@ -505,16 +543,31 @@ mod tests {
         legacy_grant(&f);
         super::super::FAIL_DIRECTORY_SYNC
             .with(|fault| *fault.borrow_mut() = Some(f.home().join("config.toml")));
-        assert!(activate(&f.home(), &f.state()).is_err());
+        assert!(
+            activate(
+                &crate::installed_runtime::test_package_lease(),
+                &f.home(),
+                &f.state()
+            )
+            .is_err()
+        );
         super::super::FAIL_DIRECTORY_SYNC.with(|fault| *fault.borrow_mut() = None);
         assert!(
             !Config::read(&f.home().join("config.toml"))
                 .unwrap()
                 .contains(f.state().to_str().unwrap())
         );
-        activate(&f.home(), &f.state()).unwrap();
+        activate(
+            &crate::installed_runtime::test_package_lease(),
+            &f.home(),
+            &f.state(),
+        )
+        .unwrap();
         inspect(&f.home(), &f.state()).unwrap();
-        assert_eq!(remove(&f.state()).unwrap(), 1);
+        assert_eq!(
+            remove(&crate::installed_runtime::test_package_lease(), &f.state()).unwrap(),
+            1
+        );
     }
 
     #[test]
@@ -525,6 +578,7 @@ mod tests {
             let after = f.text();
             let before = "model = 'keep'\n";
             save(
+                &crate::installed_runtime::test_package_lease(),
                 &f.state(),
                 Some(&Grant {
                     config: f.home().join("config.toml"),
@@ -539,14 +593,22 @@ mod tests {
             if !published {
                 f.write(before);
             }
-            activate(&f.home(), &f.state()).unwrap();
+            activate(
+                &crate::installed_runtime::test_package_lease(),
+                &f.home(),
+                &f.state(),
+            )
+            .unwrap();
             inspect(&f.home(), &f.state()).unwrap();
             assert!(
                 !Config::read(&f.home().join("config.toml"))
                     .unwrap()
                     .contains(f.state().to_str().unwrap())
             );
-            assert_eq!(remove(&f.state()).unwrap(), 1);
+            assert_eq!(
+                remove(&crate::installed_runtime::test_package_lease(), &f.state()).unwrap(),
+                1
+            );
         }
     }
 
@@ -556,11 +618,21 @@ mod tests {
         legacy_grant(&f);
         let mut config = Config::read(&f.home().join("config.toml")).unwrap();
         config.add(f.state().join("deferred-commands").to_str().unwrap());
-        config.publish().unwrap();
-        activate(&f.home(), &f.state()).unwrap();
+        config
+            .publish(&crate::installed_runtime::test_package_lease())
+            .unwrap();
+        activate(
+            &crate::installed_runtime::test_package_lease(),
+            &f.home(),
+            &f.state(),
+        )
+        .unwrap();
         inspect(&f.home(), &f.state()).unwrap();
         assert!(record(&f.state()).unwrap().is_none());
-        assert_eq!(remove(&f.state()).unwrap(), 0);
+        assert_eq!(
+            remove(&crate::installed_runtime::test_package_lease(), &f.state()).unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -569,17 +641,26 @@ mod tests {
         legacy_grant(&f);
         let mut config = Config::read(&f.home().join("config.toml")).unwrap();
         config.add(f.0.to_str().unwrap());
-        config.publish().unwrap();
+        config
+            .publish(&crate::installed_runtime::test_package_lease())
+            .unwrap();
         assert!(
-            activate(&f.home(), &f.state())
-                .unwrap_err()
-                .contains("unsafe")
+            activate(
+                &crate::installed_runtime::test_package_lease(),
+                &f.home(),
+                &f.state()
+            )
+            .unwrap_err()
+            .contains("unsafe")
         );
         let config = Config::read(&f.home().join("config.toml")).unwrap();
         assert!(!config.contains(f.state().to_str().unwrap()));
         assert!(config.contains(f.0.to_str().unwrap()));
         assert!(!config.contains(f.state().join("deferred-commands").to_str().unwrap()));
-        assert_eq!(remove(&f.state()).unwrap(), 0);
+        assert_eq!(
+            remove(&crate::installed_runtime::test_package_lease(), &f.state()).unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -595,14 +676,21 @@ mod tests {
             ));
             let before = f.text();
             assert!(
-                activate(&f.home(), &f.state())
-                    .unwrap_err()
-                    .contains("unsafe")
+                activate(
+                    &crate::installed_runtime::test_package_lease(),
+                    &f.home(),
+                    &f.state()
+                )
+                .unwrap_err()
+                .contains("unsafe")
             );
             let error = inspect(&f.home(), &f.state()).unwrap_err();
             assert!(error.contains("unsafe"), "{error}");
             assert!(error.contains("remove"), "{error}");
-            assert_eq!(remove(&f.state()).unwrap(), 0);
+            assert_eq!(
+                remove(&crate::installed_runtime::test_package_lease(), &f.state()).unwrap(),
+                0
+            );
             assert_eq!(f.text(), before);
             assert!(
                 Config::read(&f.home().join("config.toml"))
@@ -633,9 +721,13 @@ mod tests {
             if suffix != "deferred-commands" {
                 let before = f.text();
                 assert!(
-                    activate(&f.home(), &f.state())
-                        .unwrap_err()
-                        .contains("unsafe")
+                    activate(
+                        &crate::installed_runtime::test_package_lease(),
+                        &f.home(),
+                        &f.state()
+                    )
+                    .unwrap_err()
+                    .contains("unsafe")
                 );
                 assert!(
                     inspect(&f.home(), &f.state())
@@ -644,9 +736,14 @@ mod tests {
                 );
                 assert_eq!(before, f.text());
             } else {
-                activate(&f.home(), &f.state()).unwrap();
+                activate(
+                    &crate::installed_runtime::test_package_lease(),
+                    &f.home(),
+                    &f.state(),
+                )
+                .unwrap();
                 inspect(&f.home(), &f.state()).unwrap();
-                remove(&f.state()).unwrap();
+                remove(&crate::installed_runtime::test_package_lease(), &f.state()).unwrap();
                 assert!(
                     Config::read(&f.home().join("config.toml"))
                         .unwrap()
@@ -664,16 +761,24 @@ mod tests {
         fs::create_dir(f.state()).unwrap();
         std::os::unix::fs::symlink(&victim, f.state().join("deferred-commands")).unwrap();
         assert!(
-            activate(&f.home(), &f.state())
-                .unwrap_err()
-                .contains("symbolic link")
+            activate(
+                &crate::installed_runtime::test_package_lease(),
+                &f.home(),
+                &f.state()
+            )
+            .unwrap_err()
+            .contains("symbolic link")
         );
         assert!(
             inspect(&f.home(), &f.state())
                 .unwrap_err()
                 .contains("symbolic link")
         );
-        assert!(remove(&f.state()).unwrap_err().contains("symbolic link"));
+        assert!(
+            remove(&crate::installed_runtime::test_package_lease(), &f.state())
+                .unwrap_err()
+                .contains("symbolic link")
+        );
         assert!(!f.home().exists());
         assert_eq!(fs::read_dir(&victim).unwrap().count(), 0);
     }
@@ -686,7 +791,11 @@ mod tests {
         std::os::unix::fs::symlink(&victim, f.state()).unwrap();
         for suffix in ["", "/", "/."] {
             let state = PathBuf::from(format!("{}{suffix}", f.state().display()));
-            let result = activate(&f.home(), &state);
+            let result = activate(
+                &crate::installed_runtime::test_package_lease(),
+                &f.home(),
+                &state,
+            );
             assert!(!f.home().exists(), "activation created a redirected grant");
             assert_eq!(fs::read_dir(&victim).unwrap().count(), 0);
             assert!(result.unwrap_err().contains("symbolic link"));
@@ -719,7 +828,7 @@ mod tests {
         let victim = f.0.join("victim");
         fs::create_dir(&victim).unwrap();
         std::os::unix::fs::symlink(&victim, f.state()).unwrap();
-        let result = remove(&f.state());
+        let result = remove(&crate::installed_runtime::test_package_lease(), &f.state());
         assert_eq!(fs::read_dir(&victim).unwrap().count(), 0);
         assert!(result.unwrap_err().contains("symbolic link"));
         assert!(!f.home().exists());
@@ -739,7 +848,12 @@ mod tests {
         assert!(!state.exists());
         f.write("model = 'keep'\n");
         fs::set_permissions(home.join("config.toml"), fs::Permissions::from_mode(0o640)).unwrap();
-        activate(&home, &state).unwrap();
+        activate(
+            &crate::installed_runtime::test_package_lease(),
+            &home,
+            &state,
+        )
+        .unwrap();
         let expected_state = physical.join("missing/state");
         let expected = expected_state.join("deferred-commands");
         let config = Config::read(&home.join("config.toml")).unwrap();
@@ -751,7 +865,12 @@ mod tests {
         let first = f.text();
         inspect(&home, &state).unwrap();
         inspect(&physical.join("custom-codex"), &expected_state).unwrap();
-        activate(&physical.join("custom-codex"), &expected_state).unwrap();
+        activate(
+            &crate::installed_runtime::test_package_lease(),
+            &physical.join("custom-codex"),
+            &expected_state,
+        )
+        .unwrap();
         assert_eq!(f.text(), first);
         assert_eq!(
             fs::metadata(home.join("config.toml"))
@@ -761,8 +880,14 @@ mod tests {
                 & 0o777,
             0o640
         );
-        assert_eq!(remove(&state).unwrap(), 1);
-        assert_eq!(remove(&state).unwrap(), 0);
+        assert_eq!(
+            remove(&crate::installed_runtime::test_package_lease(), &state).unwrap(),
+            1
+        );
+        assert_eq!(
+            remove(&crate::installed_runtime::test_package_lease(), &state).unwrap(),
+            0
+        );
         assert!(f.text().contains("model = 'keep'"));
         assert!(
             !Config::read(&home.join("config.toml"))
@@ -777,8 +902,22 @@ mod tests {
         let alias = f.0.join("dangling");
         let missing = f.0.join("absent");
         std::os::unix::fs::symlink(&missing, &alias).unwrap();
-        assert!(activate(&alias, &f.state()).is_err());
-        assert!(activate(&f.home(), &alias.join("state")).is_err());
+        assert!(
+            activate(
+                &crate::installed_runtime::test_package_lease(),
+                &alias,
+                &f.state()
+            )
+            .is_err()
+        );
+        assert!(
+            activate(
+                &crate::installed_runtime::test_package_lease(),
+                &f.home(),
+                &alias.join("state")
+            )
+            .is_err()
+        );
         assert!(inspect(&alias, &f.state()).is_err());
         assert!(inspect(&f.home(), &alias.join("state")).is_err());
         assert!(!missing.exists());
@@ -809,7 +948,12 @@ mod tests {
                 home.join(leaf)
             };
             std::os::unix::fs::symlink(&target, &path).unwrap();
-            let error = activate(&home, &state).unwrap_err();
+            let error = activate(
+                &crate::installed_runtime::test_package_lease(),
+                &home,
+                &state,
+            )
+            .unwrap_err();
             assert!(
                 error.contains(&path.file_name().unwrap().to_string_lossy().to_string()),
                 "{error}"
@@ -837,7 +981,12 @@ mod tests {
             fs::Permissions::from_mode(0o640),
         )
         .unwrap();
-        activate(&f.home(), &f.state()).unwrap();
+        activate(
+            &crate::installed_runtime::test_package_lease(),
+            &f.home(),
+            &f.state(),
+        )
+        .unwrap();
         let first = f.text();
         assert!(first.contains("# keep this"));
         assert!(first.contains("model = 'example'"));
@@ -849,13 +998,21 @@ mod tests {
         assert!(!config.contains(f.0.to_str().unwrap()));
         let metadata = fs::metadata(f.home().join("config.toml")).unwrap();
         assert_eq!(metadata.mode() & 0o777, 0o640);
-        activate(&f.home(), &f.state()).unwrap();
+        activate(
+            &crate::installed_runtime::test_package_lease(),
+            &f.home(),
+            &f.state(),
+        )
+        .unwrap();
         assert_eq!(f.text(), first);
         assert_eq!(
             metadata.ino(),
             fs::metadata(f.home().join("config.toml")).unwrap().ino()
         );
-        assert_eq!(remove(&f.state()).unwrap(), 1);
+        assert_eq!(
+            remove(&crate::installed_runtime::test_package_lease(), &f.state()).unwrap(),
+            1
+        );
         assert!(f.text().contains("/user/root"));
         assert!(
             !Config::read(&f.home().join("config.toml"))
@@ -872,9 +1029,17 @@ mod tests {
             f.state().join("deferred-commands").to_str().unwrap()
         ));
         let before = f.text();
-        activate(&f.home(), &f.state()).unwrap();
+        activate(
+            &crate::installed_runtime::test_package_lease(),
+            &f.home(),
+            &f.state(),
+        )
+        .unwrap();
         assert!(record(&f.state()).unwrap().is_none());
-        assert_eq!(remove(&f.state()).unwrap(), 0);
+        assert_eq!(
+            remove(&crate::installed_runtime::test_package_lease(), &f.state()).unwrap(),
+            0
+        );
         assert_eq!(before, f.text());
     }
 
@@ -888,12 +1053,22 @@ mod tests {
         );
         assert!(!f.home().exists());
         assert!(!f.state().exists());
-        activate(&f.home(), &f.state()).unwrap();
+        activate(
+            &crate::installed_runtime::test_package_lease(),
+            &f.home(),
+            &f.state(),
+        )
+        .unwrap();
         inspect(&f.home(), &f.state()).unwrap();
         let next = f.0.join("other-codex");
         assert!(inspect(&next, &f.state()).unwrap_err().contains("stale"));
         assert!(!next.exists());
-        activate(&next, &f.state()).unwrap();
+        activate(
+            &crate::installed_runtime::test_package_lease(),
+            &next,
+            &f.state(),
+        )
+        .unwrap();
         assert!(
             !Config::read(&f.home().join("config.toml"))
                 .unwrap()
@@ -917,7 +1092,14 @@ mod tests {
             "[sandbox_workspace_write]\nwritable_roots = ['/root', 1]",
         ] {
             f.write(text);
-            assert!(activate(&f.home(), &f.state()).is_err());
+            assert!(
+                activate(
+                    &crate::installed_runtime::test_package_lease(),
+                    &f.home(),
+                    &f.state()
+                )
+                .is_err()
+            );
             assert_eq!(f.text(), text);
             assert!(record(&f.state()).unwrap().is_none());
         }
@@ -926,9 +1108,13 @@ mod tests {
         fs::rename(&config, &target).unwrap();
         std::os::unix::fs::symlink(&target, &config).unwrap();
         assert!(
-            activate(&f.home(), &f.state())
-                .unwrap_err()
-                .contains("symbolic link")
+            activate(
+                &crate::installed_runtime::test_package_lease(),
+                &f.home(),
+                &f.state()
+            )
+            .unwrap_err()
+            .contains("symbolic link")
         );
         assert!(fs::symlink_metadata(config).unwrap().is_symlink());
     }
@@ -936,7 +1122,12 @@ mod tests {
     #[test]
     fn last_active_space_removes_the_grant() {
         let f = Fixture::new();
-        activate(&f.home(), &f.state()).unwrap();
+        activate(
+            &crate::installed_runtime::test_package_lease(),
+            &f.home(),
+            &f.state(),
+        )
+        .unwrap();
         let mut store = crate::StateStore::open(f.state()).unwrap();
         let first = crate::StateNamespace::for_space("socket", "first");
         let second = crate::StateNamespace::for_space("socket", "second");
@@ -947,15 +1138,24 @@ mod tests {
                 tx.activate_worktree(&second, &actor)
             })
             .unwrap();
-        assert_eq!(remove(&f.state()).unwrap(), 0);
+        assert_eq!(
+            remove(&crate::installed_runtime::test_package_lease(), &f.state()).unwrap(),
+            0
+        );
         store
             .transaction(|tx| tx.deactivate_worktree(&first, &actor))
             .unwrap();
-        assert_eq!(remove(&f.state()).unwrap(), 0);
+        assert_eq!(
+            remove(&crate::installed_runtime::test_package_lease(), &f.state()).unwrap(),
+            0
+        );
         store
             .transaction(|tx| tx.deactivate_worktree(&second, &actor))
             .unwrap();
-        assert_eq!(remove(&f.state()).unwrap(), 1);
+        assert_eq!(
+            remove(&crate::installed_runtime::test_package_lease(), &f.state()).unwrap(),
+            1
+        );
     }
 
     #[test]
@@ -964,7 +1164,14 @@ mod tests {
         f.write("api_key = 'PRIVATE'\n");
         super::super::FAIL_DIRECTORY_SYNC
             .with(|fault| *fault.borrow_mut() = Some(f.home().join("config.toml")));
-        assert!(activate(&f.home(), &f.state()).is_err());
+        assert!(
+            activate(
+                &crate::installed_runtime::test_package_lease(),
+                &f.home(),
+                &f.state()
+            )
+            .is_err()
+        );
         super::super::FAIL_DIRECTORY_SYNC.with(|fault| *fault.borrow_mut() = None);
         assert!(
             !fs::read_to_string(f.state().join(RECORD))
@@ -976,8 +1183,16 @@ mod tests {
                 .unwrap_err()
                 .contains("pending")
         );
-        activate(&f.home(), &f.state()).unwrap();
+        activate(
+            &crate::installed_runtime::test_package_lease(),
+            &f.home(),
+            &f.state(),
+        )
+        .unwrap();
         inspect(&f.home(), &f.state()).unwrap();
-        assert_eq!(remove(&f.state()).unwrap(), 1);
+        assert_eq!(
+            remove(&crate::installed_runtime::test_package_lease(), &f.state()).unwrap(),
+            1
+        );
     }
 }

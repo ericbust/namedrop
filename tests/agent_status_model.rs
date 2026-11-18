@@ -4,6 +4,9 @@
 //! environment, working directory and stdin it was given, which is how the
 //! isolation and bounding claims are checked rather than assumed.
 
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/executable.rs"]
@@ -37,6 +40,9 @@ mode="$(printf '%s' "$payload" | sed -n 's/.*MODE:\([a-z_]*\).*/\1/p' | head -n 
   printf 'HERDR_SOCKET_PATH<%s>\n' "${HERDR_SOCKET_PATH-unset}"
   printf 'HERDR_WORKSPACE_ID<%s>\n' "${HERDR_WORKSPACE_ID-unset}"
   printf 'NAMEDROP_AGENT_SESSION_ID<%s>\n' "${NAMEDROP_AGENT_SESSION_ID-unset}"
+  printf 'REX_BLOCK<%s>\n' "${REX_BLOCK-unset}"
+  printf 'REX_SERVER<%s>\n' "${REX_SERVER-unset}"
+  printf 'REX_BIN_DIR<%s>\n' "${REX_BIN_DIR-unset}"
   printf 'CLAUDE_CODE_SESSION_ID<%s>\n' "${CLAUDE_CODE_SESSION_ID-unset}"
   printf 'CLAUDE_CODE_CHILD_SESSION<%s>\n' "${CLAUDE_CODE_CHILD_SESSION-unset}"
   printf 'AI_AGENT<%s>\n' "${AI_AGENT-unset}"
@@ -56,6 +62,10 @@ case "$mode" in
   slow_cancel|slow_big|persona_slow) sleep 30 ;;
   slow_success) sleep 11 ;;
   fail|persona_fail) printf 'worker exploded\n' >&2; exit 3 ;;
+  persona_warned)
+    printf 'WARNING: proceeding, even though we could not create PATH aliases: failed to canonicalize CODEX_HOME "%s": Operation not permitted (os error 1)\n' "$dir/codex-home" >&2
+    printf 'Error finding codex home: failed to canonicalize CODEX_HOME "%s": Operation not permitted (os error 1)\n\n' "$dir/codex-home" >&2
+    exit 1 ;;
   flood) head -c 200000 /dev/zero | tr '\0' 'x'; sleep 30 ;;
 esac
 if [ -f "$dir/response-$mode.json" ]; then cat "$dir/response-$mode.json"; fi
@@ -95,6 +105,9 @@ done
   printf 'CLAUDE_CODE_MESSAGING_SOCKET<%s>\n' "${CLAUDE_CODE_MESSAGING_SOCKET-unset}"
   printf 'CLAUDE_CODE_MESSAGING_TOKEN<%s>\n' "${CLAUDE_CODE_MESSAGING_TOKEN-unset}"
   printf 'CLAUDE_PID<%s>\n' "${CLAUDE_PID-unset}"
+  printf 'REX_BLOCK<%s>\n' "${REX_BLOCK-unset}"
+  printf 'REX_SERVER<%s>\n' "${REX_SERVER-unset}"
+  printf 'REX_BIN_DIR<%s>\n' "${REX_BIN_DIR-unset}"
   printf 'MAX_THINKING_TOKENS<%s>\n' "${MAX_THINKING_TOKENS-unset}"
   printf 'STDIN_BYTES<%s>\n' "$(printf '%s' "$payload" | wc -c | tr -d ' ')"
   printf 'STDIN<%s>\n' "$payload"
@@ -151,7 +164,7 @@ int main(int argc, char **argv) {
         if (i > 1 && !strcmp(argv[i-1], "-o")) output = argv[i];
     }
     fprintf(record, "CWD<%s>\n", getcwd(cwd, sizeof(cwd)));
-    const char *keys[] = {"HERDR_PANE_ID", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_PID", "MAX_THINKING_TOKENS"};
+    const char *keys[] = {"HERDR_PANE_ID", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_PID", "REX_BLOCK", "REX_SERVER", "REX_BIN_DIR", "MAX_THINKING_TOKENS"};
     for (size_t i = 0; i < sizeof(keys)/sizeof(*keys); i++) {
         const char *value = getenv(keys[i]);
         fprintf(record, "%s<%s>\n", keys[i], value ? value : "unset");
@@ -1005,7 +1018,7 @@ fn the_generated_read_profile_denies_unrelated_files() {
     fs::write(&canary_path, &canary).expect("canary profile");
 
     let readable = |path: &std::path::Path| {
-        std::process::Command::new("/usr/bin/sandbox-exec")
+        crate::binary::command("/usr/bin/sandbox-exec")
             .arg("-f")
             .arg(&canary_path)
             .arg("/bin/cat")
@@ -1065,7 +1078,7 @@ fn a_seeded_parent_environment_is_stripped_and_overridden() {
     const SEEDED_THINKING: &str = "99999";
 
     if env::var(MARKER).is_err() {
-        let status = std::process::Command::new(env::current_exe().expect("test binary"))
+        let status = crate::binary::command(env::current_exe().expect("test binary"))
             .args([
                 "--exact",
                 "a_seeded_parent_environment_is_stripped_and_overridden",
@@ -1082,6 +1095,11 @@ fn a_seeded_parent_environment_is_stripped_and_overridden() {
             .env("CLAUDE_PID", "4242")
             .env("CLAUDECODE", "1")
             .env("CLAUDE_EFFORT", "xhigh")
+            // A Rex block's claim and the rex tools' directory, neither of
+            // which says anything to a summary worker.
+            .env("REX_BLOCK", "block-1")
+            .env("REX_SERVER", "unix:///tmp/synthetic-rex.sock")
+            .env("REX_BIN_DIR", "/synthetic/rex/bin")
             .output()
             .expect("re-run this test with a seeded parent environment");
         assert!(
@@ -1119,6 +1137,9 @@ fn a_seeded_parent_environment_is_stripped_and_overridden() {
             "CLAUDE_CODE_MESSAGING_SOCKET<unset>",
             "CLAUDE_CODE_MESSAGING_TOKEN<unset>",
             "CLAUDE_PID<unset>",
+            "REX_BLOCK<unset>",
+            "REX_SERVER<unset>",
+            "REX_BIN_DIR<unset>",
         ] {
             assert!(
                 recorded.contains(marker),
@@ -1415,6 +1436,25 @@ fn a_failing_persona_worker_is_reported_without_retrying() {
     assert_eq!(calls("persona_fail"), 1, "there is no automatic retry");
 }
 
+/// Codex prints a warning before the line that says why it stopped.
+#[test]
+fn a_failing_worker_is_reported_by_its_last_line() {
+    let error = suggest_agent_persona(&persona_alias("persona_warned"), "draft", "claude", &idle())
+        .expect_err("a failing worker must not succeed");
+
+    let prefix = "the model worker failed: ";
+    assert!(
+        error.starts_with(&format!("{prefix}Error finding codex home: "))
+            && error.ends_with(": Operation not permitted (os error 1)")
+            && error.chars().count() <= prefix.len() + 200,
+        "the line that says why the worker stopped must be shown, got {error:?}"
+    );
+    assert!(
+        !error.contains("WARNING") && !error.contains('\u{fffd}'),
+        "the warning before it must not be shown, got {error:?}"
+    );
+}
+
 #[test]
 fn a_persona_suggestion_is_sanitized_and_capped() {
     respond(
@@ -1553,7 +1593,7 @@ fn fixture_cleanup_survives_thread_exit_and_panic() {
         return;
     }
     for mode in ["return", "panic"] {
-        let child = std::process::Command::new(env::current_exe().unwrap())
+        let child = crate::binary::command(env::current_exe().unwrap())
             .args([
                 "--exact",
                 "fixture_cleanup_survives_thread_exit_and_panic",

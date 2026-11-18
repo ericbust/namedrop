@@ -52,6 +52,23 @@ warning (`ND-SESSION-003`), runs the two commands Doctor gives as the fix, and c
 the warning clears. `--codex no-daemon` skips that arc. `--keep` leaves the profile
 running after a pass so you can probe further.
 
+Claude Code signs in with the token in `~/.namedrop-testbed/claude-oauth-token`, never
+with this machine's default login. With no token file the run refuses before anything
+starts and prints how to make one (`claude setup-token` under the account to bill, saved
+with `chmod 600`); [testbed/README.md](../../../testbed/README.md#the-claude-code-account)
+has the steps. Do not create the token yourself and do not pass `--claude-default-login`
+unless the user asks for it; report the refusal instead. The report's second line names
+the account. For a `claude setup-token` token it always reads `plan and organization
+unreadable with this token's scope, signed in with the testbed token`: such a token cannot
+read its own plan, and Claude Code cannot name its account, so the user confirms the
+account once by checking that usage shows on the personal account. The plan check runs
+only for a token with the profile scope or the default login; there a team or enterprise
+account refuses unless `--claude-org NAME` names its organization, and you pass that only
+when the user named the organization. A refusal that says the token was rejected (HTTP
+401) means the user must create a new token; report it. Every lane, `rex up` and the probe
+scripts below start Claude Code by the profile's full path, `PROFILE/bin/claude`, so they
+use the same token.
+
 What the run asserts, step by step: build and names; first-run screens cleared; the Codex
 server state (and the fix in plain mode); `namedrop address list` and `doctor` clean; the
 hooks loaded (the policy text once per session and the roster on the first turn, in both
@@ -98,7 +115,7 @@ it doesn't render the page.
 | recap | An agent asked what the other answered gets it right. The answer is in its prompt and in no hook context. |
 | real warnings | An interrupted delivery raises `agent_disposition` and Doctor's `ND-DELIVERY-003`, through the same judge read the other way. Closing it clears it. |
 | tracked handoff | Lead, worker, `needs_continuation`, continuation with `expected_revision`, `completed`, `handoff.resolve`, one report shown once; then a nudge. |
-| held turn | A turn that ends waiting on a helper posts nothing, later prompts show the way back, and the answer lands in the same thread. Claude sends its own request. For Codex the lane sends it during the turn, because a real Codex declines to `send` from a person's delivery. Each hold prompt that the lane scripts tells the agent to use the reply line Namedrop shows. |
+| held turn | A turn that ends waiting on a helper posts nothing, and the answer lands once in the same thread: as the final message of the turn the helper's answer starts, or through the way-back line a later prompt shows. Claude sends its own request. For Codex the lane sends it during the turn, because a real Codex declines to `send` from a person's delivery. Each hold prompt that the lane scripts tells the agent to use the reply line Namedrop shows. |
 | session continuity | `/compact` with a held delivery, exit and resume, and a crash mid-turn, on each agent. The lane sends each hold's `@shell` request during the turn. |
 | other routes | `second-workspace.py` and `cross-workspace-probe.py`, and two reminders. |
 | natural wording | A new session of each agent gets a natural question. One answer and no new attention are judged. Its model calls and settle commands are shown, not judged, and it runs last because a session that has run its reply line keeps doing so. A new Codex then takes a hold with no instructions on how to answer. The report says whether its answer landed, as a `FINDING` line if it didn't, without failing the lane. |
@@ -121,6 +138,37 @@ and activates the build under test, about 13 minutes in all, and checks the vers
 open deliveries settle once and a fresh message works in the old sessions. The old sessions'
 model calls are reported and never fail it. A new Codex session then shows whether starting
 over recovers one the update stranded.
+
+### Herdr inside Rex
+
+```sh
+testbed/testbed test --link . --fresh --yes --inside-rex
+```
+
+It runs the same checklist with the profile's Herdr server as the program of a block on a
+scratch Rex server, which it starts under `env -i` with `REX_SERVER` naming itself and stops
+after the run. A failed run deletes its profile too, and keeps the profile's logs in
+`~/.namedrop-testbed/reports/<profile>-<time>-failed/`. Herdr, its panes, its plugin processes and every agent and hook then carry the
+block's `REX_BLOCK`, `REX_SESSION` and `REX_SERVER`, which every other lane's clean environment
+drops. The build step's line says which Rex block runs the Herdr server. Run it beside the
+checklist run for any change to how Namedrop decides which multiplexer it runs in. It needs `rex` on `PATH`.
+
+### Agents in Rex
+
+```sh
+testbed/testbed rex up --link . --fresh --yes
+testbed/testbed rex down --link .
+```
+
+`rex up` installs the build as a machine with Rex and no Herdr does: it builds the release
+archive with `scripts/package-release.sh` and runs its `scripts/install.sh --yes` into the
+profile, with no `herdr` on the profile's `PATH` or beside its `rex`. The profile's login startup
+files filter `PATH` too, so a login shell, as Codex's and Claude Code's tool shells are, finds no
+`herdr` either, and `up` checks a login `zsh`, `bash` and `sh`. It then gives the Rex adapter's
+live checks Claude Code and Codex in blocks of a scratch Rex server, with no Herdr names and with
+hooks baked to the profile's state directory, and prints the server and block IDs. It runs the
+first `rex` on `PATH`. It is not a checklist run and has no PASS line. Run it for any change to
+the Rex host, the installer, or the archive. See `testbed/README.md`, "The Rex lane".
 
 ## Read the result
 
@@ -256,7 +304,9 @@ export TESTBED_HOME="${TESTBED_HOME:-$HOME/.namedrop-testbed}"
 testbed/testbed up --link "$PWD" --fresh --yes
 ```
 
-Use `--no-launch` for lanes that do not prompt real agents. Do not use
+Use `--no-launch` for lanes that do not prompt real agents. `up` still checks the Claude
+Code account, so it needs the token file; add `--agents codex` when the lane needs no
+Claude Code. Do not use
 `testbed/testbed attach`. The profile is `link-<checkout basename>`.
 Read its generated `env.sh` to build the wrapper below. The socket assertion runs
 before the first Herdr command. Keep all Herdr and Namedrop calls inside `tb`.

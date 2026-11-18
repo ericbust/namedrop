@@ -97,19 +97,31 @@ pub(crate) struct AdoptInput {
     pub coordination_id: CoordinationId,
 }
 
-pub(crate) fn execute<E: crate::HerdrCommandExecutor, C: crate::Clock, I: crate::IdGenerator>(
+pub(crate) fn execute<M: crate::mux::Mux, C: crate::Clock, I: crate::IdGenerator>(
     operation: &str,
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
+) -> Result<Value, String> {
+    execute_inner(operation, input, runtime)
+        .map_err(|error| runtime.mux.endpoint().kind.authored_error(error))
+}
+
+fn execute_inner<M: crate::mux::Mux, C: crate::Clock, I: crate::IdGenerator>(
+    operation: &str,
+    input: Value,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String> {
     let discovered = match runtime.workspace_id {
-        Some(id) => crate::discover_worktree_for_workspace(runtime.herdr, id)?,
-        None => crate::discover_worktree(runtime.herdr, runtime.cwd)?,
+        Some(id) => crate::discover_worktree_for_workspace(runtime.mux, id)?,
+        None => crate::discover_worktree(runtime.mux, runtime.cwd)?,
     };
     let ns = discovered.namespace(runtime.session_socket_id);
     let pane = runtime
         .current_pane_id
-        .ok_or("the current Herdr pane is required")?;
+        .ok_or(runtime.mux.endpoint().kind.text(
+            "the current Herdr pane is required",
+            "the current Rex pane is required",
+        ))?;
     let mut store = StateStore::open(runtime.state_directory).map_err(|e| e.to_string())?;
     let response = store
         .transaction(|tx| {
@@ -187,18 +199,14 @@ pub(crate) fn execute<E: crate::HerdrCommandExecutor, C: crate::Clock, I: crate:
 /// Validate and persist alongside append_message, in the same transaction. No
 /// transport acknowledgement changes work state; only these explicit actions do.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn track_message<
-    E: crate::HerdrCommandExecutor,
-    C: crate::Clock,
-    I: crate::IdGenerator,
->(
+pub(crate) fn track_message<M: crate::mux::Mux, C: crate::Clock, I: crate::IdGenerator>(
     tx: &mut StateTransaction<'_>,
     ns: &StateNamespace,
     draft: &MessageDraft,
     input: &TrackingInput,
     attempt: Option<&crate::DeliveryAttemptId>,
     live: &crate::spaces::LiveSpaces,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<(), StoreError> {
     let tracked = draft
         .in_reply_to
@@ -520,10 +528,83 @@ fn require_live_recipient(
         .ok_or_else(|| StoreError::invalid_input("tracked recipient has no current binding"))?;
     let discovered = live.of(&ns.space_id).ok_or_else(|| {
         StoreError::invalid_input(format!(
-            "Namedrop could not read the panes of @{}'s workspace from Herdr; retry the send",
-            address.alias
+            "Namedrop could not read the panes of @{}'s {}; retry the send",
+            address.alias,
+            crate::mux::Endpoint::parse(&ns.session_socket_id)
+                .kind
+                .text("workspace from Herdr", "session from Rex")
         ))
     })?;
     let current = crate::context::registered_current_address(tx, ns, &binding.pane_id, discovered)?;
     tx.require_coordination_capability(ns, &current)
+}
+
+#[cfg(all(test, feature = "test-support"))]
+mod words_host_tests {
+    use super::*;
+    use crate::{MutationAttribution, PaneAddressDraft, PaneAddressId, PaneBindingId, PaneRoleId};
+
+    #[test]
+    fn unreadable_recipient_uses_the_origin_hosts_words() {
+        for (label, endpoint, expected, forbidden) in [
+            (
+                "herdr",
+                "/tmp/words-coordination.sock",
+                "workspace from Herdr",
+                "session from Rex",
+            ),
+            (
+                "rex",
+                "rex:/tmp/words-coordination.sock",
+                "session from Rex",
+                "workspace from Herdr",
+            ),
+        ] {
+            let root = std::env::temp_dir()
+                .join(format!("words-coordination-{}-{label}", std::process::id()));
+            let mux = crate::mux::fake::FakeMux::world()
+                .endpoint(endpoint)
+                .space("here")
+                .pane("p1")
+                .build();
+            let live = crate::spaces::LiveSpaces::here(
+                crate::discover_worktree_for_workspace(&mux, "here").unwrap(),
+            );
+            let ns = StateNamespace::for_space(endpoint, "missing");
+            let at = MutationAttribution::new(ActorKind::Human, "test", 1);
+            let id = PaneAddressId::new("worker");
+            let mut store = StateStore::open(&root).unwrap();
+            store
+                .transaction(|tx| {
+                    tx.activate_worktree(&ns, &at)?;
+                    tx.create_pane_address(
+                        &ns,
+                        &PaneAddressDraft {
+                            id: id.clone(),
+                            role_id: PaneRoleId::new("worker-role"),
+                            role_name: "worker".into(),
+                            role_description: "worker".into(),
+                            alias: "worker".into(),
+                        },
+                        &at,
+                    )?;
+                    tx.bind_pane(&ns, &PaneBindingId::new("binding"), &id, "p2", &at)?;
+                    let address = RoutingAddressSnapshot {
+                        address_id: id,
+                        alias: "worker".into(),
+                        pane_binding_id: None,
+                        agent_session_id: None,
+                    };
+                    let error = require_live_recipient(tx, &ns, &address, &live)
+                        .unwrap_err()
+                        .to_string();
+                    assert!(error.contains(expected), "{error}");
+                    assert!(!error.contains(forbidden), "{error}");
+                    Ok(())
+                })
+                .unwrap();
+            drop(store);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
 }

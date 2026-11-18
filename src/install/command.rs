@@ -1,6 +1,12 @@
 use super::{conflict, replace_if_changed, shell_single_quote};
+use crate::installed_runtime::PackageLease;
 use serde_json::{Value, json};
-use std::{env, fs, io::ErrorKind, os::unix::fs::PermissionsExt, path::Path};
+use std::{
+    env, fs,
+    io::ErrorKind,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+};
 
 const OWNER: &str = "#!/bin/sh\n# Managed by Namedrop: shell command.\n";
 const PATH_SETUP: &str = "# Namedrop CLI\ncase \":$PATH:\" in\n  *:\"$HOME/.local/bin\":*) ;;\n  *) export PATH=\"$HOME/.local/bin:$PATH\" ;;\nesac\n";
@@ -8,10 +14,15 @@ const PATH_SETUP: &str = "# Namedrop CLI\ncase \":$PATH:\" in\n  *:\"$HOME/.loca
 /// The launcher supplies installation state while preserving the invoking pane's
 /// Herdr context. Runtime permissions continue to use the real executable.
 pub(crate) fn install_shell_command(
+    lease: &PackageLease,
     home: &Path,
     executable: &Path,
     state: &Path,
 ) -> Result<Value, String> {
+    // A runtime an update replaced leaves the command to the selected one.
+    if !lease.writable()? {
+        return Ok(Value::Null);
+    }
     if !home.is_absolute() || !executable.is_absolute() || !state.is_absolute() {
         return Err(
             "shell command installation requires absolute home, executable and state paths".into(),
@@ -30,30 +41,7 @@ pub(crate) fn install_shell_command(
         ));
     }
 
-    let shell = env::var("SHELL").unwrap_or_default();
-    let mut startup_files = Vec::new();
-    match Path::new(&shell).file_name().and_then(|name| name.to_str()) {
-        Some("zsh") => {
-            let directory = env::var_os("ZDOTDIR")
-                .filter(|s| !s.is_empty())
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| home.to_path_buf());
-            // A custom startup directory outside HOME needs manual PATH setup.
-            // Never write into another profile from an isolated activation.
-            if directory.is_absolute() && directory.starts_with(home) {
-                startup_files.push(directory.join(".zshrc"));
-            }
-        }
-        Some("bash") => {
-            startup_files.push(home.join(".bashrc"));
-            let login = [".bash_profile", ".bash_login", ".profile"]
-                .into_iter()
-                .find(|name| home.join(name).exists())
-                .unwrap_or(".profile");
-            startup_files.push(home.join(login));
-        }
-        _ => {}
-    }
+    let startup_files = shell_startup_files(home);
     // Validate every target before changing either the command or shell files.
     let updates = startup_files
         .iter()
@@ -75,11 +63,11 @@ pub(crate) fn install_shell_command(
         shell_single_quote(executable.to_str().ok_or("executable path is not UTF-8")?),
         shell_single_quote(state.to_str().ok_or("state path is not UTF-8")?)
     );
-    replace_if_changed(&launcher, &script, Some(0o755))?;
+    replace_if_changed(lease, &launcher, &script, Some(0o755))?;
     for (path, text, mode) in &updates {
         fs::create_dir_all(path.parent().expect("startup file has a parent"))
             .map_err(|e| conflict(path, &e.to_string()))?;
-        replace_if_changed(path, text, Some(*mode))?;
+        replace_if_changed(lease, path, text, Some(*mode))?;
     }
     Ok(json!({
         "path": launcher,
@@ -92,6 +80,36 @@ pub(crate) fn install_shell_command(
             "Open a new terminal, or run the current_shell command in this terminal."
         }
     }))
+}
+
+/// The startup files that get the PATH lines, chosen from `SHELL` and
+/// `ZDOTDIR`. The install's confirmation lists these same files.
+pub(crate) fn shell_startup_files(home: &Path) -> Vec<PathBuf> {
+    let shell = env::var("SHELL").unwrap_or_default();
+    let mut startup_files = Vec::new();
+    match Path::new(&shell).file_name().and_then(|name| name.to_str()) {
+        Some("zsh") => {
+            let directory = env::var_os("ZDOTDIR")
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.to_path_buf());
+            // A custom startup directory outside HOME needs manual PATH setup.
+            // Never write into another profile from an isolated activation.
+            if directory.is_absolute() && directory.starts_with(home) {
+                startup_files.push(directory.join(".zshrc"));
+            }
+        }
+        Some("bash") => {
+            startup_files.push(home.join(".bashrc"));
+            let login = [".bash_profile", ".bash_login", ".profile"]
+                .into_iter()
+                .find(|name| home.join(name).exists())
+                .unwrap_or(".profile");
+            startup_files.push(home.join(login));
+        }
+        _ => {}
+    }
+    startup_files
 }
 
 fn read_target(home: &Path, target: &Path) -> Result<Option<(String, u32)>, String> {
@@ -123,4 +141,23 @@ fn read_target(home: &Path, target: &Path) -> Result<Option<(String, u32)>, Stri
         }
     }
     Err(conflict(target, "is not a file path"))
+}
+
+pub(super) fn remove_shell_command(
+    lease: &PackageLease,
+    home: &Path,
+    state: &Path,
+) -> Result<(), String> {
+    lease.require_write()?;
+    let path = home.join(".local/bin/namedrop");
+    if let Some((text, _)) = read_target(home, &path)?
+        && text.starts_with(OWNER)
+        && text.contains(&format!(
+            "--plugin-state {} ",
+            shell_single_quote(state.to_str().ok_or("state path is not UTF-8")?)
+        ))
+    {
+        fs::remove_file(path).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }

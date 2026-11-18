@@ -30,6 +30,9 @@ def check(what, ok, detail=''):
 
 
 profile = Path.home() / '.namedrop-testbed/profiles' / sys.argv[1]
+if 'claude_account' not in json.loads((profile / 'state.json').read_text()):
+    sys.exit(f'{profile.name} has no accepted Claude Code account check; run '
+             f'testbed/testbed up --profile {profile.name} first')
 state = profile / 'state/herdr/plugins/namedrop'
 db = state / 'namedrop.sqlite3'
 env_line = re.search(r'env -i (.*) /bin/bash --noprofile', (profile / 'env.sh').read_text()).group(1)

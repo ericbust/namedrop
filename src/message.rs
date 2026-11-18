@@ -1,3 +1,5 @@
+use crate::mux::{Applied, Badge, Effect, PaneId};
+use crate::relay::{RemoteHosts, RemoteName};
 use crate::spaces::{RouteRefusal, ScopedName, SpaceScope, UnplacedName, WorkspaceLabel};
 use crate::{
     ActorKind, ContextGrantDraft, ContextGrantId, ContextReferenceDraft, ContextSnapshotId,
@@ -23,6 +25,9 @@ pub struct ParsedMessage {
     pub recipients: RecipientRun,
     pub body: String,
     pub context_mentions: Vec<BodyMention>,
+    /// The `@alias@label` recipients of a Rex home's `send`, which the relay
+    /// carries to the Namedrop of each label's host.
+    pub(crate) remote: Vec<RemoteName>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -49,7 +54,7 @@ impl ParsedMessage {
     }
 }
 
-pub(crate) fn body_reference_aliases<E: crate::HerdrCommandExecutor>(
+pub(crate) fn body_reference_aliases<E: crate::mux::MuxRead>(
     parsed: &ParsedMessage,
     workspaces: &crate::spaces::HerdrWorkspaces<'_, E>,
 ) -> Vec<String> {
@@ -71,6 +76,18 @@ pub(crate) fn body_reference_aliases<E: crate::HerdrCommandExecutor>(
 /// the source addresses nobody and stays literal. A `#` token after the first
 /// Mention is body text.
 pub fn parse_mentions(source: &str) -> Result<ParsedMessage, String> {
+    parse_mentions_in(source, &crate::relay::NoRemoteHosts)
+}
+
+/// [`parse_mentions`] for a reader that `hosts` may give remote recipients.
+/// Only a Rex home's `send` lists hosts: there a leading `@alias@label`
+/// names `alias` on the host `label`, which must be exactly a listed label,
+/// or the send fails. With [`crate::relay::NoRemoteHosts`] such a token ends
+/// the leading run, as it always has.
+pub(crate) fn parse_mentions_in(
+    source: &str,
+    hosts: &dyn RemoteHosts,
+) -> Result<ParsedMessage, String> {
     let LeadingLabels {
         labels,
         all,
@@ -78,15 +95,46 @@ pub fn parse_mentions(source: &str) -> Result<ParsedMessage, String> {
     } = leading_labels(source);
 
     let mut recipients: Vec<String> = Vec::new();
-    for (alias, token) in mention_run(source, cursor) {
-        if !recipients.iter().any(|existing| existing == alias) {
-            recipients.push(alias.to_owned());
+    let mut remote: Vec<RemoteName> = Vec::new();
+    loop {
+        for (alias, token) in mention_run(source, cursor) {
+            if !recipients.iter().any(|existing| existing == alias) {
+                recipients.push(alias.to_owned());
+            }
+            cursor = token.end;
         }
-        cursor = token.end;
+        let Some((name, end)) = remote_token(source, cursor) else {
+            break;
+        };
+        if hosts.participant(&name.alias, &name.label) {
+            let alias = format!("{}@{}", name.alias, name.label);
+            if !recipients.contains(&alias) {
+                recipients.push(alias);
+            }
+            cursor = end;
+            continue;
+        }
+        let Some(listed) = hosts.listed() else {
+            break;
+        };
+        if !crate::relay::valid_label(&name.label) || !listed.contains(&name.label) {
+            return Err(hosts.unlisted(&name.label));
+        }
+        if !remote.contains(&name) {
+            remote.push(name);
+        }
+        cursor = end;
     }
 
-    if recipients.is_empty() {
+    if recipients.is_empty() && remote.is_empty() {
         return Err(MISSING_RECIPIENTS.to_owned());
+    }
+    if !remote.is_empty() && (all || !labels.is_empty()) {
+        return Err(
+            "a recipient on another host takes no workspace label, because its host \
+             resolves the name"
+                .to_owned(),
+        );
     }
     let scope = match (all, labels.is_empty()) {
         (false, true) => SpaceScope::Unqualified,
@@ -113,7 +161,39 @@ pub fn parse_mentions(source: &str) -> Result<ParsedMessage, String> {
         },
         body: body.to_owned(),
         context_mentions: context_mentions(body),
+        remote,
     })
+}
+
+/// The `@alias@host` token at `cursor`, with a valid alias and any host,
+/// and where it ends.
+fn remote_token(source: &str, cursor: usize) -> Option<(RemoteName, usize)> {
+    let start = skip_whitespace(source, cursor);
+    let end = token_end(source, start);
+    let token = &source[start..end];
+    let token = token.strip_suffix([',', ':']).unwrap_or(token);
+    let (alias, label) = token.strip_prefix('@')?.split_once('@')?;
+    validate_alias(alias).ok()?;
+    Some((
+        RemoteName {
+            alias: alias.to_owned(),
+            label: label.to_owned(),
+        },
+        end,
+    ))
+}
+
+/// Whether a `send`'s leading run names a recipient as `@alias@host`. Only
+/// the send itself, in a Rex home, can judge that against its host list.
+pub fn names_remote_host(operation: &str, input: &Value) -> bool {
+    matches!(operation, "send" | "reply")
+        && input["source"].as_str().is_some_and(|source| {
+            let cursor = leading_labels(source).cursor;
+            let cursor = mention_run(source, cursor)
+                .last()
+                .map_or(cursor, |(_, token)| token.end);
+            remote_token(source, cursor).is_some()
+        })
 }
 
 /// The run of Mentions at `cursor`: each alias and its whole token, separator
@@ -261,6 +341,7 @@ pub fn parse_prompt_mentions(source: &str) -> Result<ParsedMessage, String> {
         recipients,
         body: source.to_owned(),
         context_mentions: Vec::new(),
+        remote: Vec::new(),
     })
 }
 
@@ -396,10 +477,10 @@ fn recipient_outlook(address: &PaneAddressRecord) -> RecipientOutlook {
     } else {
         match address.lifecycle {
             PaneAddressLifecycle::Occupied => {
-                // Dispatch waits for a Settled Observation, and only "idle" and
-                // "done" are settled. Every other status keeps the message queued.
+                // Dispatch waits for a Settled Observation. Every other status
+                // keeps the message queued.
                 let status = address.agent_status.as_deref().unwrap_or("unknown");
-                if matches!(status, "idle" | "done") {
+                if crate::mux::AgentState::parse(status).accepts_prompt() {
                     format!(
                         "@{alias}: Agent Session status {status} — settled, so delivery is imminent."
                     )
@@ -619,52 +700,53 @@ pub fn validate_message_input(operation: &str, input: Value) -> Result<(), Strin
     Ok(())
 }
 
-pub fn execute_message_operation<E, C, I>(
+pub fn execute_message_operation<M, C, I>(
     operation: &str,
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
     execute_message_operation_with_caller(operation, input, runtime, None)
+        .map_err(|error| runtime.mux.endpoint().kind.authored_error(error))
 }
 
-pub(crate) fn execute_message_operation_with_caller<E, C, I>(
+pub(crate) fn execute_message_operation_with_caller<M, C, I>(
     operation: &str,
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     caller: Option<&crate::deferred_commands::Caller>,
 ) -> Result<Value, String>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
     let input = parse_operation_input(operation, input)?;
-    let workspaces = crate::spaces::HerdrWorkspaces::new(runtime.herdr);
+    let workspaces = crate::spaces::HerdrWorkspaces::new(runtime.mux);
     if operation == "send"
         && let Some(scope) = scope_without_mention(&input.source)
     {
         return Err(workspace_prompt_refusal(scope, runtime, &workspaces).to_string());
     }
-    let input = prepare_source_message(input)?;
+    let input = prepare_in_home(operation, input, runtime)?;
     let author = pane_author(runtime)?;
     persist_prepared_message_operation(input, author, runtime, &workspaces, caller)
         .map(|(receipt, _)| receipt)
         .map_err(|error| error.to_string())
 }
 
-pub fn send_operator_message<E, C, I>(
+pub fn send_operator_message<M, C, I>(
     request_id: &str,
     source: &str,
     in_reply_to: Option<&MessageId>,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, OperatorSendError>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -672,14 +754,14 @@ where
         .map(|(receipt, ())| receipt)
 }
 
-pub fn send_operator_direct_message<E, C, I>(
+pub fn send_operator_direct_message<M, C, I>(
     request_id: &str,
     source: &str,
     peer: &crate::PaneAddressId,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, OperatorSendError>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -687,15 +769,15 @@ where
         .map(|(receipt, ())| receipt)
 }
 
-pub(crate) fn send_operator_direct_message_observing_commit<E, C, I, R>(
+pub(crate) fn send_operator_direct_message_observing_commit<M, C, I, R>(
     request_id: &str,
     source: &str,
     peer: &crate::PaneAddressId,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     observe_commit: impl FnOnce(&Value) -> R,
 ) -> Result<(Value, R), OperatorSendError>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -720,7 +802,7 @@ where
                 .into_iter()
                 .find(|binding| &binding.address_id == peer);
             let available = binding.is_some_and(|binding| {
-                discover_worktree_for_workspace(runtime.herdr, workspace).is_ok_and(|live| {
+                discover_worktree_for_workspace(runtime.mux, workspace).is_ok_and(|live| {
                     live.panes
                         .iter()
                         .any(|pane| pane.pane_id == binding.pane_id)
@@ -741,16 +823,16 @@ where
     Ok((receipt, observed))
 }
 
-pub(crate) fn send_operator_message_observing_commit<E, C, I, R>(
+pub(crate) fn send_operator_message_observing_commit<M, C, I, R>(
     request_id: &str,
     source: &str,
     in_reply_to: Option<&MessageId>,
     review_operator: Option<&crate::store::coordination_review::OperatorSession>,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     observe_commit: impl FnOnce(&Value) -> R,
 ) -> Result<(Value, R), OperatorSendError>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -766,21 +848,24 @@ where
         })
         .into());
     }
-    let mut input = prepare_source_message(MessageOperationInput {
-        request_id: required_nonempty(request_id.to_owned(), "request_id")
-            .map_err(SendError::Input)?,
-        source: source.to_owned(),
-        author_kind: ActorKind::Human,
-        in_reply_to: in_reply_to.cloned(),
-        disposition_attempt_id: None,
-        context: None,
-        request_context: false,
-        decline_context_request: None,
-        tracking: crate::coordination::TrackingInput::default(),
-    })
+    let mut input = prepare_source_message(
+        MessageOperationInput {
+            request_id: required_nonempty(request_id.to_owned(), "request_id")
+                .map_err(SendError::Input)?,
+            source: source.to_owned(),
+            author_kind: ActorKind::Human,
+            in_reply_to: in_reply_to.cloned(),
+            disposition_attempt_id: None,
+            context: None,
+            request_context: false,
+            decline_context_request: None,
+            tracking: crate::coordination::TrackingInput::default(),
+        },
+        &crate::relay::NoRemoteHosts,
+    )
     .map_err(SendError::Input)?;
     input.review_operator = review_operator.cloned();
-    let workspaces = crate::spaces::HerdrWorkspaces::new(runtime.herdr);
+    let workspaces = crate::spaces::HerdrWorkspaces::new(runtime.mux);
     dispatch_prepared_message(
         input,
         Author::Operator,
@@ -815,15 +900,15 @@ fn capitalized_leading_alias(source: &str) -> Option<&str> {
     None
 }
 
-pub(crate) fn send_operator_channel_message_observing_commit<E, C, I, R>(
+pub(crate) fn send_operator_channel_message_observing_commit<M, C, I, R>(
     request_id: &str,
     source: &str,
     in_reply_to: Option<&MessageId>,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     observe_commit: impl FnOnce(&Value) -> R,
 ) -> Result<(Value, R), OperatorSendError>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -845,6 +930,7 @@ where
             },
             body: source.to_owned(),
             context_mentions: context_mentions(source),
+            remote: Vec::new(),
         },
         author_kind: ActorKind::Human,
         in_reply_to: in_reply_to.cloned(),
@@ -856,7 +942,7 @@ where
         preparation: MessagePreparation::OperatorPlain,
         review_operator: None,
     };
-    let workspaces = crate::spaces::HerdrWorkspaces::new(runtime.herdr);
+    let workspaces = crate::spaces::HerdrWorkspaces::new(runtime.mux);
     dispatch_prepared_message(
         input,
         Author::Operator,
@@ -867,24 +953,29 @@ where
     .map_err(OperatorSendError::from)
 }
 
-fn pane_author<'a, E, C, I>(runtime: &LifecycleRuntime<'a, E, C, I>) -> Result<Author<'a>, String> {
-    runtime
-        .current_pane_id
-        .map(Author::Pane)
-        .ok_or_else(|| "the current Herdr pane is required to resolve the sender".to_owned())
+fn pane_author<'a, M, C, I>(runtime: &LifecycleRuntime<'a, M, C, I>) -> Result<Author<'a>, String> {
+    runtime.current_pane_id.map(Author::Pane).ok_or_else(|| {
+        crate::mux::Endpoint::parse(runtime.session_socket_id)
+            .kind
+            .text(
+                "the current Herdr pane is required to resolve the sender",
+                "the current Rex pane is required to resolve the sender",
+            )
+            .to_owned()
+    })
 }
 
 /// The dashboard answers inside `observe_commit`, so these drains run after
 /// its response, on the server's own thread.
-fn dispatch_prepared_message<E, C, I, R>(
+fn dispatch_prepared_message<M, C, I, R>(
     input: PreparedMessageOperation,
     author: Author<'_>,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
-    workspaces: &crate::spaces::HerdrWorkspaces<'_, E>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
+    workspaces: &crate::spaces::HerdrWorkspaces<'_, M>,
     observe_commit: impl FnOnce(&Value) -> R,
 ) -> Result<(Value, R), SendError>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -913,20 +1004,20 @@ where
     Ok((response, observed))
 }
 
-pub(crate) fn recover_deferred_message<E, C, I>(
+pub(crate) fn recover_deferred_message<M, C, I>(
     operation: &str,
     input: Value,
     namespace: &StateNamespace,
     address: &crate::PaneAddressId,
     session: &crate::AgentSessionId,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Option<Value>, String>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
-    let input = prepare_source_message(parse_operation_input(operation, input)?)?;
+    let input = prepare_in_home(operation, parse_operation_input(operation, input)?, runtime)?;
     let mut store = StateStore::open(runtime.state_directory).map_err(|e| e.to_string())?;
     let committed = store
         .transaction(|tx| {
@@ -1012,12 +1103,12 @@ pub(crate) enum PromptMentionOutcome {
 /// Commits the verbatim leading-Mention shorthand used by native prompt hooks.
 /// `None` when the prompt's `#` run names no Herdr workspace: it never
 /// addressed anyone, so it stays the person's own prompt.
-pub(crate) fn persist_prompt_mention_operation<E, C, I>(
+pub(crate) fn persist_prompt_mention_operation<M, C, I>(
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Option<PromptMentionOutcome>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -1048,12 +1139,12 @@ where
     })
 }
 
-fn persist_prompt_mention<E, C, I>(
+fn persist_prompt_mention<M, C, I>(
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Vec<crate::store::ForwardedCopy>, SendError>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -1065,7 +1156,7 @@ where
             "a prompt Mention cannot carry a context block".to_owned(),
         ));
     }
-    let workspaces = crate::spaces::HerdrWorkspaces::new(runtime.herdr);
+    let workspaces = crate::spaces::HerdrWorkspaces::new(runtime.mux);
     if let Some(scope) = workspace_prompt_scope(&input.source) {
         return Err(workspace_prompt_refusal(scope, runtime, &workspaces));
     }
@@ -1093,13 +1184,13 @@ where
 
 /// A `#` run naming no one is either prose, which stays the person's own
 /// text, or a workspace prompt, refused with the names in its scope.
-fn workspace_prompt_refusal<E, C, I>(
+fn workspace_prompt_refusal<M, C, I>(
     scope: SpaceScope,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
-    workspaces: &crate::spaces::HerdrWorkspaces<'_, E>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
+    workspaces: &crate::spaces::HerdrWorkspaces<'_, M>,
 ) -> SendError
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -1109,13 +1200,13 @@ where
     }
 }
 
-fn names_in_prompt_scope<E, C, I>(
+fn names_in_prompt_scope<M, C, I>(
     scope: &SpaceScope,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
-    workspaces: &crate::spaces::HerdrWorkspaces<'_, E>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
+    workspaces: &crate::spaces::HerdrWorkspaces<'_, M>,
 ) -> Result<Vec<ScopedName>, SendError>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -1123,8 +1214,8 @@ where
         return Err(SendError::NotAMention);
     }
     let discovered = match runtime.workspace_id {
-        Some(workspace_id) => discover_worktree_for_workspace(runtime.herdr, workspace_id)?,
-        None => discover_worktree(runtime.herdr, runtime.cwd)?,
+        Some(workspace_id) => discover_worktree_for_workspace(runtime.mux, workspace_id)?,
+        None => discover_worktree(runtime.mux, runtime.cwd)?,
     };
     let namespace = discovered.namespace(runtime.session_socket_id);
     let mut store = StateStore::open(runtime.state_directory)?;
@@ -1141,7 +1232,7 @@ where
     crate::spaces::names_in_scope(scope, &directory).map_err(SendError::Refused)
 }
 
-fn names_workspaces<E: crate::HerdrCommandExecutor>(
+fn names_workspaces<E: crate::mux::MuxRead>(
     scope: &SpaceScope,
     workspaces: &crate::spaces::HerdrWorkspaces<'_, E>,
 ) -> bool {
@@ -1248,15 +1339,15 @@ impl std::fmt::Display for SendError {
 
 type PersistedMessage = (Value, Vec<crate::store::ForwardedCopy>);
 
-fn persist_prepared_message_operation<E, C, I>(
+fn persist_prepared_message_operation<M, C, I>(
     input: PreparedMessageOperation,
     author_source: Author<'_>,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
-    workspaces: &crate::spaces::HerdrWorkspaces<'_, E>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
+    workspaces: &crate::spaces::HerdrWorkspaces<'_, M>,
     caller: Option<&crate::deferred_commands::Caller>,
 ) -> Result<PersistedMessage, SendError>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -1274,6 +1365,25 @@ where
         tracking,
         review_operator,
     } = input;
+    let remote = parsed.remote.clone();
+    let relayed_text = if remote.is_empty() {
+        String::new()
+    } else {
+        parsed.body.clone()
+    };
+    if !remote.is_empty()
+        && (context.is_some()
+            || request_context
+            || decline_context_request.is_some()
+            || tracking.present()
+            || in_reply_to.is_some())
+    {
+        return Err(SendError::Input(
+            "a message to an agent on another host is a plain send: it carries no context \
+             and no tracked work"
+                .to_owned(),
+        ));
+    }
     if context.is_some() && author_kind != ActorKind::AgentSession {
         return Err(SendError::Input(
             "a context block requires an agent-authored message (author_kind agent_session)"
@@ -1302,8 +1412,8 @@ where
         ));
     }
     let discovered = match runtime.workspace_id {
-        Some(workspace_id) => discover_worktree_for_workspace(runtime.herdr, workspace_id)?,
-        None => discover_worktree(runtime.herdr, runtime.cwd)?,
+        Some(workspace_id) => discover_worktree_for_workspace(runtime.mux, workspace_id)?,
+        None => discover_worktree(runtime.mux, runtime.cwd)?,
     };
     let namespace = discovered.namespace(runtime.session_socket_id);
     let mut store = StateStore::open(runtime.state_directory)?;
@@ -1345,16 +1455,38 @@ where
             .map(|tracked| tracked.home);
         Ok((author, replayed, tracked_home))
     })?;
+    let relay = |committed: &Committed| -> Result<(), SendError> {
+        if remote.is_empty() {
+            return Ok(());
+        }
+        let receipt = &committed.routed.receipt;
+        crate::relay::queue(
+            runtime.state_directory,
+            &crate::relay::Sent {
+                namespace: &namespace,
+                sender: &author.alias,
+                message: &receipt.message_id,
+                thread: &receipt.thread_id,
+                text: &relayed_text,
+                now_ms: i64::try_from(runtime.clock.now_unix_ms()).unwrap_or(i64::MAX),
+            },
+            &remote,
+        )
+        .map_err(SendError::Input)
+    };
     if let Some(committed) = replayed {
-        let presented = present_committed(
+        relay(&committed)?;
+        let mut presented = present_committed(
             committed,
             &mut store,
             &namespace,
             &disposition_attempt_id,
             runtime,
         )?;
+        crate::relay::present(&mut presented.0, &remote);
         return Ok(presented);
     }
+    crate::relay::check_size(&author.alias, &remote, &parsed.body).map_err(SendError::Input)?;
     let grammar_version = preparation.grammar(in_reply_to.as_ref());
     let plain_channel = preparation == MessagePreparation::OperatorPlain;
     let direct_reply = store.transaction(|tx| {
@@ -1419,7 +1551,7 @@ where
     {
         let spaces =
             store.transaction(|transaction| routing.remote_spaces(transaction, &namespace))?;
-        crate::spaces::LiveSpaces::load(runtime.herdr, discovered.clone(), &spaces)
+        crate::spaces::LiveSpaces::load(runtime.mux, discovered.clone(), &spaces)
     } else {
         crate::spaces::LiveSpaces::here(discovered.clone())
     };
@@ -1494,11 +1626,17 @@ where
         };
         let mut recipients = if let Some(peer) = &direct_reply {
             vec![transaction.routing_address_by_id(&namespace, peer)?]
-        } else if plain_channel {
+        } else if plain_channel || (parsed.recipients.aliases.is_empty() && !remote.is_empty()) {
             Vec::new()
         } else {
             routing.resolve(transaction, &namespace, &author.address_id, runtime.clock.now_unix_ms())?
         };
+        for name in &remote {
+            let relay_author = transaction.ensure_relay_author(&namespace, &name.author(), &attribution)?;
+            if !recipients.iter().any(|recipient| recipient.address_id == relay_author.address_id) {
+                recipients.push(relay_author);
+            }
+        }
         let channel_reply = author_kind == ActorKind::AgentSession
             && reply_route.as_ref().is_some_and(|route| route.reply_mode == crate::DeliveryReplyMode::Channel);
         let pending_channel = if plain_channel {
@@ -1872,13 +2010,15 @@ where
     });
     match routed {
         Ok(committed) => {
-            let presented = present_committed(
+            relay(&committed)?;
+            let mut presented = present_committed(
                 committed,
                 &mut store,
                 &namespace,
                 &disposition_attempt_id,
                 runtime,
             )?;
+            crate::relay::present(&mut presented.0, &remote);
             Ok(presented)
         }
         Err(error) => {
@@ -1962,12 +2102,12 @@ impl Replay<'_> {
     }
 }
 
-fn sending_author<E, C, I>(
+fn sending_author<M, C, I>(
     transaction: &mut crate::StateTransaction<'_>,
     namespace: &StateNamespace,
     author_source: Author<'_>,
     request: &Replay<'_>,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<(crate::RoutingAddressSnapshot, MutationAttribution), crate::StoreError>
 where
     C: crate::Clock,
@@ -2020,15 +2160,15 @@ where
     Ok((author, attribution))
 }
 
-fn present_committed<E, C, I>(
+fn present_committed<M, C, I>(
     committed: Committed,
     store: &mut StateStore,
     namespace: &StateNamespace,
     disposition_attempt_id: &Option<crate::DeliveryAttemptId>,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<PersistedMessage, SendError>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
 {
     let Committed {
         channel,
@@ -2089,52 +2229,71 @@ where
     Ok((response, forwarded))
 }
 
-fn present_relay_result<E, C, I>(
+fn present_relay_result<M, C, I>(
     relay: &RelayPresentation,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Value
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
 {
     let title = format!("@{} replied", relay.sender_alias);
     let body = read_by_person(&relay.body);
     let summary = body.lines().next().unwrap_or_default().trim();
     let summary = summary.chars().take(160).collect::<String>();
-    let token = format!("namedrop-relay=@{}: {summary}", relay.sender_alias);
-    let notification = runtime.herdr.execute(&[
-        "notification",
-        "show",
-        &title,
-        "--body",
-        &body,
-        "--position",
-        "bottom-right",
-        "--sound",
-        "done",
-    ]);
-    let metadata = runtime.herdr.execute(&[
-        "pane",
-        "report-metadata",
-        &relay.pane_id,
-        "--source",
-        "namedrop-relay",
-        "--token",
-        &token,
-        "--ttl-ms",
-        "15000",
-    ]);
+    let notification = runtime.mux.apply(&Effect::Notify {
+        title,
+        body: body.clone(),
+        sound: true,
+    });
+    let metadata = runtime.mux.apply(&Effect::Badges {
+        pane: PaneId::new(&relay.pane_id),
+        badges: vec![Badge::Relay {
+            alias: relay.sender_alias.clone(),
+            summary,
+        }],
+    });
     json!({
         "mode": crate::DeliveryReplyMode::ReturnToSource.as_str(),
-        "notification_shown": notification.is_ok(),
-        "notification_error": notification.err(),
-        "metadata_error": metadata.err(),
+        "notification_shown": matches!(notification, Ok(Applied::Done)),
+        "notification_error": notification.err().map(|error| error.to_string()),
+        "metadata_error": metadata.err().map(|error| error.to_string()),
     })
+}
+
+/// Parses a send or reply as its home reads it. A Rex send that names
+/// `@alias@host` reads the host list, and a Rex reply may name a remote
+/// agent of the thread it answers. Every other message reads `@a@b` as it
+/// always has.
+fn prepare_in_home<M, C, I>(
+    operation: &str,
+    input: MessageOperationInput,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
+) -> Result<PreparedMessageOperation, String> {
+    let rex = crate::mux::Endpoint::parse(runtime.session_socket_id).kind
+        == crate::mux::MuxKind::Rex
+        && names_remote_host(operation, &json!({"source": input.source}));
+    if rex && operation == "send" {
+        let hosts = crate::relay::Hosts::read()?;
+        return prepare_source_message(input, &hosts);
+    }
+    if let (true, Some(answered)) = (rex, &input.in_reply_to) {
+        let participants = StateStore::open(runtime.state_directory)
+            .and_then(|mut store| {
+                store.transaction(|transaction| {
+                    transaction.relay_participants(runtime.session_socket_id, answered)
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        return prepare_source_message(input, &crate::relay::Participants(participants));
+    }
+    prepare_source_message(input, &crate::relay::NoRemoteHosts)
 }
 
 fn prepare_source_message(
     input: MessageOperationInput,
+    hosts: &dyn RemoteHosts,
 ) -> Result<PreparedMessageOperation, String> {
-    let parsed = parse_mentions(&input.source)?;
+    let parsed = parse_mentions_in(&input.source, hosts)?;
     Ok(PreparedMessageOperation {
         request_id: input.request_id,
         authored_source: input.source,

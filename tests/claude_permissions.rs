@@ -1,8 +1,17 @@
+#![cfg(feature = "test-support")]
+
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/executable.rs"]
 mod executable;
 
+use namedrop::mux::{
+    Effect, InputOutcome, MuxError,
+    fake::{EVERY_LISTING, FakeMux, StrictSpace, Takes},
+};
 use namedrop::*;
 use serde_json::{Value, json};
 use std::{
@@ -29,6 +38,8 @@ struct Fixture {
     home: PathBuf,
     claude: PathBuf,
     ids: Ids,
+    /// Last, so it judges the world after `Drop` removed the fixture.
+    host: StrictSpace,
 }
 impl Fixture {
     fn new() -> Self {
@@ -62,13 +73,14 @@ print(json.dumps({'result':result}))
             home,
             claude,
             ids: Ids(AtomicU64::new(0)),
+            host: host(),
         }
     }
     fn settings(&self) -> PathBuf {
         self.claude.join("settings.json")
     }
     fn command_for(&self, workspace: &str) -> std::process::Command {
-        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_namedrop"));
+        let mut command = crate::binary::namedrop();
         command
             .args([
                 "--plugin-state",
@@ -107,19 +119,20 @@ print(json.dumps({'result':result}))
         let report: Value = serde_json::from_slice(&output.stdout).unwrap();
         serde_json::from_value(report["data"].clone()).unwrap_or_else(|_| panic!("{output:?}"))
     }
-    fn runtime(&self) -> LifecycleRuntime<'_, Host, Time, Ids> {
+    fn runtime(&self) -> LifecycleRuntime<'_, mux::fake::FakeMux, Time, Ids> {
         LifecycleRuntime {
             state_directory: &self.root,
             home_directory: Some(&self.home),
             agent_config: namedrop::AgentConfigDirectories {
                 claude: Some(&self.claude),
                 codex: None,
+                config: None,
             },
             cwd: Path::new("/repo"),
             workspace_id: None,
             current_pane_id: Some("pane-1"),
             session_socket_id: "socket-a",
-            herdr: &Host,
+            mux: &self.host,
             clock: &Time,
             ids: &self.ids,
         }
@@ -134,7 +147,7 @@ print(json.dumps({'result':result}))
         serde_json::from_slice(&fs::read(self.settings()).unwrap()).unwrap()
     }
     fn expected(&self) -> Vec<Value> {
-        self.expected_for(Path::new(env!("CARGO_BIN_EXE_namedrop")))
+        self.expected_for(Path::new(crate::binary::namedrop_path()))
     }
     fn expected_for(&self, executable: &Path) -> Vec<Value> {
         [
@@ -169,6 +182,10 @@ print(json.dumps({'result':result}))
                 self.root.display()
             ))
         })
+        .chain([json!(format!(
+            "Read(/{}/channel-images/**)",
+            self.root.display()
+        ))])
         .collect()
     }
     fn bootstrap_rule_for(&self, executable: &Path) -> Value {
@@ -179,7 +196,7 @@ print(json.dumps({'result':result}))
         ))
     }
     fn bootstrap_rule(&self) -> Value {
-        self.bootstrap_rule_for(Path::new(env!("CARGO_BIN_EXE_namedrop")))
+        self.bootstrap_rule_for(Path::new(crate::binary::namedrop_path()))
     }
 }
 impl Drop for Fixture {
@@ -187,26 +204,38 @@ impl Drop for Fixture {
         cleanup::remove_fixture(&self.root).unwrap();
     }
 }
-struct Host;
-impl HerdrCommandExecutor for Host {
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        let stdout = match args {
-            ["workspace", "list"] => {
-                json!({"result":{"workspaces":[{"workspace_id":"workspace-1"}]}})
-            }
-            ["worktree", "list", ..] => {
-                json!({"result":{"worktrees":[{"path":"/repo", "open_workspace_id":"workspace-1"}]}})
-            }
-            ["pane", "list", ..] => {
-                json!({"result":{"panes":[{"pane_id":"pane-1", "terminal_id":"terminal-1", "tab_id":"tab-1", "workspace_id":"workspace-1", "agent":"claude", "agent_session":{"value":"session-1"}, "agent_status":"idle"}]}})
-            }
-            ["pane", "report-metadata", ..] | ["agent", "prompt", ..] => json!({}),
-            _ => return Err(format!("unexpected command: {args:?}")),
-        };
-        Ok(HerdrCommandOutput {
-            stdout: stdout.to_string(),
-        })
-    }
+/// Every listing of `workspace-1`, which holds `/repo` and one idle Claude
+/// pane, `pane-1`. It takes any prompt, which it answers `Delivered`
+/// whatever the pane's state, and any `pane report-metadata`, as the old
+/// fake did. The old fake failed `server reload-config` and the tour's
+/// `plugin pane open`, which activation moves past, so both are taken and
+/// fail.
+fn host() -> StrictSpace {
+    let mux = FakeMux::world()
+        .endpoint("socket-a")
+        .space("workspace-1")
+        .checkout("/repo")
+        .unstamped()
+        .pane("pane-1")
+        .terminal("terminal-1")
+        .tab("tab-1")
+        .claude()
+        .session("session-1")
+        .idle()
+        .build();
+    mux.answer("pane-1", InputOutcome::Delivered);
+    mux.on_apply(|_, effect| match effect {
+        Effect::ReloadKeybindings => Err(MuxError::Unavailable(
+            r#"unexpected command: ["server", "reload-config"]"#.to_owned(),
+        )),
+        Effect::OpenPopup(_) => Err(MuxError::Unavailable(
+            r#"unexpected command: ["plugin", "pane", "open", ..]"#.to_owned(),
+        )),
+        _ => Ok(()),
+    });
+    let takes = Takes::prompts_and_metadata()
+        .effect(|effect| matches!(effect, Effect::ReloadKeybindings | Effect::OpenPopup(_)));
+    StrictSpace::new(mux, EVERY_LISTING, takes)
 }
 struct Time;
 impl Clock for Time {
@@ -258,6 +287,11 @@ fn activation_preserves_settings_and_adds_managed_command_permissions() {
                 pattern[3..].join(" ")
             ))
         })
+        // Codex reads a file anywhere; only Claude Code needs the image directory allowed.
+        .chain([json!(format!(
+            "Read(/{}/channel-images/**)",
+            f.root.display()
+        ))])
         .collect();
     assert_eq!(&allow[3..], expected);
     assert!(!allow.iter().any(|entry| {
@@ -273,7 +307,7 @@ fn reactivation_is_idempotent_and_deactivation_keeps_identical_user_rules() {
     install_integration_package(
         &f.home,
         AgentRuntime::ClaudeCode,
-        &fs::canonicalize(env!("CARGO_BIN_EXE_namedrop")).unwrap(),
+        &fs::canonicalize(crate::binary::namedrop_path()).unwrap(),
         &f.root,
     )
     .unwrap();
@@ -288,7 +322,7 @@ fn reactivation_is_idempotent_and_deactivation_keeps_identical_user_rules() {
     f.activate();
     assert_eq!(
         f.read()["permissions"]["allow"].as_array().unwrap().len(),
-        23
+        24
     );
     let before = fs::read(f.settings()).unwrap();
     let modified = fs::metadata(f.settings()).unwrap().modified().unwrap();
@@ -320,19 +354,23 @@ fn runtime_path_change_removes_old_managed_rules_only() {
     install_integration_package(&f.home, AgentRuntime::ClaudeCode, &first, &f.root).unwrap();
     assert_eq!(
         f.read()["permissions"]["allow"].as_array().unwrap().len(),
-        23
+        24
     );
     let next = f.root.join("next runtime/namedrop");
     install_integration_package(&f.home, AgentRuntime::ClaudeCode, &next, &f.root).unwrap();
     let allow = f.read()["permissions"]["allow"].as_array().unwrap().clone();
-    assert_eq!(allow.len(), 23);
+    assert_eq!(allow.len(), 24);
     assert_eq!(allow[0], "Read");
     assert!(
         !allow
             .iter()
             .any(|entry| entry.as_str().unwrap().contains("old runtime"))
     );
-    assert_eq!(&allow[1..], f.expected_for(&next));
+    // The image rule names the state directory only, so it stays where it was.
+    let expected = f.expected_for(&next);
+    let (images, commands) = expected.split_last().unwrap();
+    assert_eq!(&allow[1], images);
+    assert_eq!(&allow[2..], commands);
     f.deactivate();
     assert_eq!(f.read()["permissions"]["allow"], json!(["Read"]));
 }
@@ -383,7 +421,7 @@ fn doctor_reports_missing_claude_rules_with_activation_repair_without_writing() 
     assert_eq!(
         serialized["repair"]["command"],
         json!([
-            fs::canonicalize(env!("CARGO_BIN_EXE_namedrop")).unwrap(),
+            fs::canonicalize(crate::binary::namedrop_path()).unwrap(),
             "--plugin-state",
             f.root,
             "activate",
@@ -414,7 +452,7 @@ fn config_directory_override_is_isolated_from_the_default_profile() {
     f.activate();
     assert_eq!(
         f.read()["permissions"]["allow"].as_array().unwrap().len(),
-        23
+        24
     );
     f.deactivate();
     assert_eq!(f.read()["permissions"]["allow"], json!(["Read"]));
@@ -520,7 +558,7 @@ fn deactivating_one_of_two_worktrees_keeps_shared_permissions() {
     assert_eq!(fs::read(f.settings()).unwrap(), before);
     let second = f.run_for("workspace-2", "deactivate", json!({}));
     assert_eq!(second["claude_permissions"]["removed"], true);
-    assert_eq!(second["claude_permissions"]["removed_entries"], 22);
+    assert_eq!(second["claude_permissions"]["removed_entries"], 23);
     assert_eq!(f.read()["permissions"]["allow"], json!([]));
 }
 
@@ -610,7 +648,7 @@ fn input_file_errors_never_echo_unknown_keys_or_values() {
             vec!["register"],
             vec!["handoff", "begin"],
         ] {
-            let output = std::process::Command::new(env!("CARGO_BIN_EXE_namedrop"))
+            let output = crate::binary::namedrop()
                 .args(["--plugin-state", f.root.to_str().unwrap()])
                 .args(command)
                 .args([
@@ -677,7 +715,7 @@ fn an_inherited_claude_config_directory_is_not_used_by_in_process_helpers() {
     let parent = f.root.join("parent-profile");
     fs::create_dir(&parent).unwrap();
     fs::write(parent.join("settings.json"), "{\"parent\":true}\n").unwrap();
-    let result = std::process::Command::new(std::env::current_exe().unwrap())
+    let result = crate::binary::command(std::env::current_exe().unwrap())
         .args([
             "--exact",
             "an_inherited_claude_config_directory_is_not_used_by_in_process_helpers",
@@ -856,7 +894,7 @@ fn input_file_operational_errors_match_inline_errors() {
         .output()
         .unwrap();
     assert!(named.status.success(), "{named:?}");
-    let peer = std::process::Command::new(env!("CARGO_BIN_EXE_namedrop"))
+    let peer = crate::binary::namedrop()
         .args([
             "--plugin-state",
             f.root.to_str().unwrap(),
@@ -1048,8 +1086,8 @@ fn reactivation_removes_an_owned_environment_bootstrap_rule() {
         !allow.contains(&unsafe_rule),
         "reactivation retained the owned environment bootstrap: {allow:?}"
     );
-    assert_eq!(&allow[..22], f.expected());
-    assert_eq!(allow[22], "Read");
+    assert_eq!(&allow[..23], f.expected());
+    assert_eq!(allow[23], "Read");
     let owned: Value = serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
     assert!(!owned["entries"].as_array().unwrap().contains(&unsafe_rule));
     f.deactivate();
@@ -1070,7 +1108,7 @@ fn registration_flags_override_every_inherited_transport_value() {
         .remove(0);
     let challenge =
         issue_registration_challenge(&address.id, AgentRuntime::ClaudeCode, &runtime).unwrap();
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_namedrop"))
+    let output = crate::binary::namedrop()
         .args(["--plugin-state", f.root.to_str().unwrap(), "register", "--herdr-socket", "socket-a", "--herdr-workspace", "workspace-1", "--herdr-pane", "pane-1", "--input-json", &json!({"runtime":"claude-code", "protocol_version":"collab/v1", "nonce":challenge.nonce, "capabilities":complete_capability_profile()}).to_string()])
         .env("HOME", &f.home).env("CLAUDE_CONFIG_DIR", &f.claude).env("CODEX_HOME", f.home.join(".codex"))
         .env("HERDR_BIN_PATH", f.root.join("herdr")).env("TEST_WORKSPACE", "workspace-1")

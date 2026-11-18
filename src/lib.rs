@@ -9,6 +9,7 @@ mod codex_app_server;
 mod context;
 mod controls;
 mod coordination;
+pub mod daemon;
 pub mod dashboard;
 #[doc(hidden)]
 pub mod deferred_commands;
@@ -28,11 +29,18 @@ mod lifecycle;
 #[cfg(target_os = "linux")]
 #[doc(hidden)]
 pub mod linux_sandbox;
+pub mod locator;
 mod message;
+#[doc(hidden)]
+pub mod mux;
 mod pane_effects;
 mod pointer;
+mod relay;
+pub use relay::{accept as relay_accept, run_worker as relay_worker};
 #[doc(hidden)]
 pub mod reminder;
+pub mod rex_bridge;
+pub mod rex_ui;
 pub use reminder::execute_reminder_operation;
 mod persona;
 mod ports;
@@ -72,7 +80,8 @@ pub use health::{
     diagnose_collaboration, render_health_report_to_text, request_doctor_assistance,
 };
 pub use hook::{
-    execute_codex_app_server_hook, execute_session_start_hook, execute_user_prompt_submit_hook,
+    MESSAGE_SENT, execute_codex_app_server_hook, execute_session_start_hook,
+    execute_user_prompt_submit_hook,
 };
 pub use install::{
     AgentConfigDirectories, InheritedDirectories, install_integration_package, package_directory,
@@ -82,43 +91,51 @@ pub(crate) use install::{
     integration_package_attention_source, refresh_user_integration_packages,
     user_hook_activation_guidance,
 };
-#[doc(hidden)]
 pub use installed_runtime::command_guard as runtime_command_guard;
 #[doc(hidden)]
 pub use installed_runtime::executable as runtime_executable;
+#[doc(hidden)]
+pub use installed_runtime::package_refusal;
 pub use installed_runtime::reexec_if_replaced as runtime_reexec_if_replaced;
 #[doc(hidden)]
 pub use installed_runtime::validate_update_manifest;
+pub use installed_runtime::{
+    Retirement, begin_removal as runtime_begin_removal,
+    command_guard_allow_removed as runtime_removal_guard, own_state as runtime_own_state,
+    retirement, standalone as runtime_standalone,
+};
 pub use integration::{
     AgentRuntime, AttachedContext, CONTEXT_DELIVERY_OPERATIONS, CatalogExample, CatalogOperation,
     ContextRequest, DELIVERY_PERMITTED_OPERATIONS, DeliveryAddress, DeliveryControl,
     DeliveryControlDraft, DeliveryEnvelope, INTEGRATION_PROTOCOL_VERSION, InputTransport,
     IntegrationChallenge, IntegrationPackage, IntegrationRegistration, IntegrationToolInvocation,
     OperationCatalog, REPLY_BODY_PLACEHOLDER, ResultSetCompletion, ResultSetOutcome,
-    ResultSetStatus, complete_capability_profile, describe_operations,
+    ResultSetStatus, complete_capability_profile, describe_operations, describe_operations_for,
     execute_integration_operation, integration_package, issue_registration_challenge,
     operation_catalog, trusted_delivery_instruction,
 };
 pub(crate) use integration::{collaboration_executable, tool_environment};
 pub use lifecycle::{
-    DiscoveredPane, DiscoveredWorktree, LifecycleRuntime, discover_worktree,
-    discover_worktree_for_workspace, execute_lifecycle_operation, locate_agent_session_pane,
-    pane_workspace, reconcile_discovered_panes,
+    DiscoveredPane, DiscoveredWorktree, EventError, LifecycleRuntime, activate_from_naming_screen,
+    discover_worktree, discover_worktree_for_workspace, execute_lifecycle_operation,
+    handle_mux_event, locate_agent_session_pane, open_popup, pane_workspace,
+    reconcile_discovered_panes,
 };
 pub use message::{
     BodyMention, OperatorSendError, OperatorSendErrorKind, ParsedMessage, RecipientOutlook,
     RecipientRun, carries_leading_mentions, execute_message_operation, expand_attempt_reply,
-    parse_mentions, parse_prompt_mentions, recipient_outlooks, send_operator_direct_message,
-    send_operator_message, validate_message_input,
+    names_remote_host, parse_mentions, parse_prompt_mentions, recipient_outlooks,
+    send_operator_direct_message, send_operator_message, validate_message_input,
 };
-pub use ports::{Clock, HerdrCommandExecutor, HerdrCommandOutput, IdGenerator, PromptFailureKind};
-pub use runtime::{ProcessHerdr, ProcessIds, SystemClock};
+pub use ports::{Clock, IdGenerator};
+pub use runtime::{ProcessIds, SystemClock};
 use serde::Serialize;
 pub use spaces::{SpaceScope, WorkspaceLabel};
 mod output;
 mod qr;
 pub use output::{
-    agent_result_view, render_command_result_to_text, render_command_result_to_text_within,
+    agent_result_view, render_command_result_to_text, render_command_result_to_text_for,
+    render_command_result_to_text_within,
 };
 pub use store::coordination_review::{OperatorSession, REVIEW_GRANT_TTL_MS};
 pub use store::{
@@ -278,4 +295,30 @@ mod executable;
 #[path = "../tests/support/scan.rs"]
 mod scan;
 #[cfg(test)]
+#[path = "../tests/support/sync_cell.rs"]
+mod sync_cell;
+#[cfg(test)]
 mod work_counters;
+
+#[cfg(feature = "test-support")]
+pub fn test_process_opens(pid: u32, path: &std::path::Path) -> bool {
+    mux::processes::opens(pid, path)
+}
+
+/// The `<pid>@<start>` incarnation that a Rex binding records for a live
+/// local process, as the survey reads it.
+#[cfg(feature = "test-support")]
+pub fn test_process_incarnation(pid: u32) -> Option<String> {
+    use mux::processes::{LocalProcesses, LocalRead, ThisMachine};
+    match ThisMachine.read(pid) {
+        LocalRead::Alive(process) => Some(process.incarnation.0),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub use hook::codex_app_server_hook_output as test_codex_app_server_hook_output;
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub use integration::registration_prompt as test_registration_prompt;

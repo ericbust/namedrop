@@ -1,15 +1,22 @@
-#![cfg(target_os = "linux")]
+#![cfg(all(target_os = "linux", feature = "test-support"))]
+
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/executable.rs"]
 mod executable;
 mod support;
+use namedrop::mux::{
+    Gone, MuxError,
+    fake::{EVERY_LISTING, FakeMux, Op, StrictSpace, Takes},
+};
 use namedrop::{
     ActorKind, AgentRuntime, AgentSessionId, Clock, DeliveryAttemptId, DeliveryId, DeliveryState,
-    HerdrCommandExecutor, HerdrCommandOutput, LeaseDraft, LifecycleRuntime, MessageDraft,
-    MessageId, MessageRecipientDraft, MutationAttribution, PaneAddressId, PaneBindingId,
-    ProcessIds, StateNamespace, StateStore, SystemClock, ThreadId, complete_capability_profile,
-    execute_integration_operation,
+    LeaseDraft, LifecycleRuntime, MessageDraft, MessageId, MessageRecipientDraft,
+    MutationAttribution, PaneAddressId, PaneBindingId, ProcessIds, StateNamespace, StateStore,
+    SystemClock, ThreadId, complete_capability_profile, execute_integration_operation,
 };
 use serde_json::{Value, json};
 use std::{
@@ -29,46 +36,23 @@ struct Fixture {
     _listener: UnixListener,
 }
 
-struct ScriptHerdr<'a>(&'a Path);
-impl HerdrCommandExecutor for ScriptHerdr<'_> {
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        let output = Command::new(self.0)
-            .env_clear()
-            .env("PATH", "/usr/bin:/bin")
-            .env("HOME", self.0.parent().unwrap().join("home"))
-            .env(
-                "XDG_CONFIG_HOME",
-                self.0.parent().unwrap().join("xdg-config"),
-            )
-            .args(args)
-            .output()
-            .map_err(|error| error.to_string())?;
-        if !output.status.success() {
-            return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
-        }
-        Ok(HerdrCommandOutput {
-            stdout: String::from_utf8(output.stdout).map_err(|error| error.to_string())?,
-        })
-    }
-}
-
-struct NativeHerdr;
-impl HerdrCommandExecutor for NativeHerdr {
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        let value = match args {
-            ["worktree", "list", ..] => {
-                json!({"result":{"worktrees":[{"path":"/repo","open_workspace_id":"workspace-1"}]}})
-            }
-            ["workspace", "list"] => {
-                json!({"result":{"workspaces":[{"workspace_id":"workspace-1"}]}})
-            }
-            ["pane", "list", ..] => panes("session-author"),
-            _ => return Err(format!("unexpected Herdr command {args:?}")),
-        };
-        Ok(HerdrCommandOutput {
-            stdout: value.to_string(),
-        })
-    }
+/// The world the old in-process executor answered: `/repo` open in
+/// workspace-1 and one idle pane, `pane-author`, that reports a session but no
+/// agent kind. It answers every `worktree list` and `pane list`, as the old
+/// executor matched them with any arguments, and takes no input or effect.
+fn native(socket: &str) -> StrictSpace {
+    let mux = FakeMux::world()
+        .endpoint(socket)
+        .space("workspace-1")
+        .checkout("/repo")
+        .unstamped()
+        .pane("pane-author")
+        .terminal("terminal-author")
+        .tab("tab-1")
+        .session("session-author")
+        .idle()
+        .build();
+    StrictSpace::new(mux, EVERY_LISTING, Takes::nothing())
 }
 
 fn panes(session: &str) -> Value {
@@ -133,7 +117,7 @@ impl Fixture {
         execute_integration_operation("register", json!({"runtime":"codex","protocol_version":"collab/v1","nonce":"nonce","capabilities":complete_capability_profile()}), &LifecycleRuntime {
             state_directory:directory.path(), home_directory:None, agent_config:Default::default(),
             cwd:Path::new("/repo"), workspace_id:Some("workspace-1"), current_pane_id:Some("pane-author"),
-            session_socket_id:&socket, herdr:&NativeHerdr, clock:&SystemClock, ids:&ProcessIds::default(),
+            session_socket_id:&socket, mux:&*native(&socket), clock:&SystemClock, ids:&ProcessIds::default(),
         }).unwrap();
         fs::write(
             directory.path().join("panes.json"),
@@ -144,11 +128,14 @@ impl Fixture {
         executable::write_executable(
             &herdr,
             r#"#!/usr/bin/env python3
-import json, sys
+import json, os, sys
 from pathlib import Path
 root = Path(__file__).parent
 args = sys.argv[1:]
 with (root / 'herdr-calls').open('a') as f: f.write(json.dumps(args) + '\n')
+parent = Path(f'/proc/{os.getppid()}/cmdline').read_bytes().split(b'\0')
+role = parent[1].decode() if len(parent) > 1 else ''
+with (root / 'herdr-sockets').open('a') as f: f.write(json.dumps([role, os.environ.get('HERDR_SOCKET_PATH'), ' '.join(args[:2])]) + '\n')
 if args[:2] == ['--socket', str(root / 'herdr.sock')]: args = args[2:]
 if args[:2] == ['worktree','list'] and (root / 'discovery-error').exists():
     error = (root / 'discovery-error').read_text()
@@ -170,7 +157,7 @@ else: print('{}')
     }
 
     fn command(&self) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_namedrop"));
+        let mut command = crate::binary::namedrop();
         command
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -240,17 +227,7 @@ else: print('{}')
     }
 
     fn clock(&self) -> Worker {
-        Worker(
-            self.command()
-                .arg("reminder-clock")
-                .arg(self.directory.path())
-                .arg(&self.socket)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap(),
-        )
+        self.background("reminder-clock", None)
     }
 
     /// The full result, which carries the spool fields these tests inspect.
@@ -264,21 +241,39 @@ else: print('{}')
         input: Value,
         read_only: bool,
     ) -> Output {
+        self.sandboxed(operation, input, read_only, false)
+    }
+
+    /// `neutral` gives the endpoint, space, and pane under their neutral
+    /// environment names instead of the Herdr flags.
+    fn sandboxed(
+        &self,
+        operation: &[&str],
+        input: Value,
+        read_only: bool,
+        neutral: bool,
+    ) -> Output {
         let mut command = self.command();
         command
             .arg("--plugin-state")
             .arg(self.directory.path())
-            .args(operation)
-            .args([
+            .args(operation);
+        if neutral {
+            command
+                .env("NAMEDROP_ENDPOINT", &self.socket)
+                .env("NAMEDROP_SPACE_ID", "workspace-1")
+                .env("NAMEDROP_PANE_ID", "pane-author");
+        } else {
+            command.args([
                 "--herdr-socket",
                 &self.socket,
                 "--herdr-workspace",
                 "workspace-1",
                 "--herdr-pane",
                 "pane-author",
-                "--input-json",
-                &input.to_string(),
             ]);
+        }
+        command.args(["--input-json", &input.to_string()]);
         // This is the syscall boundary Codex denies. No test-only production switch.
         unsafe {
             command.pre_exec(move || {
@@ -359,17 +354,63 @@ else: print('{}')
     }
 
     fn worker(&self) -> Worker {
+        self.background("--deferred-worker", None)
+    }
+
+    /// `namedrop <role> <state> <socket>` in the background, inheriting
+    /// `HERDR_SOCKET_PATH` when `inherited` names one.
+    fn background(&self, role: &str, inherited: Option<&str>) -> Worker {
+        self.background_with(role, &self.socket, inherited)
+    }
+
+    /// Starts `namedrop <role>` with `argv_socket` as its socket argument.
+    fn background_with(&self, role: &str, argv_socket: &str, inherited: Option<&str>) -> Worker {
+        let mut command = self.command();
+        if let Some(socket) = inherited {
+            command.env("HERDR_SOCKET_PATH", socket);
+        }
         Worker(
-            self.command()
-                .arg("--deferred-worker")
+            command
+                .arg(role)
                 .arg(self.directory.path())
-                .arg(&self.socket)
+                .arg(argv_socket)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()
                 .unwrap(),
         )
+    }
+
+    /// Each `herdr` command a `namedrop <role>` process ran, as its first two
+    /// arguments and the `HERDR_SOCKET_PATH` it ran with.
+    fn herdr_sockets(&self, role: &str) -> Vec<(String, Option<String>)> {
+        fs::read_to_string(self.directory.path().join("herdr-sockets"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| {
+                let (parent, socket, command): (String, Option<String>, String) =
+                    serde_json::from_str(line).unwrap();
+                (parent == role).then_some((command, socket))
+            })
+            .collect()
+    }
+
+    /// Every command a `namedrop <role>` process ran used the stored
+    /// namespace's socket, and they included `command`.
+    fn assert_ran_on_the_stored_socket(&self, role: &str, command: &str) {
+        let calls = self.herdr_sockets(role);
+        assert!(
+            calls.iter().any(|(ran, _)| ran == command),
+            "{role} never ran {command}: {calls:?}"
+        );
+        assert!(
+            calls
+                .iter()
+                .all(|(_, socket)| socket.as_deref() == Some(self.socket.as_str())),
+            "{role} ran herdr off {}: {calls:?}",
+            self.socket
+        );
     }
 
     fn spool(&self) -> PathBuf {
@@ -493,6 +534,22 @@ fn denied_socket_queues_before_mutation_and_restarts_recover_one_logical_command
     assert_eq!(fs::read(request).unwrap(), original_bytes);
 }
 
+/// A sandboxed command takes its endpoint, space, and pane from the neutral
+/// names alone: it queues, and the worker answers it.
+#[test]
+fn a_sandboxed_command_under_neutral_names_queues_and_is_answered() {
+    let fixture = Fixture::new();
+    let input = send("neutral-id", "hello");
+    let pending = response(fixture.sandboxed(&["send", "--json"], input.clone(), false, true));
+    assert_eq!(pending["data"]["state"], "pending", "{pending}");
+    let receipt = PathBuf::from(pending["data"]["receipt"].as_str().unwrap());
+    let _worker = fixture.worker();
+    wait_for(|| receipt.exists());
+    let result = response(fixture.sandboxed(&["send", "--json"], input, false, true));
+    assert!(result["data"]["message_id"].is_string(), "{result}");
+    assert_eq!(fixture.message_count(), 1);
+}
+
 #[test]
 fn committed_untracked_send_cannot_gain_coordination_when_first_queued() {
     let fixture = Fixture::new();
@@ -508,7 +565,7 @@ fn committed_untracked_send_cannot_gain_coordination_when_first_queued() {
             workspace_id: Some("workspace-1"),
             current_pane_id: Some("pane-author"),
             session_socket_id: &fixture.socket,
-            herdr: &NativeHerdr,
+            mux: &*native(&fixture.socket),
             clock: &SystemClock,
             ids: &ProcessIds::default(),
         },
@@ -1287,7 +1344,17 @@ fn reminder_empty_exit_set_races_and_common_command_recovery() {
 }
 
 #[test]
-fn reminder_clock_fails_deleted_workspace_and_preserves_ambiguous_transport() {
+fn reminder_event_fails_deleted_workspace_and_preserves_ambiguous_transport() {
+    assert_reminder_event_discovery_failure("workspace_not_found");
+}
+
+#[test]
+fn reminder_event_keeps_transient_discovery_pending() {
+    assert_reminder_event_discovery_failure("transport_unavailable");
+}
+
+#[test]
+fn reminder_clock_fails_deleted_workspace() {
     assert_reminder_clock_discovery_failure("workspace_not_found");
 }
 
@@ -1296,7 +1363,52 @@ fn reminder_clock_keeps_transient_discovery_pending() {
     assert_reminder_clock_discovery_failure("transport_unavailable");
 }
 
-fn assert_reminder_clock_discovery_failure(error: &str) {
+/// Herdr's answer to a failed `worktree list`, whose message names
+/// `workspace_not_found` whatever its code.
+fn discovery_error(code: &str) -> String {
+    json!({"error":{"code":code,"message":"workspace_not_found text alone is not authoritative"}})
+        .to_string()
+}
+
+fn reminder_states(connection: &rusqlite::Connection) -> Vec<(String, String)> {
+    let mut statement = connection
+        .prepare("SELECT state,state_json FROM reminders ORDER BY request_id")
+        .unwrap();
+    statement
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+}
+
+fn reminder_delivery_state(connection: &rusqlite::Connection, request: &str) -> String {
+    connection.query_row("SELECT d.state FROM mailbox_deliveries d JOIN reminder_fires f USING(session_socket_id,worktree_id,delivery_id) JOIN reminders r USING(session_socket_id,worktree_id,reminder_id) WHERE r.request_id=?1", [request], |r| r.get(0)).unwrap()
+}
+
+fn delivery_attempts(connection: &rusqlite::Connection) -> i64 {
+    connection
+        .query_row("SELECT count(*) FROM delivery_attempts", [], |r| r.get(0))
+        .unwrap()
+}
+
+fn assert_deleted_workspace_failed_its_reminders(connection: &rusqlite::Connection) {
+    let states = reminder_states(connection);
+    assert!(
+        states.iter().all(|(state, _)| state == "failed"),
+        "deleted workspace left pending reminders: {states:?}"
+    );
+    assert!(
+        states
+            .iter()
+            .all(|(_, state)| state.contains("workspace") && state.contains("gone")),
+        "missing failure explanation: {states:?}"
+    );
+}
+
+/// A lifecycle event whose discovery fails: a deleted workspace fails every
+/// pending reminder and its queued delivery, and leaves a held or submitted
+/// delivery as it is; a transient failure changes nothing.
+fn assert_reminder_event_discovery_failure(error: &str) {
     let f = Fixture::new();
     let lock = fs::OpenOptions::new()
         .read(true)
@@ -1340,58 +1452,31 @@ fn assert_reminder_clock_discovery_failure(error: &str) {
             .unwrap()
             == 3
     });
+    drop(clock);
     connection.execute_batch("UPDATE mailbox_deliveries SET state='held' WHERE delivery_id IN (SELECT f.delivery_id FROM reminder_fires f JOIN reminders r USING(session_socket_id,worktree_id,reminder_id) WHERE r.request_id='held'); UPDATE mailbox_deliveries SET state='submitted' WHERE delivery_id IN (SELECT f.delivery_id FROM reminder_fires f JOIN reminders r USING(session_socket_id,worktree_id,reminder_id) WHERE r.request_id='submitted');").unwrap();
-    let error_payload = json!({"error":{"code":error,"message":"workspace_not_found text alone is not authoritative"}}).to_string();
-    let error_path = f.directory.path().join("discovery-error");
-    let temporary_error_path = error_path.with_extension("tmp");
-    fs::write(&temporary_error_path, &error_payload).unwrap();
-    fs::rename(temporary_error_path, error_path).unwrap();
+    let error_payload = discovery_error(error);
+    let herdr = native(&f.socket);
+    herdr.fail(
+        Op::Survey,
+        if error == "workspace_not_found" {
+            MuxError::Gone(Gone::Space, error_payload.clone())
+        } else {
+            MuxError::Unavailable(error_payload.clone())
+        },
+    );
     let failure = namedrop::execute_lifecycle_operation(
         "event.agent-status-changed",
         json!({"type":"pane_agent_status_changed","pane_id":"pane-author","workspace_id":"workspace-1","agent_status":"working"}),
         &LifecycleRuntime {
-            state_directory:f.directory.path(),home_directory:Some(f.directory.home()),agent_config:Default::default(),cwd:Path::new("/repo"),workspace_id:Some("workspace-1"),current_pane_id:None,session_socket_id:&f.socket,herdr:&ScriptHerdr(&f.herdr),clock:&SystemClock,ids:&ProcessIds::default(),
+            state_directory:f.directory.path(),home_directory:Some(f.directory.home()),agent_config:Default::default(),cwd:Path::new("/repo"),workspace_id:Some("workspace-1"),current_pane_id:None,session_socket_id:&f.socket,mux:&*herdr,clock:&SystemClock,ids:&ProcessIds::default(),
         },
     ).unwrap_err();
     assert_eq!(failure, error_payload);
-    wait_for(|| {
-        if error == "workspace_not_found" {
-            connection
-                .query_row(
-                    "SELECT count(*) FROM reminders WHERE state='failed'",
-                    [],
-                    |r| r.get::<_, i64>(0),
-                )
-                .unwrap()
-                == 4
-        } else {
-            fs::read_to_string(f.directory.path().join("observed-discovery-error"))
-                .is_ok_and(|observed| observed == error_payload)
-        }
-    });
-    drop(clock);
-    let mut statement = connection
-        .prepare("SELECT state,state_json FROM reminders ORDER BY request_id")
-        .unwrap();
-    let states = statement
-        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
     if error == "workspace_not_found" {
-        assert!(
-            states.iter().all(|(state, _)| state == "failed"),
-            "deleted workspace left pending reminders: {states:?}"
-        );
-        assert!(
-            states
-                .iter()
-                .all(|(_, state)| state.contains("workspace") && state.contains("gone")),
-            "missing failure explanation: {states:?}"
-        );
+        assert_deleted_workspace_failed_its_reminders(&connection);
     } else {
         assert_eq!(
-            states
+            reminder_states(&connection)
                 .iter()
                 .map(|(state, _)| state.as_str())
                 .collect::<Vec<_>>(),
@@ -1404,10 +1489,7 @@ fn assert_reminder_clock_discovery_failure(error: &str) {
         );
     }
     assert_eq!(
-        connection
-            .query_row("SELECT d.state FROM mailbox_deliveries d JOIN reminder_fires f USING(session_socket_id,worktree_id,delivery_id) JOIN reminders r USING(session_socket_id,worktree_id,reminder_id) WHERE r.request_id='queued'", [], |r| r
-                .get::<_, String>(0))
-            .unwrap(),
+        reminder_delivery_state(&connection, "queued"),
         if error == "workspace_not_found" {
             "failed"
         } else {
@@ -1415,16 +1497,94 @@ fn assert_reminder_clock_discovery_failure(error: &str) {
         }
     );
     for state in ["held", "submitted"] {
-        let actual: String = connection.query_row("SELECT d.state FROM mailbox_deliveries d JOIN reminder_fires f USING(session_socket_id,worktree_id,delivery_id) JOIN reminders r USING(session_socket_id,worktree_id,reminder_id) WHERE r.request_id=?1", [state], |r| r.get(0)).unwrap();
-        assert_eq!(actual, state);
+        assert_eq!(reminder_delivery_state(&connection, state), state);
     }
-    assert_eq!(
+    assert_eq!(delivery_attempts(&connection), 0);
+}
+
+/// The clock's own discovery of a due reminder fails: a deleted workspace
+/// fails its reminders, and a transient failure leaves the due reminder
+/// scheduled until a later discovery succeeds.
+fn assert_reminder_clock_discovery_failure(error: &str) {
+    let f = Fixture::new();
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(f.directory.path().join("reminder-clock.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    f.reminder("scheduled", "1h");
+    let queued = f.reminder("queued", "1m");
+    let connection =
+        rusqlite::Connection::open(f.directory.path().join("namedrop.sqlite3")).unwrap();
+    let id = queued["reminder_id"].as_str().unwrap();
+    let state = || {
         connection
-            .query_row("SELECT count(*) FROM delivery_attempts", [], |r| r
-                .get::<_, i64>(0))
-            .unwrap(),
-        0
+            .query_row(
+                "SELECT state FROM reminders WHERE reminder_id=?1",
+                [id],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap()
+    };
+    let due = SystemClock.now_unix_ms() - 1;
+    connection.execute("UPDATE reminders SET due_at_ms=?1,state_json=json_set(state_json,'$.due_at_ms',?1) WHERE request_id='queued'",[due as i64]).unwrap();
+    let mut busy = panes("session-author");
+    busy["result"]["panes"][0]["agent_status"] = json!("working");
+    fs::write(f.directory.path().join("panes.json"), busy.to_string()).unwrap();
+    let error_payload = discovery_error(error);
+    let error_path = f.directory.path().join("discovery-error");
+    fs::write(&error_path, &error_payload).unwrap();
+    let calls = f.directory.path().join("herdr-calls");
+    let discoveries = || {
+        fs::read_to_string(&calls)
+            .unwrap_or_default()
+            .lines()
+            .filter(|call| call.contains(r#""worktree", "list""#))
+            .count()
+    };
+    let before = discoveries();
+    lock.unlock().unwrap();
+    let clock = f.clock();
+    wait_for(|| {
+        fs::read_to_string(f.directory.path().join("observed-discovery-error"))
+            .is_ok_and(|observed| observed == error_payload)
+    });
+    if error == "workspace_not_found" {
+        wait_for(|| {
+            connection
+                .query_row(
+                    "SELECT count(*) FROM reminders WHERE state='failed'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap()
+                == 2
+        });
+        drop(clock);
+        assert_deleted_workspace_failed_its_reminders(&connection);
+        return;
+    }
+    wait_for(|| discoveries() >= before + 2 || state() != "scheduled");
+    assert_eq!(
+        state(),
+        "scheduled",
+        "a transient discovery failure changed the due reminder"
     );
+    fs::remove_file(&error_path).unwrap();
+    wait_for(|| state() == "awaiting_delivery");
+    drop(clock);
+    assert_eq!(
+        reminder_states(&connection)
+            .iter()
+            .map(|(state, _)| state.as_str())
+            .collect::<Vec<_>>(),
+        vec!["awaiting_delivery", "scheduled"]
+    );
+    assert_eq!(reminder_delivery_state(&connection, "queued"), "queued");
+    assert_eq!(delivery_attempts(&connection), 0);
 }
 
 #[test]
@@ -1697,4 +1857,56 @@ fn a_queued_reply_naming_another_agents_attempt_warns_nobody() {
     wait_for(|| receipt.exists());
     let warnings = open_warnings(&fixture, &attempt);
     assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+/// The worker runs each queued command in a `--deferred-execute` child, on
+/// the socket stored with its caller's namespace, whatever
+/// `HERDR_SOCKET_PATH` the worker inherited.
+#[test]
+fn the_worker_runs_herdr_on_the_caller_s_stored_socket() {
+    let fixture = Fixture::new();
+    let pending = response(fixture.sandbox_command(&["send"], send("socket-id", "hello")));
+    let receipt = PathBuf::from(pending["data"]["receipt"].as_str().unwrap());
+    let _worker = fixture.background("--deferred-worker", Some("/run/inherited.sock"));
+    wait_for(|| receipt.exists());
+    fixture.assert_ran_on_the_stored_socket("--deferred-execute", "pane list");
+}
+
+/// The clock reaches each reminder's space on the socket stored with it,
+/// whatever socket it was started with and whatever `HERDR_SOCKET_PATH` it
+/// inherited.
+#[test]
+fn the_clock_runs_herdr_on_the_reminder_s_stored_socket() {
+    let f = Fixture::new();
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(f.directory.path().join("reminder-clock.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    let reminder = f.reminder("socket", "1m");
+    let connection =
+        rusqlite::Connection::open(f.directory.path().join("namedrop.sqlite3")).unwrap();
+    let id = reminder["reminder_id"].as_str().unwrap();
+    let due = SystemClock.now_unix_ms() - 1;
+    connection.execute("UPDATE reminders SET due_at_ms=?2,state_json=json_set(state_json,'$.due_at_ms',?2) WHERE reminder_id=?1",rusqlite::params![id,due as i64]).unwrap();
+    lock.unlock().unwrap();
+    let _clock = f.background_with(
+        "reminder-clock",
+        "/run/started-with.sock",
+        Some("/run/inherited.sock"),
+    );
+    wait_for(|| {
+        connection
+            .query_row(
+                "SELECT state FROM reminders WHERE reminder_id=?1",
+                [id],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap()
+            != "scheduled"
+    });
+    f.assert_ran_on_the_stored_socket("reminder-clock", "worktree list");
 }

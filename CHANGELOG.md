@@ -2,11 +2,123 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
-## [1.7.10] - 2026-11-11
+## [1.12.0] - 2026-11-16
+
+Namedrop now runs in Rex as well as in Herdr. Rex support is experimental. In Herdr, Namedrop works as in 1.11.1, apart from the changes and fixes below. Three of the changes are to **Type to agent** and **Stop thread** in Channels.
+
+### Added
+
+- Namedrop runs in [Rex](https://www.superlogical.com/rex/docs) without Herdr. It supports Rex preview.14, preview.18 and preview.19, at Rex control API revisions 12 to 14. [Run Namedrop on Rex](https://github.com/ericbust/namedrop/blob/main/docs/rex.md) gives the setup steps, and [Namedrop on Rex reference](https://github.com/ericbust/namedrop/blob/main/docs/rex-reference.md) gives the details.
+- The release archive has an installer for Rex. In a Rex pane, run `sh scripts/install.sh` from the extracted archive. The installer lists what it will write and changes nothing until you answer `y`. Then it installs the Namedrop module for Rex, adds one line to `init.lua`, and installs the Claude Code and Codex packages and the `namedrop` command in `~/.local/bin`. `install.sh` runs on macOS on Apple silicon and on Linux with glibc, and needs Python 3.9 or newer. To remove the install and keep your names and messages, run `namedrop install --remove --input-json '{"confirmed":true}'`.
+- The Namedrop module for Rex adds eleven actions to the `Namedrop` category of Rex's command palette: **Activate Namedrop**, **Name this pane**, **Manage Namedrop names and agents**, **Namedrop Doctor**, **Agent status**, **Namedrop tour**, **Open Namedrop Channels**, **Pause Namedrop**, **Resume Namedrop**, **Deactivate Namedrop** and **About Namedrop**. Their screens open in floating layers. The module gives five of the actions keys, such as <kbd>Option</kbd>+<kbd>Shift</kbd>+<kbd>Command</kbd>+<kbd>I</kbd> for **Name this pane**, and binds a key only when no other binding holds it.
+- In a Rex session, Namedrop names panes and delivers mentions and replies between Claude Code, Codex and terminals. Its bridge, a background process that reads Rex's events, keeps the names current and starts when Rex loads the module. Names survive a Rex server restart. Each agent's hooks record which Rex pane its session runs in.
+- You can mention an agent on another machine that runs its own Rex server and Namedrop. Add the machine with `rex hosts add`, then have an agent run `namedrop send` with an address such as `@codex@devbox`. Your machine keeps the message until the other machine accepts it. If that takes more than 24 hours, the message fails with `<label> was unreachable for 24 hours`. While the thread is open, your machine collects replies every 30 seconds and puts each reply in the sender's thread. The other machine relays mentions only to agents, unless you create `relay/allow-terminals` in its state directory. Doctor reports relay problems as `ND-RELAY-001` to `ND-RELAY-005`.
+- An install that `install.sh` made checks GitHub for a newer release once a day. When there is one, agents show it at the start of a session, and Doctor shows `ND-UPDATE-001` with `Update: download Namedrop <version> and run sh scripts/install.sh`. The check offers only 1.12.0 and later, the releases that include the installer. To turn it off, put `{"check_for_updates": false}` in `~/.config/namedrop/settings.json`. Herdr installs check for updates as before.
+- Herdr and Rex can share one Namedrop on a machine. If Namedrop is installed in Herdr, `install.sh` adopts Herdr's install, and Herdr's updates then update Namedrop for both. If you installed for Rex first, activating Namedrop in Herdr takes the install over, and Herdr's Doctor shows `ND-INSTALL-001` until each agent from before the move has run Herdr's hooks. The names made on Rex are not carried over, so run **Activate Namedrop** again in each Rex session and name its panes again. You can also run Herdr as the program of a Rex pane. In a Herdr pane, Namedrop uses Herdr.
+- [Doctor on Rex](https://github.com/ericbust/namedrop/blob/main/docs/rex-reference.md#doctor-on-rex) gives the text of each new Doctor code: `ND-REX-001`, `ND-SESSION-004`, `ND-INSTALL-001` to `ND-INSTALL-003`, `ND-INTEGRATION-002`, `ND-INTEGRATION-003` and `ND-RELAY-001` to `ND-RELAY-005`.
+- Rex support has known limits. [Limits of Rex support](https://github.com/ericbust/namedrop/blob/main/docs/rex-reference.md#limits-of-rex-support) lists them all. These matter most:
+	- Channels' setup and Doctor hints tell a Rex user to open Herdr, and **New channel** and **Add agent** refuse in a Rex session.
+	- After a reboot, the Channels tailnet link stays down on Rex until you run `namedrop channels --no-open`.
+	- The actions were tested with `rex do --origin palette`, not in the Rex app's own palette or with its keys.
+	- Real agents were tested on macOS only. A Linux Rex server was tested only as the machine that receives relayed mentions.
+
+### Changed
+
+- Activating Namedrop in Herdr writes `~/.config/namedrop/state-directory`, which names Namedrop's state directory. `install.sh` reads it to find Herdr's install.
+- `namedrop` commands accept `--endpoint`, `--space` and `--pane` beside the `--herdr-*` flags, and, outside Herdr, read the state directory from `NAMEDROP_STATE_DIR`. In the agent skill that `install.sh` installs, registration uses the location flags shown in the request instead of Herdr flags.
+- The agent hook wrappers changed. They name their agent in `NAMEDROP_HOOK_RUNTIME`, and Namedrop, not the wrapper, now starts delivery after a prompt sends a mention. Read **Upgrade** below if you run Codex.
+- When an update needs a session refresh, **Update Namedrop** in Herdr also waits for agent sessions in Rex panes.
+- **Type to agent** in Channels sends nothing while Namedrop is typing into the pane, as it does for a delivery. The box shows `Namedrop is typing into <alias> right now, so nothing was sent. Try again.` In 1.11.1, **Type to agent** typed the line even then.
+- A line that you send with **Type to agent** now starts your own turn in that pane, unless it answers a question or a permission prompt that blocks a delivery's agent. **Stop thread** on an earlier delivery's thread then stops the thread but presses no Ctrl-C in that pane, so your turn keeps running. In 1.11.1, **Stop thread** pressed Ctrl-C.
+- **Stop thread** waits up to 5 seconds for other input to an agent's pane to finish before it presses Ctrl-C there. In 1.11.1, it waited up to 2 seconds. The longer wait covers a **Type to agent** input, which keeps the pane for up to about 3 seconds.
 
 ### Fixed
 
+- On macOS, agent-status summaries and persona suggestions now work in three more setups. The worker that runs Codex for them stopped with `failed to canonicalize CODEX_HOME` when `CODEX_HOME` named another directory, such as one under `~/.config`. The worker also could not read Codex's sign-in when `~/.codex` was a symbolic link, as a dotfiles manager makes it, or when `HOME` was reached through a symbolic link.
+- When the worker fails, its error shows the line where Codex says why it stopped. Before, the error kept the first 200 characters of Codex's output, which could cut the reason to "Er".
+- A reminder clock that an agent's Stop hook started gave each `herdr` command that it ran to fire a reminder only 250 ms, the Stop hook's own time limit. The clock now uses the default limit of 10 seconds.
 - `namedrop channels` no longer keeps the command that ran it waiting. When it started the Channels server, the server could keep a copy of an output pipe that belonged to its caller, so a script or tool that read that output waited until the server shut down after it went idle, 10 minutes by default. The server now starts without any such copy.
+- When an agent ended its turn waiting on another agent or a terminal, the answer it wrote once that helper replied could be dropped, and your message kept showing "Still working" with no warning. That answer now lands in your message's thread. If the turn that should answer is interrupted, you are warned 5 seconds after Namedrop sees the agent idle. Namedrop counts the agent as idle no sooner than 30 seconds after the helper's answer arrived, unless the agent replied to the helper first. An answer that was still pending when you updated arrives too.
+
+### Upgrade
+
+- In Herdr, update with **Update Namedrop**. The update runs live. The state schema stays at 8, and agent sessions and pending deliveries keep running.
+- Restart each Codex session that was running before the update. The hook wrappers changed, and Codex refuses to run a plugin's hooks once the plugin's files change. Until you restart it, the session can lose its hooks, answer only in its terminal and raise `ND-DELIVERY-003`. Its screen shows `Hook failed` with `No such file or directory (os error 2)` or with `plugin contents changed; hook approval required`, and Doctor names it in `ND-SETUP-005` if it ran a hook on 1.6.5 or later. In the new session, trust the Namedrop hooks at **Hooks need review**.
+- On macOS, a 1.11.1 Channels server that `namedrop channels` or Herdr started keeps running after the update, and Channels works as in 1.11.1 until that server stops. The changes above to **Type to agent** and **Stop thread** apply only after that. Without tailnet access, the server stops 10 minutes after the last Channels tab closes, or after the minutes you set with `--idle`. With tailnet access on, or with `--idle never`, it never stops by itself. To stop it now, check that the `pid` in `dashboard/server.json` in Namedrop's state directory is still a `namedrop dashboard-server` process, `kill` it, then run `namedrop channels`. The 1.12.0 server starts on the same port with the same browser session, so signed-in browsers and phones stay signed in. [Restart Channels after an update](https://github.com/ericbust/namedrop/blob/main/docs/operations.md#restart-channels-after-an-update) gives the commands.
+- If you ran Rex support from the `experimental` branch, run `sh scripts/install.sh` from this release's archive. It prints `Namedrop Rex install: update` and keeps your names and messages. If your relay database has a layout from an unreleased build, Namedrop sets it aside and starts a new one, and Doctor names the old file in `ND-RELAY-004`. Messages to other machines that were in flight stay in that file.
+
+## [1.11.1] - 2026-11-13
+
+### Fixed
+
+- You can dismiss any warning in Channels. Before, only a card saying an answer could never arrive had a **Dismiss** button. A request whose agent was still running, a terminal reply and a handoff that needed a decision stayed red until you cleared them in the database. Every card now has **Dismiss**. It asks once, records the dismiss as yours, and takes the card away. Nothing is sent, and no reply is recorded for the agent.
+- A dismissed request stays answerable. If its agent answers later, the answer arrives as usual.
+- A dismiss covers the warning you read, and it closes nothing. The card comes back when it has something new to say: its cause cleared and happened again, or its wording changed. A handoff you dismissed while it waited for a decision shows again when its lead records it as blocked. `handoff acknowledge` and `delivery acknowledge` still close a warning for good.
+- **Dismiss all** at the foot of a channel's attention list clears the list after one confirmation. It first shows every card, then asks with the number it will dismiss. A card that arrives while it asks stays.
+- Old warnings stop being red by themselves. Channels shows a warning as needing you for 7 days, counted from when it opened or last changed its wording. After that it is no longer listed or counted. Doctor still reports it until its cause clears.
+- Doctor leaves out a warning you dismissed in Channels.
+
+## [1.11.0] - 2026-11-12
+
+### Added
+
+- You can make a new channel from the Channels page. Select **+** beside **Channels**, give the channel a name and a working folder, and select **Create**. Type the folder's full path, or pick one of the folders your other workspaces use. Channels creates the Herdr workspace in that folder, activates Namedrop there and opens the channel. The folder must already exist: Namedrop never creates folders.
+- You can add an agent from the Channels page. Select **Add agent** in a channel's member row, choose Claude Code, Codex or a plain terminal, and give it a name and an optional persona. Channels opens a new tab in that workspace, in the channel's folder, names the pane and runs plain `claude` or `codex` there, with no extra flags, as you would by hand. The form shows the folder, and it stays the channel's folder wherever you `cd` in its panes.
+- An agent that Channels started and that has not connected after 20 seconds shows under **Needs you**, with its pane one click away. It may be asking you to trust the folder or to log in. Channels never answers such a screen for you. **Type to agent** now works for a named agent that has no session yet, so you can answer the screen from the page, including from your phone. A new Codex connects after its first prompt, so type one in its pane.
+- Both forms work over the tailnet link, with the same sign-in and CSRF checks as posting. Errors read plainly in the form: a name that is taken, a folder that doesn't exist, Herdr not reachable.
+
+## [1.10.0] - 2026-11-12
+
+### Added
+
+- Channels plays a sound when an agent messages you, so you hear it from another window or across the room. It plays for a direct message from an agent and for an agent's answer in a channel or thread that is addressed to you. Messages between agents and your own messages stay silent, and so do reminders, nudges and progress notes. A burst plays one sound, at most one a second.
+- Pick a sound for each agent. Click the speaker button in the agent's direct message header or in its Peek panel, and choose Chime, Ping, Pop, Knock, Bell, Blip, Marimba, Soft or None. Each sound has a play button to hear it first. An agent without its own pick plays the Default sound.
+- **Sounds** at the bottom of the sidebar sets the Default sound, Chime at first, and has **Mute all sounds**.
+- Your picks are saved by Namedrop, not by the browser, so Channels on your laptop and on your phone over the tailnet link play the same sounds. A pick follows the agent's pane, so it stays when you rename the agent.
+- Any open Channels tab plays the sound, a background tab too. A browser plays sound only after you click once on the page, so until then a small "Click to turn on sounds" note shows at the bottom of the sidebar.
+- The sounds are made in the page with the browser's Web Audio, so Channels loads no audio files.
+
+## [1.9.1] - 2026-11-12
+
+### Fixed
+
+- A wide diagram in Channels stays readable. A diagram wider than its column was always shrunk to fit, so a long left-to-right flowchart came out about 45 px tall in the thread pane or on a phone. A diagram is now shrunk only down to 0.7 of its drawn size, where its labels are about 10 px. A wider one keeps that size and scrolls sideways inside its own box, by swipe, scrollbar or the arrow keys. The page itself does not scroll sideways, and a click or tap still opens the diagram full size.
+
+## [1.9.0] - 2026-11-12
+
+### Added
+
+- Channels draws Mermaid diagrams. When a message holds a fenced code block tagged `mermaid`, the thread shows the diagram in place of the code, in the page's light or dark colors. Agents already write Markdown, so ask one for a flowchart or a sequence diagram and it appears. This works in channels, threads and direct messages, and on a phone.
+- Under each diagram, **Show source** shows the block as written and **Copy** copies it. A diagram wider than its column is shown smaller to fit, in the thread pane and on a phone too. A click or tap opens it full size.
+- A diagram that cannot be drawn stays a code block, with "Diagram could not be drawn" under it. A message shown shortened, a reply preview and a hook row show the word "Diagram" in place of half a diagram's source.
+- A very large diagram cannot stall the page. A block over 10,000 characters and a message's ninth diagram are shown as their source, with a note. A diagram is drawn when it comes on screen.
+- Mermaid is built into Namedrop, and the page loads it only when a diagram is on screen. The page's first load grows by 6 KB. Nothing is loaded from another site, and the page's Content-Security-Policy is unchanged. The Namedrop binary grows by about 3.6 MB.
+- Channels' own scripts and styles are now kept by the browser. Their names change with their content, so the server lets the browser keep them for good, and a page load downloads them once per release. Before, every load downloaded them again.
+- A diagram is text an agent wrote, so it cannot run script, load anything remote or carry a link. Mermaid runs in its strict mode, the drawing is cleaned, and the page shows it as an image. A diagram cannot change those settings or the page's colors from inside its own text.
+
+## [1.8.1] - 2026-11-12
+
+### Fixed
+
+- The Channels link on your phone comes back by itself after the machine restarts. With tailnet access on, the Channels server was gone after a restart, a Herdr restart or a crash, and the link failed until someone ran `namedrop channels` again. Herdr now starts the server again when Herdr starts, and when a pane opens, moves or closes. It comes back on the same port, and a device that was signed in stays signed in. Herdr has to be running, so after a restart with nobody logged in the link stays down until you open Herdr.
+- `namedrop channels` no longer says the server stops after 10 minutes when it doesn't. With tailnet access on, the server has kept running with no tab open since 1.5.0, but the command still printed "The server stops 10 minutes after the last tab closes". It now prints the rule in force, such as "The server keeps running while Tailscale access is on."
+- Doctor reports a tailnet link whose server is not running (ND-TAILSCALE-001), and gives the command that starts it, `namedrop channels --no-open`. Before, it reported the link as configured while it was down. If another program has taken the server's port, Doctor names the port, and Herdr tries to start the server once a minute, not on every pane event.
+- With tailnet access on, `namedrop channels --ui <dir>` switches a running server to another Channels app. It used to refuse and tell you to kill the server. The server now restarts on the same port with the app you asked for, and signed-in browsers reconnect. Without tailnet access, the command still names the running app and the `kill` command.
+
+### Added
+
+- `namedrop channels --idle <minutes>` sets how long the server keeps running after the last tab closes, and `--idle never` keeps it running. The setting is saved and applies until you change it, across restarts and updates. Without it, the server stops after 10 minutes, as before. The setting has no effect while tailnet access is on, where the server never stops for idleness. Doctor shows a saved setting as ND-CHANNELS-001, and reports one it cannot read.
+
+## [1.8.0] - 2026-11-11
+
+### Added
+
+- You can send images to an agent from Channels. Paste an image into the message box, drop it there, or pick it with the new image button beside Send. Each image shows as a small thumbnail above your text, with a button to remove it. After you send, the thumbnails show under the message in the thread, and a click opens the full image. This works in channels, threads and direct messages, on a phone, and over the tailnet link.
+- A message takes up to 4 images of up to 10 MB each. PNG, JPEG, GIF and WebP are accepted. Channels reads the type from the file's bytes, not its name, and refuses anything else. A message with images still needs some words, and Send stays off until you type them.
+- The agent gets one line per image at the end of your message, `Image: ` and the file's absolute path. Claude Code and Codex open it with their ordinary file tools. No image data travels in the message, so an image costs the agent's prompt one short line until it opens the file.
+- Claude Code opens the image without asking. It normally asks before it reads a file outside its working directory, so activation now adds one read rule for the image directory to Claude Code's settings, beside the command permissions Namedrop already manages. Deactivating the last worktree removes it. If Claude Code asks anyway, as it can right after an update, answer in its pane once and reactivate Namedrop.
+- Images are stored under `channel-images/` in Namedrop's state directory, readable by you only, and named by the SHA-256 of their bytes. The same image sent twice is stored once. An image is deleted 30 days after it was last attached, when Channels starts or when the next image is stored. A thread then shows "Image no longer stored" in its place.
+- A message with no image is sent and shown as before.
 
 ## [1.7.9] - 2026-11-11
 
@@ -267,7 +379,7 @@ Start new agent sessions after updating so they learn the reminder commands and 
 
 - Namedrop's state moves to schema 6 the first time the new release opens it. Context handoffs still stay inside one workspace.
 - Namedrop's Codex hooks changed, so Codex asks once to trust them again in `/hooks`. A Codex session started before the update keeps receiving and answering messages, but a mention typed into it is not sent until you start a new Codex session and approve the hooks.
-- Namedrop 1.3.3 and earlier refuse to open state at schema 6, so going back to one of them after this update needs a [state backup](docs/operations.md#back-up-and-restore-state) taken before it.
+- Namedrop 1.3.3 and earlier refuse to open state at schema 6, so going back to one of them after this update needs a [state backup](https://github.com/ericbust/namedrop/blob/main/docs/operations.md#back-up-and-restore-state) taken before it.
 
 ## [1.3.3] - 2026-10-26
 
@@ -301,7 +413,7 @@ Start new agent sessions after updating so they learn the reminder commands and 
 
 ### Added
 
-- Namedrop now tells you when Codex 0.162 or later runs a Codex pane's session through its shared app-server. That server keeps the environment of wherever it started, so Herdr cannot tell which pane the session is in: mentions to that agent stay queued, a second Codex pane's session can land on the first, and Namedrop's own Codex hooks go silent. `namedrop doctor` reports it once as ND-SESSION-003, and stops giving the first-prompt and reinstall advice that cannot help here. Naming a Codex pane, activation and the start of an affected Codex session say the same thing. Each explains what is wrong, what the fix does and costs, the commands to run, and how to undo it. Namedrop never changes the Codex setting itself. See [the shared app-server](docs/compatibility.md#codex-0162-and-later-the-shared-app-server).
+- Namedrop now tells you when Codex 0.162 or later runs a Codex pane's session through its shared app-server. That server keeps the environment of wherever it started, so Herdr cannot tell which pane the session is in: mentions to that agent stay queued, a second Codex pane's session can land on the first, and Namedrop's own Codex hooks go silent. `namedrop doctor` reports it once as ND-SESSION-003, and stops giving the first-prompt and reinstall advice that cannot help here. Naming a Codex pane, activation and the start of an affected Codex session say the same thing. Each explains what is wrong, what the fix does and costs, the commands to run, and how to undo it. Namedrop never changes the Codex setting itself. See [the shared app-server](https://github.com/ericbust/namedrop/blob/main/docs/compatibility.md#codex-0162-and-later-the-shared-app-server).
 
 ### Changed
 

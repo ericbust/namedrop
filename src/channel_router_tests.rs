@@ -51,6 +51,7 @@ pub(super) fn rows() -> DashboardRows {
     })
     .collect();
     DashboardRows {
+        image_directory: None,
         namespace: StateNamespace::new("synthetic", SpaceId::new("w-router")),
         worktree: None,
         addresses,
@@ -63,6 +64,7 @@ pub(super) fn rows() -> DashboardRows {
         assignments: vec![],
         terminal_runs: vec![],
         attention: vec![],
+        dismissals: Default::default(),
         coordination_warnings: vec![],
         review_grants: vec![],
         granted_clears: vec![],

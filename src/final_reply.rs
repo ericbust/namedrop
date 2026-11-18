@@ -5,6 +5,7 @@
 //! claims, only with the text of the turn the claim was armed on. Without a
 //! claim nothing is automatic: the delivery stays pending and recoverable.
 use crate::integration::DeliveryKind;
+use crate::locator::Locator;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -204,26 +205,16 @@ pub(crate) fn claim_for(
         other_line: crate::integration::line_tokens(control)?
             .iter()
             .any(|token| !matches!(*token, "reply" | "complete.no-reply")),
-        answers_own: delivery.answers_own,
+        answers_own: delivery.answers.is_some(),
         relayed: delivery.relayed,
         leftover,
     }) else {
         return None;
     };
-    let located = |key: &str| {
-        control["tool"]["environment"][key]
-            .as_str()
-            .map(str::to_owned)
-    };
     Some(Claim {
         attempt_id: crate::DeliveryAttemptId::new(control["attempt_id"].as_str()?),
         namespace: delivery.namespace.clone(),
-        location: Location {
-            state: located("HERDR_PLUGIN_STATE_DIR")?,
-            socket: located("HERDR_SOCKET_PATH")?,
-            workspace: located("HERDR_WORKSPACE_ID")?,
-            pane: located("HERDR_PANE_ID")?,
-        },
+        location: Location::from_envelope(control["tool"]["environment"].as_object()?)?,
         turn: turn.clone(),
         plan,
         state: ClaimState::Open,
@@ -236,6 +227,8 @@ pub(crate) fn claim_for(
         paused: Vec::new(),
         first_armed_at_ms: None,
         promised_turn: None,
+        helpers: Vec::new(),
+        answered_turn: None,
     })
 }
 
@@ -488,6 +481,20 @@ pub(crate) struct Location {
     pub pane: String,
 }
 
+impl Location {
+    /// The location a `collab/v1` tool environment names under either key
+    /// set, or `None` when it lacks one of the four.
+    pub(crate) fn from_envelope(environment: &serde_json::Map<String, Value>) -> Option<Self> {
+        let located = |locator: Locator| Some(locator.in_envelope(environment)?.1.to_owned());
+        Some(Self {
+            state: located(Locator::StateDir)?,
+            socket: located(Locator::Endpoint)?,
+            workspace: located(Locator::Space)?,
+            pane: located(Locator::Pane)?,
+        })
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct Claim {
     pub attempt_id: crate::DeliveryAttemptId,
@@ -516,7 +523,8 @@ pub(crate) struct Claim {
     /// says it ended.
     #[serde(default)]
     pub paused: Vec<String>,
-    /// When a claim that a task's notice woke was first armed.
+    /// When a claim that a task's notice or a helper's answer woke was first
+    /// armed.
     #[serde(default)]
     pub first_armed_at_ms: Option<u64>,
     /// The turn whose prompt carried a notice of this held claim's work and
@@ -524,6 +532,16 @@ pub(crate) struct Claim {
     /// read the notice itself.
     #[serde(default)]
     pub promised_turn: Option<HostTurn>,
+    /// The requests a claim held on a helper waits to have answered: the
+    /// messages its turn sent to someone besides the person. The delivery of
+    /// an answer to one starts the turn whose final message is its answer.
+    #[serde(default)]
+    pub helpers: Vec<crate::MessageId>,
+    /// The turn whose prompt delivered an answer to one of `helpers`, and so
+    /// showed no way back for this claim. That turn's Stop wakes it; a turn
+    /// that never stops leaves it to the next prompt, which warns.
+    #[serde(default)]
+    pub answered_turn: Option<HostTurn>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -773,8 +791,9 @@ struct TurnSeen {
 struct Claims {
     directory: PathBuf,
     claims: Vec<Claim>,
-    /// Each claim's state when this call read the file.
-    read: Vec<(crate::DeliveryAttemptId, ClaimState)>,
+    /// Each claim's state, and the turn it waited for, when this call read
+    /// the file.
+    read: Vec<(crate::DeliveryAttemptId, ClaimState, HostTurn)>,
     _lock: fs::File,
 }
 
@@ -869,33 +888,66 @@ fn find_claim(
     (directory, claim)
 }
 
-/// What `session`'s claim says at `now_ms` about its answer to `attempt`,
-/// whose pane was seen idle at `idle_since_ms`. An open claim is decided by
-/// its Stop's worker within `STOPPED_GRACE_MS` of the Stop, or by a Stop
-/// that arrives within `STOP_ARRIVAL_GRACE_MS` of the pane going idle.
+/// What `session`'s claim says at `now_ms` about its answer to `attempt`.
+/// An open claim is decided by its Stop's worker within `STOPPED_GRACE_MS`
+/// of the Stop, or by a Stop that arrives within `STOP_ARRIVAL_GRACE_MS` of
+/// the pane going idle, as `idle_at` says of the claim's attempt. A held
+/// claim whose helper's answer started a turn waits for that turn's Stop the
+/// same way, but only once that turn's pane was seen idle, as `idle_at` says
+/// of the answer's attempt: a Stop another hook blocked continues the turn,
+/// and a turn interrupted with Esc, or ended by an API error, lost the held
+/// answer too.
 pub(crate) fn answer_claim<E>(
     state: &Path,
     namespace: &crate::StateNamespace,
     session: &crate::AgentSessionId,
     attempt: &crate::DeliveryAttemptId,
-    idle_since_ms: impl FnOnce() -> Result<u64, E>,
+    idle_at: impl FnOnce(&crate::DeliveryAttemptId) -> Result<Option<u64>, E>,
     now_ms: u64,
 ) -> Result<AnswerClaim, E> {
-    let (directory, claim) = find_claim(state, namespace, session, attempt);
-    Ok(match claim.map(|claim| (claim.state, claim.turn)) {
-        Some((ClaimState::Open, turn)) => {
-            let until_ms = match stopped_at(&directory, &turn) {
-                Some(at) => at.saturating_add(STOPPED_GRACE_MS),
-                None => idle_since_ms()?.saturating_add(STOP_ARRIVAL_GRACE_MS),
-            };
-            if now_ms < until_ms {
-                AnswerClaim::Deciding { until_ms }
-            } else {
-                AnswerClaim::Neither
-            }
+    let directory = session_directory(state, &namespace.session_socket_id, session.as_str());
+    let claims = read_claims(&directory);
+    let Some(claim) = claims
+        .iter()
+        .find(|claim| claim.attempt_id == *attempt && claim.namespace == *namespace)
+    else {
+        return Ok(AnswerClaim::Neither);
+    };
+    let (turn, idle) = match (claim.state, &claim.answered_turn) {
+        (ClaimState::Open, _) => (&claim.turn, attempt),
+        (ClaimState::Left(LeaveReason::Held), Some(turn)) => match claims
+            .iter()
+            .find(|answer| answer.state == ClaimState::Open && answer.turn == *turn)
+        {
+            Some(answer) => (turn, &answer.attempt_id),
+            None => return Ok(AnswerClaim::Held),
+        },
+        (ClaimState::Left(LeaveReason::Held), None) => return Ok(AnswerClaim::Held),
+        _ => return Ok(AnswerClaim::Neither),
+    };
+    let stopped = stopped_at(&directory, turn);
+    let until_ms = if claim.state == ClaimState::Open {
+        match stopped {
+            Some(at) => at.saturating_add(STOPPED_GRACE_MS),
+            None => idle_at(idle)?
+                .unwrap_or(0)
+                .saturating_add(STOP_ARRIVAL_GRACE_MS),
         }
-        Some((ClaimState::Left(LeaveReason::Held), _)) => AnswerClaim::Held,
-        _ => AnswerClaim::Neither,
+    } else {
+        // The held claim's own attempt settled when the turn that held it
+        // ended, so only the pane going idle says the answer's turn is over.
+        let Some(idle_at) = idle_at(idle)? else {
+            return Ok(AnswerClaim::Held);
+        };
+        let after_idle = idle_at.saturating_add(STOP_ARRIVAL_GRACE_MS);
+        stopped.map_or(after_idle, |at| {
+            at.saturating_add(STOPPED_GRACE_MS).max(after_idle)
+        })
+    };
+    Ok(if now_ms < until_ms {
+        AnswerClaim::Deciding { until_ms }
+    } else {
+        AnswerClaim::Neither
     })
 }
 
@@ -912,7 +964,8 @@ pub(crate) fn answer_held(
 }
 
 /// The attempts in `namespace` whose claims of `session` still wait for a
-/// Stop to decide them.
+/// Stop to decide them: an open claim's own, or a held claim's whose
+/// helper's answer started a turn.
 pub(crate) fn open_claims(
     state: &Path,
     namespace: &crate::StateNamespace,
@@ -924,7 +977,12 @@ pub(crate) fn open_claims(
         session.as_str(),
     ))
     .into_iter()
-    .filter(|claim| claim.state == ClaimState::Open && claim.namespace == *namespace)
+    .filter(|claim| {
+        (claim.state == ClaimState::Open
+            || (claim.state == ClaimState::Left(LeaveReason::Held)
+                && claim.answered_turn.is_some()))
+            && claim.namespace == *namespace
+    })
     .map(|claim| claim.attempt_id)
     .collect()
 }
@@ -951,7 +1009,7 @@ impl Claims {
         Some(Self {
             read: claims
                 .iter()
-                .map(|claim| (claim.attempt_id.clone(), claim.state))
+                .map(|claim| (claim.attempt_id.clone(), claim.state, claim.turn.clone()))
                 .collect(),
             claims,
             directory,
@@ -961,7 +1019,8 @@ impl Claims {
 
     /// The claims this call decided, other than by a failed settle, which
     /// warns on its own. While a claim waits for its Stop the settle raises
-    /// nothing for its attempt, so every way out of that is judged here.
+    /// nothing for its attempt, so every way out of that is judged here. A
+    /// held claim that a later turn woke and held again was decided again.
     fn newly_decided(&self) -> Vec<(crate::StateNamespace, crate::DeliveryAttemptId)> {
         self.claims
             .iter()
@@ -969,7 +1028,11 @@ impl Claims {
                 !matches!(
                     claim.state,
                     ClaimState::Open | ClaimState::Left(LeaveReason::OperationFailed)
-                ) && !self.read.contains(&(claim.attempt_id.clone(), claim.state))
+                ) && !self.read.contains(&(
+                    claim.attempt_id.clone(),
+                    claim.state,
+                    claim.turn.clone(),
+                ))
             })
             .map(|claim| (claim.namespace.clone(), claim.attempt_id.clone()))
             .collect()
@@ -990,6 +1053,23 @@ impl Claims {
         })
     }
 
+    /// The held claim whose helper request `answered` is: the oldest still
+    /// outstanding that waits on it. An older build held claims without
+    /// recording their requests, and this one holds a claim only on a request
+    /// or a task, so failing that, it is the oldest claim held on neither
+    /// whose own turn sent `answered`: one an older build held before an
+    /// update.
+    fn answered(&self, state: &Path, answered: &crate::MessageId) -> Option<usize> {
+        self.oldest_outstanding(state, |claim| claim.helpers.contains(answered))
+            .or_else(|| {
+                self.oldest_outstanding(state, |claim| {
+                    claim.helpers.is_empty()
+                        && claim.awaits.is_empty()
+                        && sent_in_its_turn(state, claim, answered)
+                })
+            })
+    }
+
     /// The oldest held claim still outstanding that `matches`, when `turn`
     /// carries no delivery of its own.
     fn oldest_held(
@@ -1003,6 +1083,11 @@ impl Claims {
         {
             return None;
         }
+        self.oldest_outstanding(state, matches)
+    }
+
+    /// The oldest held claim still outstanding that `matches`.
+    fn oldest_outstanding(&self, state: &Path, matches: impl Fn(&Claim) -> bool) -> Option<usize> {
         self.claims
             .iter()
             .enumerate()
@@ -1101,7 +1186,12 @@ impl Claims {
     /// What a claim armed on another turn becomes when this session moves
     /// on: still open while its Stop's worker may settle it, otherwise left.
     fn moved_on(&self, claim: &Claim, now_ms: u64) -> Option<ClaimState> {
-        match self.stopped_at(&claim.turn) {
+        self.moved_on_from(&claim.turn, now_ms)
+    }
+
+    /// What a claim of `turn` becomes once a later turn starts.
+    fn moved_on_from(&self, turn: &HostTurn, now_ms: u64) -> Option<ClaimState> {
+        match self.stopped_at(turn) {
             Some(at) if now_ms < at.saturating_add(STOPPED_GRACE_MS) => None,
             Some(_) => Some(ClaimState::Left(LeaveReason::OperationFailed)),
             None => Some(ClaimState::Left(LeaveReason::Interrupted)),
@@ -1202,8 +1292,8 @@ impl Claim {
         self.first_armed_at_ms.unwrap_or(self.armed_at_ms)
     }
 
-    /// Moves a held claim to the turn a notice of its work reached, so that
-    /// turn's final message is the answer.
+    /// Moves a held claim to the turn a notice of its work, or its helper's
+    /// answer, reached, so that turn's final message is the answer.
     fn wake_on(&mut self, turn: HostTurn, at_ms: u64) {
         self.first_armed_at_ms.get_or_insert(self.armed_at_ms);
         self.turn = turn;
@@ -1359,6 +1449,8 @@ pub(crate) struct PromptFacts<'a> {
     /// The transcript shows this prompt opened its turn: no record of the
     /// turn but the prompt's own comes after an earlier turn's.
     pub opens_turn: bool,
+    /// The message of this session's that the prompt's delivery answers.
+    pub answers: Option<&'a crate::MessageId>,
 }
 
 /// What one prompt found in its session's claims.
@@ -1370,6 +1462,9 @@ pub(crate) struct Observed {
     /// The way back to each delivery a claim left open, so the agent can
     /// still settle it: in its thread, for a reply.
     pub left_open: Vec<WayBack>,
+    /// The held delivery whose helper this prompt's delivery answers: this
+    /// turn's final message is its answer.
+    pub woken: Option<crate::DeliveryAttemptId>,
 }
 
 /// Runs for every prompt of a session that names its turn. It ends claims
@@ -1389,6 +1484,7 @@ pub(crate) fn observe_prompt(
         news,
         delivery,
         opens_turn,
+        answers,
     } = prompt;
     let notified: Vec<String> = news
         .and_then(TaskNews::ended)
@@ -1427,12 +1523,41 @@ pub(crate) fn observe_prompt(
             claim.move_on(state, next, now_ms);
         }
     }
+    // A turn a helper's answer started that ended with no Stop to wake its
+    // claim, or whose Stop's worker was lost, lost that answer.
+    let unanswered: Vec<_> = claims
+        .claims
+        .iter()
+        .map(|claim| {
+            claim
+                .answered_turn
+                .as_ref()
+                .filter(|answered| *answered != turn)
+                .map(|answered| claims.moved_on_from(answered, now_ms))
+        })
+        .collect();
+    for (claim, next) in claims.claims.iter_mut().zip(unanswered) {
+        if let Some(Some(next)) = next {
+            claim.answered_turn = None;
+            claim.move_on(state, next, now_ms);
+        }
+    }
     // A claim whose Stop already ran belongs to that Stop's worker; only one
     // still waiting for its own turn's Stop keeps this delivery explicit.
     let open = claims
         .claims
         .iter()
         .any(|claim| claim.state == ClaimState::Open && claims.stopped_at(&claim.turn).is_none());
+    // Namedrop closes such a delivery without a reply, and its final message
+    // is for whoever asked: the answer a held claim waits for.
+    let closes_for_the_asker = arm.as_ref().is_some_and(|arm| {
+        matches!(
+            arm.plan,
+            Armed::NoReply(
+                NoReplyCase::AnswersOwn | NoReplyCase::ReportToHuman | NoReplyCase::ResultSet
+            )
+        )
+    });
     let armed = match arm {
         Some(arm) if !open => {
             claims
@@ -1443,6 +1568,17 @@ pub(crate) fn observe_prompt(
         }
         _ => false,
     };
+    // An answer to a request a held claim waits on, a helper's reply or a
+    // terminal's result, starts the turn whose final message is that claim's
+    // answer, as its work's notice would. The claim stays held until this
+    // turn's Stop wakes it.
+    let woken = answers
+        .filter(|_| armed && closes_for_the_asker)
+        .and_then(|answered| claims.answered(state, answered))
+        .map(|index| {
+            claims.claims[index].answered_turn = Some(turn.clone());
+            claims.claims[index].attempt_id.clone()
+        });
     // A notice that opens its turn promises its claim that turn's final
     // message. One queued into a turn about something else, a prompt the
     // person typed included, promises nothing, so its claim's way back shows.
@@ -1472,7 +1608,8 @@ pub(crate) fn observe_prompt(
         if !matches!(claim.state, ClaimState::Left(_)) {
             continue;
         }
-        if claim.promised_turn.as_ref() == Some(turn) {
+        if claim.promised_turn.as_ref() == Some(turn) || claim.answered_turn.as_ref() == Some(turn)
+        {
             claim.updated_at_ms = now_ms;
         } else if outstanding(state, claim) == Some(false) {
             claim.set(ClaimState::Done(Done::Superseded), now_ms);
@@ -1485,7 +1622,11 @@ pub(crate) fn observe_prompt(
     // The delivery whose work this notice finished is listed first.
     left_open.sort_by_key(|way_back| !way_back.finished);
     judge_decided(state, &claims.save(now_ms), now_ms, PROMPT_JUDGE_BUDGET);
-    Observed { armed, left_open }
+    Observed {
+        armed,
+        left_open,
+        woken,
+    }
 }
 
 /// Whether the session has any claims at all, read without the lock.
@@ -1514,10 +1655,11 @@ pub fn stop_has_work(
             claim.state == ClaimState::Left(LeaveReason::Held) && !claim.awaits.is_empty()
         })
         .collect();
-    if claims.iter().any(|claim| claim.state == ClaimState::Open)
-        || held
-            .iter()
-            .any(|claim| turn.is_some() && claim.promised_turn.as_ref() == turn)
+    if claims.iter().any(|claim| {
+        claim.state == ClaimState::Open || (turn.is_some() && claim.answered_turn.as_ref() == turn)
+    }) || held
+        .iter()
+        .any(|claim| turn.is_some() && claim.promised_turn.as_ref() == turn)
     {
         return true;
     }
@@ -1627,6 +1769,19 @@ pub fn settle_at_stop(
         }
     }
     if let Some(turn) = &stop.turn {
+        // A held claim whose helper's answer this turn's prompt delivered is
+        // the one this turn's final message answers.
+        let started_at_ms = claims
+            .turn_seen(turn)
+            .map_or(now_ms, |seen| seen.started_at_ms);
+        for claim in &mut claims.claims {
+            if claim.answered_turn.as_ref() == Some(turn) {
+                claim.answered_turn = None;
+                if claim.state == ClaimState::Left(LeaveReason::Held) {
+                    claim.wake_on(turn.clone(), started_at_ms);
+                }
+            }
+        }
         // A claim this turn's prompt promised comes first: the agent was shown
         // no other way to answer it. A read of the turn's own prompt that
         // names none of its tasks overrules the promise, and its way back
@@ -1683,15 +1838,16 @@ pub fn settle_at_stop(
             None => {}
         }
         let current = claim.state == ClaimState::Open && stop.turn.as_ref() == Some(&claim.turn);
-        let facts = if current {
+        let (facts, helpers) = if current {
             settle_facts(state, &stop.session, claim, now_ms)
         } else {
-            SettleFacts::default()
+            (SettleFacts::default(), Vec::new())
         };
         let next = match decide(claim, stop, &facts) {
             Verdict::Ignore => continue,
             Verdict::Leave(LeaveReason::Held) => {
                 claim.awaits = stop.awaited(claim);
+                claim.helpers = helpers;
                 // The person sees what the agent said at once. A failed note
                 // leaves the answer held all the same.
                 if claim.plan == Armed::NoReply(NoReplyCase::Relayed) {
@@ -1746,27 +1902,49 @@ impl Claim {
     }
 }
 
-fn settle_facts(state: &Path, session: &str, claim: &Claim, now_ms: u64) -> SettleFacts {
-    let (disposition, waiting) = crate::StateStore::open_read_only(state)
+/// What the store says about the claim's attempt, and the helper requests its
+/// session still waits to have answered: those its turn sent, and those it
+/// was held on before a notice or an answer woke it. A request another turn
+/// sent in between is that turn's, and its answer is that turn's too.
+fn settle_facts(
+    state: &Path,
+    session: &str,
+    claim: &Claim,
+    now_ms: u64,
+) -> (SettleFacts, Vec<crate::MessageId>) {
+    let (disposition, helpers) = crate::StateStore::open_read_only(state)
         .ok()
         .flatten()
         .and_then(|mut store| {
             store
                 .transaction(|transaction| {
-                    Ok((
-                        transaction.delivery_disposition(&claim.namespace, &claim.attempt_id)?,
-                        transaction.awaits_helper(
+                    let mut helpers = transaction.helper_requests(
+                        &claim.namespace,
+                        &claim.attempt_id,
+                        claim.armed_at_ms,
+                        now_ms,
+                    )?;
+                    if !claim.helpers.is_empty() {
+                        for request in transaction.helper_requests(
                             &claim.namespace,
                             &claim.attempt_id,
                             claim.helpers_since_ms(),
                             now_ms,
-                        )?,
+                        )? {
+                            if claim.helpers.contains(&request) && !helpers.contains(&request) {
+                                helpers.push(request);
+                            }
+                        }
+                    }
+                    Ok((
+                        transaction.delivery_disposition(&claim.namespace, &claim.attempt_id)?,
+                        helpers,
                     ))
                 })
                 .ok()
         })
         .unwrap_or_default();
-    SettleFacts {
+    let facts = SettleFacts {
         disposition,
         explicit_pending: crate::deferred_commands::settle_queued(
             state,
@@ -1774,8 +1952,31 @@ fn settle_facts(state: &Path, session: &str, claim: &Claim, now_ms: u64) -> Sett
             session,
             claim.attempt_id.as_str(),
         ),
-        waiting,
-    }
+        waiting: !helpers.is_empty(),
+    };
+    (facts, helpers)
+}
+
+/// Whether the claim's session sent `request` in the turn that held it: since
+/// the claim was first armed, and no later than its attempt settled, which
+/// reconciliation does once the pane is idle after that turn.
+fn sent_in_its_turn(state: &Path, claim: &Claim, request: &crate::MessageId) -> bool {
+    crate::StateStore::open_read_only(state)
+        .ok()
+        .flatten()
+        .and_then(|mut store| {
+            store
+                .transaction(|transaction| {
+                    transaction.sent_before_settle(
+                        &claim.namespace,
+                        &claim.attempt_id,
+                        request,
+                        claim.helpers_since_ms(),
+                    )
+                })
+                .ok()
+        })
+        .unwrap_or(false)
 }
 
 /// Whether the claim's attempt is still in its session's delivery inbox, or

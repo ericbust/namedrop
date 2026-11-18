@@ -1,3 +1,6 @@
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/executable.rs"]
@@ -5,60 +8,15 @@ mod executable;
 
 #[path = "support/codex_app_server.rs"]
 mod codex_app_server;
-use namedrop::{HerdrCommandExecutor, HerdrCommandOutput, verify_inherited_pane};
 use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
 };
 
-/// Herdr as seen through the executor port: the pane's shell is whatever pid
-/// the test says it is.
-struct Shell(Option<u64>);
-impl HerdrCommandExecutor for Shell {
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        assert_eq!(args, ["pane", "process-info", "--pane", "wH:p1"]);
-        let shell_pid = self.0.ok_or_else(|| "pane not found".to_owned())?;
-        Ok(HerdrCommandOutput {
-            stdout: format!(
-                r#"{{"result":{{"process_info":{{"pane_id":"wH:p1","shell_pid":{shell_pid},"foreground_process_group_id":{shell_pid},"foreground_processes":[]}}}}}}"#
-            ),
-        })
-    }
-}
-
 /// A live process that is certainly not an ancestor of this one.
 fn unrelated_process() -> std::process::Child {
     Command::new("sleep").arg("30").spawn().unwrap()
-}
-
-#[test]
-fn an_inherited_pane_whose_shell_is_an_ancestor_is_accepted() {
-    let parent = u64::from(std::os::unix::process::parent_id());
-    assert_eq!(
-        verify_inherited_pane(&Shell(Some(parent)), "wH:p1", &[]),
-        Ok(())
-    );
-}
-
-#[test]
-fn an_inherited_pane_whose_shell_is_not_an_ancestor_is_refused_with_the_remedy() {
-    let mut other = unrelated_process();
-    let error =
-        verify_inherited_pane(&Shell(Some(u64::from(other.id()))), "wH:p1", &[]).unwrap_err();
-    other.kill().unwrap();
-    other.wait().unwrap();
-    assert!(error.contains("HERDR_PANE_ID=wH:p1"), "{error}");
-    assert!(error.contains("not running inside pane wH:p1"), "{error}");
-    assert!(error.contains("--herdr-pane"), "{error}");
-}
-
-#[test]
-fn an_inherited_pane_herdr_cannot_describe_is_refused_with_herdr_s_own_reason() {
-    let error = verify_inherited_pane(&Shell(None), "wH:p1", &[]).unwrap_err();
-    assert!(error.contains("HERDR_PANE_ID=wH:p1"), "{error}");
-    assert!(error.contains("pane not found"), "{error}");
-    assert!(error.contains("--herdr-pane"), "{error}");
 }
 
 /// The binary with a fake `herdr` on `HERDR_BIN_PATH` and a temporary home.
@@ -104,7 +62,7 @@ esac
         self.namedrop_command(args).output().unwrap()
     }
     fn namedrop_command(&self, args: &[&str]) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_namedrop"));
+        let mut command = crate::binary::namedrop();
         self.host(&mut command)
             .env_remove("HERDR_PLUGIN_STATE_DIR")
             .env("PATH", "/usr/bin:/bin")
@@ -128,13 +86,13 @@ esac
         }
         fs::copy(repo.join("runtime.json"), checkout.join("runtime.json")).unwrap();
         executable::copy_executable(
-            env!("CARGO_BIN_EXE_namedrop"),
+            crate::binary::namedrop_path(),
             checkout.join("bin/namedrop"),
         );
         fs::create_dir_all(self.0.join("path")).unwrap();
         std::os::unix::fs::symlink(self.0.join("herdr"), self.0.join("path/herdr")).unwrap();
         fs::create_dir_all(self.0.join("state")).unwrap();
-        self.host(Command::new("sh").arg(checkout.join("scripts/run.sh")))
+        self.host(crate::binary::command("sh").arg(checkout.join("scripts/run.sh")))
             .env("HERDR_PLUGIN_STATE_DIR", self.0.join("state"))
             .env(
                 "PATH",
@@ -296,38 +254,6 @@ fn a_stale_codex_session_does_not_hide_the_claude_session_that_runs_in_the_pane(
     assert!(output.status.success(), "{}", text(&output));
 }
 
-/// Herdr's own `pane list` output, captured from a live pane: many more
-/// fields than the fixture's, with the session under `agent_session`.
-struct LivePaneList;
-impl HerdrCommandExecutor for LivePaneList {
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        let stdout = match args {
-            ["pane", "process-info", ..] => {
-                r#"{"id":"cli:pane:process_info","result":{"process_info":{"foreground_process_group_id":1147346,"foreground_processes":[{"argv":["claude"],"cmdline":"claude","cwd":"/repo","name":"claude","pid":1147346}],"pane_id":"wG:p21","shell_pid":4000000000},"type":"pane_process_info"}}"#
-            }
-            ["pane", "list"] => {
-                r#"{"id":"cli:pane:list","result":{"panes":[{"agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"sess-21"},"agent_status":"working","cwd":"/repo","focused":false,"foreground_cwd":"/repo","pane_id":"wG:p21","revision":20,"scroll":{"max_offset_from_bottom":0,"offset_from_bottom":0,"viewport_rows":40},"state_labels":{"working":"@a working"},"tab_id":"wG:tP","terminal_id":"term_1","terminal_title":"t","title":"@a","tokens":{"x":"0"},"workspace_id":"wG"},{"agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"sess-1"},"agent_status":"idle","cwd":"/repo","pane_id":"wG:p1","tab_id":"wG:tP","terminal_id":"term_2","workspace_id":"wG"},{"agent_status":"unknown","pane_id":"w9:p1","tab_id":"w9:t1","terminal_id":"term_3","workspace_id":"w9"}],"type":"pane_list"}}"#
-            }
-            other => return Err(format!("unexpected call {other:?}")),
-        };
-        Ok(HerdrCommandOutput {
-            stdout: stdout.to_owned(),
-        })
-    }
-}
-
-#[test]
-fn the_live_pane_list_shape_vouches_for_the_session_s_own_pane_only() {
-    assert_eq!(
-        verify_inherited_pane(&LivePaneList, "wG:p21", &["sess-21"]),
-        Ok(())
-    );
-    let error = verify_inherited_pane(&LivePaneList, "wG:p21", &["sess-1"]).unwrap_err();
-    assert!(error.contains("--herdr-pane"), "{error}");
-    let error = verify_inherited_pane(&LivePaneList, "wG:p21", &["nobody"]).unwrap_err();
-    assert!(error.contains("--herdr-pane"), "{error}");
-}
-
 #[test]
 fn a_session_vouches_for_the_pane_when_the_process_is_a_child_of_init() {
     // A double fork (a backgrounded subshell whose parent exits) reparents the
@@ -340,7 +266,7 @@ fn a_session_vouches_for_the_pane_when_the_process_is_a_child_of_init() {
     let out = f.0.join("orphan.out");
     let mut command = f.namedrop_command(&["address", "list"]);
     command.env("CLAUDE_CODE_SESSION_ID", "session-p1");
-    let mut detached = Command::new("sh");
+    let mut detached = crate::binary::command("sh");
     detached
         .arg("-c")
         .arg(r#"( "$0" "$@" > "$OUT" 2>&1 & )"#)
@@ -377,7 +303,7 @@ fn the_mailbox_wake_hook_drains_the_space_after_its_hook_shell_has_exited() {
     f.shell_is(other.id());
     let calls = f.0.join("herdr-calls");
     fs::write(&calls, "").unwrap();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_namedrop"));
+    let mut command = crate::binary::namedrop();
     f.host(&mut command)
         .env_remove("HERDR_PLUGIN_STATE_DIR")
         .env("PATH", "/usr/bin:/bin")
@@ -423,21 +349,6 @@ fn the_mailbox_wake_hook_drains_the_space_after_its_hook_shell_has_exited() {
 }
 
 #[test]
-fn a_refusal_says_how_many_agent_sessions_it_checked() {
-    let none = verify_inherited_pane(&LivePaneList, "wG:p21", &[]).unwrap_err();
-    assert!(
-        none.contains("There is no CODEX_SESSION_ID or CLAUDE_CODE_SESSION_ID in the environment"),
-        "{none}"
-    );
-    let elsewhere = verify_inherited_pane(&LivePaneList, "wG:p21", &["sess-1"]).unwrap_err();
-    assert!(
-        elsewhere
-            .contains("None of the 1 agent session ID(s) in the environment runs in pane wG:p21"),
-        "{elsewhere}"
-    );
-}
-
-#[test]
 fn an_empty_session_variable_is_not_counted_as_a_session() {
     let f = Fixture::new("empty-session");
     f.activate();
@@ -464,11 +375,11 @@ fn a_session_start_inside_codex_s_shared_app_server_gets_its_notice_without_a_ru
     f.shell_is(other.pid());
     let codex_home = f.0.join("home/.codex");
     let hook = |event: &str, input: &str, inside: bool| {
-        let program = Path::new(env!("CARGO_BIN_EXE_namedrop"));
+        let program = Path::new(crate::binary::namedrop_path());
         let mut command = if inside {
             codex_app_server::inside_server(&codex_home, program)
         } else {
-            Command::new(program)
+            crate::binary::command(program)
         };
         f.host(&mut command)
             .env_remove("HERDR_PLUGIN_STATE_DIR")

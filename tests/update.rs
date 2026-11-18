@@ -1,6 +1,9 @@
+#[path = "support/binary.rs"]
+mod binary;
+
 #[test]
 fn update_preflight_skips_unrelated_repository_contents() {
-    let output = std::process::Command::new("python3")
+    let output = crate::binary::command("python3")
         .arg(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/update_preflight.py"
@@ -17,8 +20,8 @@ fn update_preflight_skips_unrelated_repository_contents() {
 
 #[test]
 fn guided_update_fake_host_lifecycle() {
-    let output = std::process::Command::new("python3")
-        .env("NAMEDROP_TEST_BINARY", env!("CARGO_BIN_EXE_namedrop"))
+    let output = crate::binary::command("python3")
+        .env("NAMEDROP_TEST_BINARY", crate::binary::namedrop_path())
         .arg(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/update_lifecycle.py"

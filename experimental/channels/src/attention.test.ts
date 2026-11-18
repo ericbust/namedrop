@@ -162,6 +162,7 @@ test("historical reply target survives live frame eviction and newer replies", (
     author: member.id,
     kind: "reply",
     progressNote: false,
+    images: [],
     body: { text: "Later", truncated: false },
     legs: [],
     routing: null,

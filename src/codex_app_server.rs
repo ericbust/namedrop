@@ -3,9 +3,8 @@
 //! here only reads: config.toml, the server's pid file and the process table.
 
 use crate::integration::pane_agent_runtime;
-use crate::{
-    AgentConfigDirectories, AgentRuntime, DiscoveredPane, HerdrCommandExecutor, LifecycleRuntime,
-};
+use crate::mux::MuxKind;
+use crate::{AgentConfigDirectories, AgentRuntime, DiscoveredPane, LifecycleRuntime};
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -40,22 +39,31 @@ pub(crate) const STEPS: [&str; 7] = [
     ENABLE,
 ];
 
-/// The advice every structured consumer carries.
-pub(crate) fn advice(lingering: bool) -> Value {
+/// The advice every structured consumer carries, in the words of the home
+/// whose panes or blocks it is about.
+pub(crate) fn advice(lingering: bool, kind: MuxKind) -> Value {
     json!({
         "status": "codex_shared_app_server",
-        "summary": SUMMARY,
-        "explanation": explanation(lingering),
-        "fix": FIX,
-        "steps": STEPS,
+        "summary": summary(kind),
+        "explanation": explanation(lingering, kind),
+        "fix": kind.text(FIX, REX_FIX),
+        "steps": match kind {
+            MuxKind::Herdr => STEPS,
+            MuxKind::Rex => REX_STEPS,
+        },
     })
 }
 
-pub(crate) fn explanation(lingering: bool) -> String {
+pub(crate) fn summary(kind: MuxKind) -> &'static str {
+    kind.text(SUMMARY, REX_SUMMARY)
+}
+
+pub(crate) fn explanation(lingering: bool, kind: MuxKind) -> String {
+    let explanation = kind.text(EXPLANATION, REX_EXPLANATION);
     if lingering {
-        format!("{EXPLANATION} {LINGERING}")
+        format!("{explanation} {LINGERING}")
     } else {
-        EXPLANATION.to_owned()
+        explanation.to_owned()
     }
 }
 
@@ -79,6 +87,45 @@ pub(crate) fn banner() -> String {
 pub(crate) fn agent_guidance() -> String {
     format!(
         "Namedrop shared app-server notice. Relay the notice below to the person once, in plain words, in your next reply. Run none of its commands without the person's approval. If they approve, run `{DISABLE}`, then tell them that `{STOP}` disconnects this session too before you run it, and remind them to restart Codex in each of its Herdr panes. To fix one session only, they can start it with `{PER_SESSION}`."
+    )
+}
+
+/// The notice's words in a Rex pane. The shared server runs its hooks
+/// outside every pane's program, so no Codex session there ever binds to
+/// its pane.
+pub(crate) const REX_SUMMARY: &str = "Codex runs its sessions through its shared app-server, so Namedrop cannot tell which Rex pane each Codex session is in.";
+
+pub(crate) const REX_EXPLANATION: &str = "Since version 0.162, Codex starts one background app-server for each Codex home (CODEX_HOME) and runs every session's hooks inside it. That server keeps the environment of wherever it was first started, not of the pane you type in, and its hooks run outside the pane's program. Namedrop then cannot bind a Codex session to its pane: the agent cannot take a mention name, and mentions to it stay queued. Submitting another prompt does not help. The server also updates and restarts itself, which can close an open Codex window the next time it saves a setting.";
+
+pub(crate) const REX_FIX: &str = "The fix turns the shared app-server off, so each Codex runs inside its own pane, where Namedrop can see it. While it is off, the `codex agents` session browser and Codex remote control are unavailable. Namedrop never changes Codex settings: run the steps yourself, or let the agent in the pane run them once you approve.";
+
+pub(crate) const REX_STEPS: [&str; 7] = [
+    DISABLE,
+    STOP,
+    "Then restart Codex in each of its Rex panes. The stop is needed because a running server keeps taking new sessions even with the setting off. It disconnects every open Codex window that uses it, including the one whose agent ran these steps for you; relaunch those windows.",
+    "To fix one session only, leave the setting on and start that Codex with:",
+    PER_SESSION,
+    "To undo the fix and turn the shared app-server back on:",
+    ENABLE,
+];
+
+/// `advice_lines`, `banner`, and `agent_guidance` for a Codex whose hooks
+/// run in a Rex home.
+pub(crate) fn rex_advice_lines() -> impl Iterator<Item = &'static str> {
+    [REX_SUMMARY, REX_EXPLANATION, REX_FIX]
+        .into_iter()
+        .chain(REX_STEPS)
+}
+
+pub(crate) fn rex_banner() -> String {
+    format!(
+        "Namedrop: Codex runs through its shared app-server, so Namedrop cannot tell which Rex pane this session is in; mentions to it stay queued. Fix: {DISABLE}, then {STOP}, then restart Codex in its panes. One session only: {PER_SESSION}. Undo: {ENABLE}. Namedrop changes nothing itself; see namedrop doctor."
+    )
+}
+
+pub(crate) fn rex_agent_guidance() -> String {
+    format!(
+        "Namedrop shared app-server notice. Relay the notice below to the person once, in plain words, in your next reply. Run none of its commands without the person's approval. If they approve, run `{DISABLE}`, then tell them that `{STOP}` disconnects this session too before you run it, and remind them to restart Codex in each of its Rex panes. To fix one session only, they can start it with `{PER_SESSION}`."
     )
 }
 
@@ -107,11 +154,11 @@ pub(crate) struct RunningServer {
 }
 
 impl CodexAppServer {
-    pub(crate) fn advice(&self) -> Option<Value> {
+    pub(crate) fn advice(&self, kind: MuxKind) -> Option<Value> {
         match self {
             Self::InProcess => None,
-            Self::StartsOnNextSession => Some(advice(false)),
-            Self::Running(server) => Some(advice(!server.auto_start)),
+            Self::StartsOnNextSession => Some(advice(false, kind)),
+            Self::Running(server) => Some(advice(!server.auto_start, kind)),
         }
     }
 }
@@ -176,16 +223,16 @@ impl ServedPanes {
         &self.pane_ids
     }
 
-    pub(crate) fn advice(&self) -> Value {
-        advice(!self.server.auto_start)
+    pub(crate) fn advice(&self, kind: MuxKind) -> Value {
+        advice(!self.server.auto_start, kind)
     }
 }
 
 /// A Codex pane counts as served unless its foreground processes prove it runs
 /// in-process. When Herdr does not answer, it counts as served, because a
 /// server is running.
-pub(crate) fn served_codex_panes<E: HerdrCommandExecutor, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub(crate) fn served_codex_panes<M: crate::mux::MuxRead, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     panes: &[DiscoveredPane],
 ) -> Option<ServedPanes> {
     let codex = panes
@@ -201,7 +248,7 @@ pub(crate) fn served_codex_panes<E: HerdrCommandExecutor, C, I>(
     };
     let pane_ids = codex
         .into_iter()
-        .filter(|pane| !pane_runs_in_process(runtime.herdr, &pane.pane_id))
+        .filter(|pane| !pane_runs_in_process(runtime.mux, &pane.pane_id))
         .map(|pane| pane.pane_id.clone())
         .collect::<Vec<_>>();
     (!pane_ids.is_empty()).then_some(ServedPanes { server, pane_ids })
@@ -213,9 +260,9 @@ pub(crate) fn runs_inside_server() -> bool {
 
 const IN_PROCESS_FLAGS: [&str; 2] = ["--no-daemon", "--dangerously-bypass-hook-trust"];
 
-fn pane_runs_in_process(herdr: &impl HerdrCommandExecutor, pane_id: &str) -> bool {
+fn pane_runs_in_process(mux: &impl crate::mux::MuxRead, pane_id: &str) -> bool {
     // No answer from Herdr proves nothing, so the pane stays served.
-    let Some(pids) = crate::terminal::foreground_process_ids(herdr, pane_id) else {
+    let Some(pids) = crate::terminal::foreground_process_ids(mux, pane_id) else {
         return false;
     };
     pids.into_iter()
@@ -248,9 +295,7 @@ fn is_server_binary(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::HerdrCommandOutput;
     use std::{
-        cell::RefCell,
         collections::BTreeMap,
         os::unix::process::CommandExt,
         process::{Child, Command, Stdio},
@@ -450,7 +495,7 @@ mod tests {
         root.write("app-server-daemon/daemon.pid", &pid_record(server.pid()));
         let observed = root.observe();
         assert_eq!(observed, running(&root, server.pid(), false));
-        let advice = observed.advice().unwrap();
+        let advice = observed.advice(MuxKind::Herdr).unwrap();
         assert_eq!(
             advice["explanation"],
             format!("{EXPLANATION} {LINGERING}"),
@@ -493,11 +538,13 @@ mod tests {
         let config = AgentConfigDirectories {
             claude: None,
             codex: Some(relative),
+            config: None,
         };
         assert_eq!(observe(Some(&root.0), config), CodexAppServer::InProcess);
         let empty = AgentConfigDirectories {
             claude: None,
             codex: Some(Path::new("")),
+            config: None,
         };
         assert_eq!(observe(Some(&root.0), empty), CodexAppServer::InProcess);
     }
@@ -556,39 +603,33 @@ mod tests {
         )));
     }
 
-    struct Herdr {
+    /// Answers `pane process-info` for each pane in `foreground`, with shell
+    /// 1, unless the pane is in `no_shell`, foreground group 2, and those
+    /// pids, and fails every other read, as the old fake did. Panes
+    /// `w1:p1` to `w1:p4` exist, so a pane the test gave no process fails as
+    /// unanswered rather than gone.
+    fn herdr(
         foreground: BTreeMap<String, Vec<u32>>,
-        calls: RefCell<Vec<Vec<String>>>,
-    }
-    impl HerdrCommandExecutor for Herdr {
-        fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-            self.calls
-                .borrow_mut()
-                .push(args.iter().map(|a| (*a).to_owned()).collect());
-            match args {
-                ["pane", "process-info", "--pane", pane] => {
-                    let pids = self
-                        .foreground
-                        .get(*pane)
-                        .ok_or_else(|| "herdr is not answering".to_owned())?;
-                    let processes = pids
-                        .iter()
-                        .map(|pid| json!({"pid": pid}))
-                        .collect::<Vec<_>>();
-                    Ok(HerdrCommandOutput {
-                        stdout: json!({"result": {"process_info": {
-                            "shell_pid": 1, "foreground_process_group_id": 2,
-                            "foreground_processes": processes
-                        }}})
-                        .to_string(),
-                    })
-                }
-                _ => Err(format!("unexpected herdr call {args:?}")),
+        no_shell: Vec<&'static str>,
+    ) -> crate::mux::fake::StrictSpace {
+        let mut world = crate::mux::fake::FakeMux::world()
+            .endpoint("default")
+            .space("w1");
+        for pane in ["w1:p1", "w1:p2", "w1:p3", "w1:p4"] {
+            world = world.pane(pane);
+            if let Some(pids) = foreground.get(pane) {
+                world = world.process(crate::mux::PaneProcess {
+                    shell_pid: (!no_shell.contains(&pane)).then_some(1),
+                    foreground_group: Some(2),
+                    foreground_pids: pids.clone(),
+                    tty: None,
+                });
             }
         }
+        crate::mux::fake::StrictSpace::new(world.build(), &[], crate::mux::fake::Takes::nothing())
     }
 
-    fn pane(pane_id: &str, agent: &str) -> DiscoveredPane {
+    fn pane(pane_id: &str, agent: crate::AgentRuntime) -> DiscoveredPane {
         DiscoveredPane {
             pane_id: pane_id.to_owned(),
             terminal_id: format!("t-{pane_id}"),
@@ -596,15 +637,21 @@ mod tests {
             workspace_id: "w1".to_owned(),
             cwd: None,
             pane_label: None,
-            agent_session_id: None,
-            agent: Some(agent.to_owned()),
-            occupant_label: None,
+            agent: Some(crate::mux::AgentIdentity {
+                kind: crate::mux::AgentKind::Known(agent),
+                label: None,
+                session: crate::mux::SessionClaim::None,
+            }),
             agent_status: None,
             idle_state_label: None,
         }
     }
 
-    fn served(root: &Root, herdr: &Herdr, panes: &[DiscoveredPane]) -> Option<ServedPanes> {
+    fn served(
+        root: &Root,
+        herdr: &crate::mux::fake::FakeMux,
+        panes: &[DiscoveredPane],
+    ) -> Option<ServedPanes> {
         let runtime = LifecycleRuntime {
             state_directory: &root.0,
             home_directory: Some(&root.0),
@@ -613,7 +660,7 @@ mod tests {
             workspace_id: Some("w1"),
             current_pane_id: None,
             session_socket_id: "default",
-            herdr,
+            mux: herdr,
             clock: &(),
             ids: &(),
         };
@@ -636,22 +683,22 @@ mod tests {
                 "pane fixtures must run directly without a shell launcher"
             );
         }
-        let herdr = Herdr {
-            foreground: BTreeMap::from([
+        let herdr = herdr(
+            BTreeMap::from([
                 ("w1:p1".to_owned(), vec![in_process.pid()]),
                 ("w1:p2".to_owned(), vec![plain.pid()]),
             ]),
-            calls: RefCell::default(),
-        };
-        let only_in_process = served(&root, &herdr, &[pane("w1:p1", "codex")]);
+            Vec::new(),
+        );
+        let only_in_process = served(&root, &herdr, &[pane("w1:p1", crate::AgentRuntime::Codex)]);
         let mixed = served(
             &root,
             &herdr,
             &[
-                pane("w1:p1", "codex"),
-                pane("w1:p2", "codex"),
-                pane("w1:p3", "codex"),
-                pane("w1:p4", "claude"),
+                pane("w1:p1", crate::AgentRuntime::Codex),
+                pane("w1:p2", crate::AgentRuntime::Codex),
+                pane("w1:p3", crate::AgentRuntime::Codex),
+                pane("w1:p4", crate::AgentRuntime::ClaudeCode),
             ],
         );
         assert!(
@@ -669,29 +716,45 @@ mod tests {
     }
 
     #[test]
+    fn an_in_process_pane_herdr_names_no_shell_for_stays_served() {
+        let root = Root::new();
+        let server = Process::server(&root.codex_home());
+        root.write("app-server-daemon/daemon.pid", &pid_record(server.pid()));
+        let in_process = Process::spawn(Command::new("sleep").arg0("--no-daemon").arg("30"));
+        let herdr = herdr(
+            BTreeMap::from([("w1:p1".to_owned(), vec![in_process.pid()])]),
+            vec!["w1:p1"],
+        );
+        let served = served(&root, &herdr, &[pane("w1:p1", crate::AgentRuntime::Codex)])
+            .expect("a reply without a shell proves nothing, so the pane stays served");
+        assert_eq!(served.pane_ids(), ["w1:p1"]);
+    }
+
+    #[test]
     fn panes_without_codex_read_nothing_and_ask_herdr_nothing() {
         let root = Root::new();
         let server = Process::server(&root.codex_home());
         root.write("app-server-daemon/daemon.pid", &pid_record(server.pid()));
-        let herdr = Herdr {
-            foreground: BTreeMap::new(),
-            calls: RefCell::default(),
-        };
-        assert!(served(&root, &herdr, &[pane("w1:p1", "claude")]).is_none());
-        assert!(herdr.calls.borrow().is_empty());
-        assert!(served(&root, &herdr, &[pane("w1:p1", "codex")]).is_some());
-        assert_eq!(herdr.calls.borrow().len(), 1, "the fake can see a call");
+        let herdr = herdr(BTreeMap::new(), Vec::new());
+        assert!(
+            served(
+                &root,
+                &herdr,
+                &[pane("w1:p1", crate::AgentRuntime::ClaudeCode)]
+            )
+            .is_none()
+        );
+        assert!(herdr.reads().is_empty());
+        assert!(served(&root, &herdr, &[pane("w1:p1", crate::AgentRuntime::Codex)]).is_some());
+        assert_eq!(herdr.reads().len(), 1, "the fake can see a call");
     }
 
     #[test]
     fn without_a_running_server_no_pane_is_served() {
         let root = Root::new();
         fs::create_dir_all(root.codex_home().join("app-server-daemon")).unwrap();
-        let herdr = Herdr {
-            foreground: BTreeMap::new(),
-            calls: RefCell::default(),
-        };
-        assert!(served(&root, &herdr, &[pane("w1:p1", "codex")]).is_none());
+        let herdr = herdr(BTreeMap::new(), Vec::new());
+        assert!(served(&root, &herdr, &[pane("w1:p1", crate::AgentRuntime::Codex)]).is_none());
     }
 
     fn assert_commands_are_exact(text: &str) {
@@ -703,16 +766,34 @@ mod tests {
 
     #[test]
     fn every_command_in_the_advice_is_one_of_the_four() {
-        for line in advice_lines(true) {
+        for line in advice_lines(true).chain(rex_advice_lines()) {
             assert_commands_are_exact(line);
         }
-        for prose in [SUMMARY, EXPLANATION, LINGERING, FIX] {
+        for prose in [
+            SUMMARY,
+            EXPLANATION,
+            LINGERING,
+            FIX,
+            REX_SUMMARY,
+            REX_EXPLANATION,
+            REX_FIX,
+        ] {
             assert!(!prose.starts_with("codex "), "{prose}");
         }
         for command in COMMANDS {
             assert!(STEPS.contains(&command), "{command} is a step of its own");
+            assert!(
+                REX_STEPS.contains(&command),
+                "{command} is a Rex step of its own"
+            );
         }
-        for text in [agent_guidance(), banner()] {
+        assert!(rex_banner().contains(ENABLE) && !rex_banner().contains('\n'));
+        for text in [
+            agent_guidance(),
+            banner(),
+            rex_agent_guidance(),
+            rex_banner(),
+        ] {
             for quoted in text.split('`').skip(1).step_by(2) {
                 assert_commands_are_exact(quoted);
             }
@@ -725,7 +806,12 @@ mod tests {
 
     #[test]
     fn the_advice_carries_exactly_the_shared_text() {
-        let value = advice(false);
+        let rex = advice(true, MuxKind::Rex);
+        assert_eq!(rex["summary"], REX_SUMMARY);
+        assert_eq!(rex["explanation"], format!("{REX_EXPLANATION} {LINGERING}"));
+        assert_eq!(rex["fix"], REX_FIX);
+        assert_eq!(rex["steps"], json!(REX_STEPS));
+        let value = advice(false, MuxKind::Herdr);
         let keys = value.as_object().unwrap().keys().collect::<Vec<_>>();
         assert_eq!(keys, ["explanation", "fix", "status", "steps", "summary"]);
         assert_eq!(value["status"], "codex_shared_app_server");
@@ -743,7 +829,11 @@ mod tests {
     #[test]
     fn activation_carries_the_advice_beside_its_steps_never_in_them() {
         let guidance = |root: &Root| {
-            crate::user_hook_activation_guidance(Some(&root.0), AgentConfigDirectories::default())
+            crate::user_hook_activation_guidance(
+                Some(&root.0),
+                AgentConfigDirectories::default(),
+                MuxKind::Herdr,
+            )
         };
         let in_process = Root::new();
         let starts = Root::new();
@@ -755,8 +845,14 @@ mod tests {
 
         let quiet = guidance(&in_process);
         assert!(quiet["codex"].get("app_server").is_none(), "{quiet}");
-        assert_eq!(guidance(&starts)["codex"]["app_server"], advice(false));
-        assert_eq!(guidance(&running)["codex"]["app_server"], advice(true));
+        assert_eq!(
+            guidance(&starts)["codex"]["app_server"],
+            advice(false, MuxKind::Herdr)
+        );
+        assert_eq!(
+            guidance(&running)["codex"]["app_server"],
+            advice(true, MuxKind::Herdr)
+        );
         for root in [&in_process, &starts, &running] {
             let with_server_state = guidance(root);
             for directory in ["app-server-daemon", "packages"] {

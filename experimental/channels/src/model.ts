@@ -1,3 +1,5 @@
+import type { Heard } from "./sounds.ts";
+
 export type SpaceKey = string & { readonly __brand: "SpaceKey" };
 export type AddressId = string & { readonly __brand: "AddressId" };
 
@@ -46,12 +48,12 @@ export type MessageContext = {
   messages: readonly Message[];
 };
 export type ThreadAction = "continue" | "stop";
-// What a card's button asks the server to do: a thread action, or dismissing
-// the warning that a request's answer can never arrive.
+// What a button asks the server to do: a thread action, or dismissing the
+// cards with these ids.
 export type ControlAction = ThreadAction | "dismiss";
 export type ControlTarget =
   | { kind: "thread"; threadId: string; action: ThreadAction }
-  | { kind: "attempt"; attemptId: string; action: "dismiss" };
+  | { kind: "attention"; ids: readonly string[]; action: "dismiss" };
 export type WarningCause =
   | "blocked"
   | "cancelled"
@@ -80,6 +82,8 @@ export type ReviewClear = {
 };
 export type Attention = {
   rowKey: string;
+  // The server's id for the card, which a dismiss names.
+  attentionId?: string | null;
   sourceId?: string | null;
   coordinationId?: string | null;
   conversation?: Conversation | null;
@@ -94,6 +98,7 @@ export type Attention = {
     | "coordination"
     | "agent_status"
     | "terminal_relay"
+    | "agent_start"
     | "unknown";
   summary: SafeText;
   subjectSummary: SafeText | null;
@@ -176,6 +181,8 @@ export type Message = {
   // The agent's words from a turn that ended with its answer still held.
   progressNote: boolean;
   body: SafeText;
+  // File names of the images the message carries, which the body leaves out.
+  images: readonly string[];
   legs: readonly { to: AddressId; stage: DeliveryStage }[];
   routing: Routing | null;
   woke: readonly Alias[];
@@ -389,6 +396,11 @@ export type State = {
   nextRequestId: number;
   outbox: ReadonlyMap<string, Outgoing>;
   drafts: ReadonlyMap<DraftKey, Draft>;
+  heard: Heard;
+  // The newest message time when the first replay finished; null before
+  // then, so the first load never rings. A channel first seen later rings
+  // for its messages newer than this.
+  loadedAt: number | null;
 };
 export type PeekableKind = Exclude<MemberKind["type"], "human">;
 export type PeekTarget = Readonly<{

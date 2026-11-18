@@ -1,3 +1,6 @@
+#[path = "support/binary.rs"]
+mod binary;
+
 use namedrop::AgentRuntime;
 use namedrop::subagent::{
     DiskFiles, HOST_FILE_CAP, HostFiles, SubagentEdge, SubagentSighting, SubagentText,
@@ -315,7 +318,7 @@ impl State {
         ParentIdentity::new("test-socket", "test-workspace", "pane-a", "parent-session").unwrap()
     }
     fn command(&self) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_namedrop"));
+        let mut command = crate::binary::namedrop();
         command
             .env_clear()
             .env("HOME", self.0.join("home"))
@@ -876,4 +879,42 @@ fn claude_background_completion_on_a_new_parent_prompt_removes_the_child_immedia
         Vec::<String>::new(),
         "completion must clear the spawn run before the next parent Stop"
     );
+}
+
+/// The hook takes its parent's endpoint, space, and pane from the neutral
+/// names where no Herdr name is set.
+#[test]
+fn the_installed_command_records_a_subagent_under_neutral_names() {
+    let state = State::new();
+    let mut child = state
+        .command()
+        .env_remove("HERDR_SOCKET_PATH")
+        .env_remove("HERDR_WORKSPACE_ID")
+        .env_remove("HERDR_PANE_ID")
+        .env("NAMEDROP_ENDPOINT", "test-socket")
+        .env("NAMEDROP_SPACE_ID", "test-workspace")
+        .env("NAMEDROP_PANE_ID", "pane-a")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(
+            json!({"hook_event_name":"SubagentStart","session_id":"parent-session",
+                   "agent_id":"child","agent_type":"Explore"})
+            .to_string()
+            .as_bytes(),
+        )
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    assert_eq!(ids(&state, now + 1), ["child"]);
 }

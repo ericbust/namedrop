@@ -122,7 +122,8 @@ Failed history requests offer **Try again**. The member strip above the timeline
 wraps to two lines and folds the rest behind **+N more**.
 
 Message bodies render supported Markdown, including emphasis, headings, lists,
-tables, and fenced code. Collaborator text never becomes arbitrary HTML. HTTP and
+tables, and fenced code. A closed fence tagged `mermaid` is drawn as a diagram
+(see [Diagrams](#diagrams)). Collaborator text never becomes arbitrary HTML. HTTP and
 HTTPS URLs become links with `rel="noreferrer"`. Bodies over 480 characters have
 **Show more**, which can load the full sanitized body up to 64 Ki characters.
 Preview boundaries preserve surrogate pairs. Links are recognized
@@ -164,7 +165,10 @@ locally to see a wider grid. Opening
 or resizing Peek sends no terminal input, source resize, focus, or takeover command.
 The browser uses pinned xterm 6.0.0. **Type to agent** is a separate, explicit
 input control for prompts, Esc, Ctrl-C, arrows, and Enter. Input requires a
-current live continuity value and agent binding. It goes to the real pane.
+current live continuity value and agent binding. It goes to the real pane
+through the pane's input lock. While a delivery, doctor, or thread stop holds
+that lock, input answers `409` at once and sends nothing, so it never lands
+after input the person has not seen.
 Live terminal paints can contain secrets. Text snapshots and fetched history
 redact recognized secrets, but redaction cannot catch every secret.
 
@@ -342,6 +346,74 @@ Typing `/` or `$` offers skills for the addressed agent. Selecting one inserts
 `/name` for Claude Code or `$name` for Codex. Their skill lists stay separate.
 Skill suggestions also work in **Type to agent**.
 
+A paste, a drop or the image button attaches up to 4 images of up to 10 MB each.
+A paste that also carries text stays a text paste. The composer uploads each image
+at once with `POST /api/images`, raw bytes and the `X-Namedrop-Csrf` header, and
+the answer is `{name, line}`. The line is `Image: ` and the stored file's absolute
+path. A draft keeps its images as such lines at the end of its text, after a blank
+line, so a kept or refused draft keeps them and the post's `source` already carries
+them. `draftImages()` and `withImages()` in `src/images.ts` hold that form, and
+`splitImages()` reads a sent message's lines as the server's `split` does. Both
+sides are tested against `tests/fixtures/channel_images/lines.json`. The
+box shows only the typed text, and a chip per image from `GET /api/images/<name>`.
+A frame's message row lists its images in `images` and leaves their lines out of
+`body`. A message with images needs words too, so Send stays off until there are
+some.
+
+Sounds are synthesized with Web Audio from the recipe table in `src/sounds.ts`,
+so the page fetches no audio and the CSP stays `default-src 'none'`. The reducer
+sets `State.heard` (a sequence number and arrivals, each an agent key and a
+message id) from `heardIn()` in `src/store.ts`: new messages by an agent with a
+leg to the person, without system kinds or progress notes. A live `space` frame
+and the end of a reconnect's replay compare with the channel's earlier
+snapshot. A channel with none counts only messages newer than `State.loadedAt`,
+the newest message time when the first replay finished, so the first load
+never rings.
+Direct messages come from `heardDirect()` in `src/direct-messages.ts`, a changed
+`lastAgentMessageId` after the first poll. `useSounds` in `src/ui/useSounds.ts`
+loads `GET /api/sounds`, posts each change to `POST /api/sounds` with the
+`X-Namedrop-Csrf` header, and rings through `createPlayer()`. Each change
+carries `was`, the value the page showed before it, and saves go one at a time
+per tab. The server answers `409 Conflict` with its settings when the stored
+value is no longer `was`, and the page shows those settings. The player stays
+`locked` until a pointer or key event on the page. Inside the queued Web Lock
+`namedrop:channel-sound` it checks and updates a ring record in localStorage
+that the tabs share: the last sound's time and the latest 200 message ids. A
+known id never rings, and a new one rings unless a sound played under a second
+ago. When storage throws, the tab that gets `namedrop:channel-sound-hold` with
+`ifAvailable` rings and holds it for a second, and the others stay quiet.
+Without Web Locks, each tab decides alone.
+
+## Create channels and add agents
+
+**+** beside **Channels** opens the New channel form in the sidebar, and **Add
+agent** in the member row opens its form under the row. Both open in place, with no
+dialog. On a phone the New channel form sits in the channel drawer. `src/create.ts`
+holds the drafts, the checks and the form's state machine as pure functions, and
+`NewChannelForm` and `AddAgentForm` render them.
+
+The New channel form reads `GET /w/<key>/folders` for **Recent folders**, where the
+key is the open channel's, or else the first channel's. A list that can't load is an
+empty one. **Create** posts `{name, folder}` to `POST /w/<key>/channels`, and the
+page opens the channel named by the `key` in the answer. The Add agent
+form reads `GET /w/<key>/folder` as it opens and shows the folder under **Opens in**.
+**Add** posts `{kind, name, persona}` to `POST /w/<key>/agents` for the open channel. Both posts
+carry the `X-Namedrop-Csrf` header and retry once after a 403, like a send.
+
+The page checks a draft before it posts, with the server's own sentences, so a
+check reads the same wherever it is made. The server checks again, and its
+`{"error"}` sentence shows in the form as it is. The form keeps the draft after a
+refusal. While a post is pending, the button reads **Creating…** or **Adding…** and
+a second press does nothing.
+
+An agent that Channels started and that has not connected after 20 seconds arrives
+as an attention item with `source_kind` `agent_start` and a `pane` response. It
+shows under **Needs you** with a button that opens the agent's screen. The item's
+summary is its title and says what to do: finish Claude's setup, or send a new
+Codex its first message. The pane may be asking the person to trust the folder or
+to log in, and the page never answers that screen. The item leaves once the agent
+connects.
+
 ## Direct messages and reminders
 
 **Direct messages** lists Namedrop agents across workspaces, with a channel label
@@ -492,3 +564,61 @@ The benchmark alternates both versions, verifies each appended message, and
 records source hashes and actual loaded counts. The new cap applies during
 warmup, so a large preload retains 600 rows in the changed app. JSON parsing,
 fixture setup, and assertions are outside the reducer timing.
+
+## Diagrams
+
+`src/ui/Markdown.tsx` hands a closed `mermaid` fence to `src/ui/Diagram.tsx`.
+The component shows the block's source until the drawing is ready, and keeps it
+with "Diagram could not be drawn" when Mermaid cannot read it. A fence that the
+shortened view cuts, and any `mermaid` fence in a one-line preview, is the label
+"Diagram".
+
+`src/diagramDraw.ts` draws. It imports Mermaid 12.3.0 (MIT) and DOMPurify 3.4.17
+(Apache-2.0 or MPL-2.0), configures Mermaid from `src/diagramConfig.ts`, renders
+into a hidden element so text can be measured, cleans the SVG and returns it as a
+`data:image/svg+xml` address with its size. Drawings take turns, with a pause
+between two so the page can paint and take input. The page shows that address in an
+`<img>`, which is why a drawing cannot run script or load anything. The page's
+colors are read from its CSS variables and converted to sRGB hex on a canvas,
+because Mermaid's theme engine does not read `oklch()`.
+
+Mermaid is built apart from the page. `vite.config.ts` runs a second build with
+`src/diagramDraw.ts` as its entry, writes it to `dist/diagram/`, and gives the
+page the entry's address as `__DIAGRAM_ENTRY__`. In one build, Mermaid's chunks
+import the page's main chunk by its hashed name, so every change to the page
+would rename all 92 files in `src/dashboard/channels/diagram/`. Built apart,
+those files change only when Mermaid, DOMPurify, `src/diagramDraw.ts` or
+`src/diagramConfig.ts` change. Whatever `src/diagramDraw.ts` imports is built into those
+files, so keep its imports to `src/diagramConfig.ts` and types. `vite dev`
+imports the source directly.
+
+`diagramBudget()` in `src/diagram.ts` holds the two limits: a block over 10,000
+characters and a message's ninth diagram are shown as source with a note, and
+never reach the drawing code. `Diagram` draws only while it is on screen, and
+keeps its picture when the page's look changes until it is on screen again.
+
+The stylesheet fits a picture to its column. `MIN_DIAGRAM_SCALE` in
+`src/diagram.ts` is the smallest share of its drawn size a picture is fitted
+to: 0.7, where the drawing's 14 px labels are about 10 px. `Diagram` sets that
+width as the image's `min-width`, and `.diagram-box` scrolls sideways when the
+picture is wider than the column at that size.
+
+The configuration locks `layout` to dagre. With that lock no diagram can reach
+Mermaid's ELK engine, so the diagram build replaces `elkjs` with
+`src/diagramNoElk.ts`, which saves 1.4 MB. Flowchart, sequence, class, state,
+ER, gantt, pie, git graph, mind map, timeline, journey, quadrant, requirement,
+C4, sankey, XY chart, block, packet, kanban and architecture diagrams all draw
+without it.
+
+Mermaid inserts a `<style>` element and style attributes while it draws, which
+the dashboard's `style-src 'self' 'unsafe-inline'` permits. The browser tests
+named `DIAGRAMS:` therefore run under the dashboard's policy. Every other
+browser test keeps the stricter `style-src 'self'`.
+
+One of those tests draws a hostile diagram whose label holds `onerror`. Mermaid
+passes every label to DOMPurify, which parses it with `DOMParser`. Chrome 157
+reports a `script-src-attr` violation for each handler in that parse, and
+Chromium 155 reports none. The parsed document has no window, so the handler
+cannot run. The test counts the handlers parsed that way, allows at most that
+many `script-src-attr` reports and no other, and checks that no element of the
+page carries a handler.

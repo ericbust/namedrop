@@ -1,0 +1,62 @@
+{
+ "about": "the same block after kill -9 of the agent: the record outlives it",
+ "program_status": {
+  "records": [
+   {
+    "state": "idle",
+    "app": "claude-code",
+    "effective_app": "claude-code",
+    "updated_at": "2026-11-13T03:27:41.532281-05:00",
+    "owner": {
+     "pid": 75361,
+     "name": "Python"
+    }
+   }
+  ]
+ },
+ "process": {
+  "last_exit": null,
+  "child": {
+   "pid": 70930,
+   "user_id": 0,
+   "user": "root",
+   "name": "login",
+   "path": "/usr/bin/login"
+  },
+  "foreground": {
+   "pid": 70944,
+   "user_id": 501,
+   "user": "me",
+   "name": "zsh",
+   "path": "/bin/zsh",
+   "invoked_path": "/bin/zsh",
+   "argv0": "-zsh",
+   "cwd": "/private/tmp"
+  },
+  "ancestors": [
+   {
+    "pid": 70930,
+    "user_id": 0,
+    "user": "root",
+    "name": "login",
+    "path": "/usr/bin/login"
+   }
+  ],
+  "home": "/Users/me"
+ },
+ "local": {
+  "70930": {
+   "group": 70930,
+   "state": "alive"
+  },
+  "70944": {
+   "group": 70944,
+   "state": "alive"
+  },
+  "75361": {
+   "group": 75361,
+   "state": "gone"
+  }
+ },
+ "agent": 75361
+}

@@ -7,8 +7,10 @@
 //! stripped of terminal control sequences before they are ever printed.
 use super::popup_input::InputMode;
 use namedrop::{
-    HerdrCommandExecutor, HerdrCommandOutput, LifecycleRuntime, cli::RuntimeOptions,
+    LifecycleRuntime,
+    cli::RuntimeOptions,
     discover_worktree_for_workspace,
+    mux::{Allowance, Budget, MuxRead, home::Inherited},
 };
 use serde_json::Value;
 use std::{
@@ -57,13 +59,23 @@ const MAX_IDENTITY_OUTPUT_BYTES: usize = 512 * 1_024;
 // Entry point
 // ---------------------------------------------------------------------------
 
-pub(super) fn run(options: &RuntimeOptions) -> ExitCode {
-    match run_popup(options) {
+/// `observing_pane` is the pane the panel itself occupies, from its home.
+pub(super) fn run(
+    options: &RuntimeOptions,
+    inherited: &dyn Inherited,
+    observing_pane: Option<&str>,
+) -> ExitCode {
+    super::popup_input::host_for(options, inherited);
+    match run_popup(options, inherited, observing_pane) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             // Keep actionable errors visible instead of closing immediately.
             eprintln!("\nNamedrop: {}", error.escape_debug());
-            if io::stdin().is_terminal() {
+            if super::popup_input::is_rex(options, inherited) {
+                if super::popup_input::wait_for_key().is_ok() {
+                    return ExitCode::SUCCESS;
+                }
+            } else if io::stdin().is_terminal() {
                 eprint!("\nEnter or Esc closes: ");
                 let _ = io::stderr().flush();
                 let mut byte = [0];
@@ -74,13 +86,30 @@ pub(super) fn run(options: &RuntimeOptions) -> ExitCode {
     }
 }
 
-fn run_popup(options: &RuntimeOptions) -> Result<(), String> {
-    let workspace = env::var("NAMEDROP_TARGET_WORKSPACE")
-        .map_err(|_| "This popup is missing its invoking space")?;
-    let pane =
-        env::var("NAMEDROP_TARGET_PANE").map_err(|_| "This popup is missing its invoking pane")?;
-    let terminal = env::var("NAMEDROP_TARGET_TERMINAL")
-        .map_err(|_| "This popup is missing its invoking terminal")?;
+fn run_popup(
+    options: &RuntimeOptions,
+    inherited: &dyn Inherited,
+    observing_pane: Option<&str>,
+) -> Result<(), String> {
+    let kind = super::popup_input::host();
+    let workspace = env::var("NAMEDROP_TARGET_WORKSPACE").map_err(|_| {
+        kind.text(
+            "This popup is missing its invoking space",
+            "This screen is missing its invoking session",
+        )
+    })?;
+    let pane = env::var("NAMEDROP_TARGET_PANE").map_err(|_| {
+        kind.text(
+            "This popup is missing its invoking pane",
+            "This screen is missing its invoking pane",
+        )
+    })?;
+    let terminal = env::var("NAMEDROP_TARGET_TERMINAL").map_err(|_| {
+        kind.text(
+            "This popup is missing its invoking terminal",
+            "This screen is missing its invoking terminal",
+        )
+    })?;
     // Empty when the pane held no agent session as the popup opened.
     let session = env::var("NAMEDROP_TARGET_SESSION")
         .ok()
@@ -91,14 +120,20 @@ fn run_popup(options: &RuntimeOptions) -> Result<(), String> {
     // the error path above. Polling, not blocking: a slow pass must never hold
     // the keyboard.
     let _input_mode = InputMode::polling()?;
-    super::with_runtime_options(options, |runtime| {
+    super::with_runtime_options(options, inherited, |runtime| {
         let targeted = LifecycleRuntime {
             workspace_id: Some(&workspace),
             current_pane_id: Some(&pane),
             ..*runtime
         };
         let collect = |cancelled: &AtomicBool| {
-            namedrop::collect_agent_status(&targeted, &terminal, session.as_deref(), cancelled)
+            namedrop::collect_agent_status(
+                &targeted,
+                &terminal,
+                session.as_deref(),
+                observing_pane,
+                cancelled,
+            )
         };
         let summarize = |snapshot: &Value, cancelled: &AtomicBool| {
             namedrop::summarize_agent_status(snapshot, cancelled)
@@ -147,44 +182,35 @@ pub(crate) enum Identity {
     Unconfirmed(String),
 }
 
-/// Forwards `discover_worktree_for_workspace`'s ordinary reads through bounded
-/// ones. That call makes up to two Herdr requests on the default ten-second
-/// timeout; here they share one short deadline and the pass's cancellation
-/// flag, so closing the popup ends the recheck instead of waiting it out.
-struct BoundedReads<'a, E> {
-    inner: &'a E,
-    deadline: Instant,
-    cancelled: &'a AtomicBool,
-}
-
-impl<E: HerdrCommandExecutor> HerdrCommandExecutor for BoundedReads<'_, E> {
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        let remaining = self.deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err("confirming the invoking pane ran out of time".to_owned());
-        }
-        self.inner
-            .execute_bounded(args, remaining, self.cancelled, MAX_IDENTITY_OUTPUT_BYTES)
-    }
-}
-
 /// Rereads the pane the popup was opened for. A different physical terminal or
 /// a different agent session means the popup is now looking at someone else's
 /// work, so results collected for the original identity must be discarded.
-pub(crate) fn latest_identity<E: HerdrCommandExecutor, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub(crate) fn latest_identity<M: MuxRead, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     workspace: &str,
     pane: &str,
     terminal: &str,
     session: Option<&str>,
     cancelled: &AtomicBool,
 ) -> Identity {
-    let reads = BoundedReads {
-        inner: runtime.herdr,
-        deadline: Instant::now() + IDENTITY_BUDGET,
+    // Discovery makes up to two Herdr requests on the default ten-second
+    // timeout. Here they share one short deadline and the pass's cancellation
+    // flag, so closing the popup ends the recheck instead of waiting it out.
+    let deadline = Instant::now() + IDENTITY_BUDGET;
+    let reads = runtime.mux.within(Allowance::each(
+        move || {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err("confirming the invoking pane ran out of time".to_owned());
+            }
+            Ok(Budget {
+                timeout: remaining,
+                max_output_bytes: MAX_IDENTITY_OUTPUT_BYTES,
+            })
+        },
         cancelled,
-    };
-    let panes = match discover_worktree_for_workspace(&reads, workspace) {
+    ));
+    let panes = match discover_worktree_for_workspace(&*reads, workspace) {
         Ok(worktree) => worktree.panes,
         Err(error) => {
             return Identity::Unconfirmed(format!("Could not confirm the invoking pane: {error}"));
@@ -195,20 +221,44 @@ pub(crate) fn latest_identity<E: HerdrCommandExecutor, C, I>(
         .find(|candidate| candidate.pane_id == pane)
     else {
         return Identity::Changed(
-            "The invoking pane has closed. Open the popup again from your pane.".to_owned(),
+            runtime
+                .mux
+                .endpoint()
+                .kind
+                .text(
+                    "The invoking pane has closed. Open the popup again from your pane.",
+                    "The invoking pane has closed. Open the screen again from your pane.",
+                )
+                .to_owned(),
         );
     };
     if latest.terminal_id != terminal {
         return Identity::Changed(
-            "The invoking pane was replaced. Close this popup and open it again.".to_owned(),
+            runtime
+                .mux
+                .endpoint()
+                .kind
+                .text(
+                    "The invoking pane was replaced. Close this popup and open it again.",
+                    "The invoking pane was replaced. Close this screen and open it again.",
+                )
+                .to_owned(),
         );
     }
     // Compared exactly, both ways: a pane that gained an agent since the popup
     // opened is as much a different subject as one that swapped sessions.
-    let now = latest.agent_session_id.map(|id| id.as_str().to_owned());
+    let now = latest.agent_session_id().map(|id| id.as_str().to_owned());
     if now.as_deref() != session {
         return Identity::Changed(
-            "This pane started a new agent session. Close this popup and open it again.".to_owned(),
+            runtime
+                .mux
+                .endpoint()
+                .kind
+                .text(
+                    "This pane started a new agent session. Close this popup and open it again.",
+                    "This pane started a new agent session. Close this screen and open it again.",
+                )
+                .to_owned(),
         );
     }
     Identity::Same
@@ -382,7 +432,11 @@ pub(crate) fn popup<R: Read, W: Write>(
                 Key::Close => break,
                 Key::Refresh if state.frozen => {
                     state.notice = Some(
-                        "This pane changed. Close this popup and open it again from your pane."
+                        super::popup_input::host()
+                            .text(
+                                "This pane changed. Close this popup and open it again from your pane.",
+                                "This pane changed. Close this screen and open it again from your pane.",
+                            )
                             .to_owned(),
                     );
                 }
@@ -995,11 +1049,20 @@ fn sections(state: &State, width: usize) -> Vec<Line> {
         separate(&mut peers, &mut previous, entry.len());
         peers.extend(entry);
     }
-    lines.push(heading("Elsewhere in this workspace"));
+    lines.push(heading(super::popup_input::host().text(
+        "Elsewhere in this workspace",
+        "Elsewhere in this Rex session",
+    )));
     if peers.is_empty() {
         lines.extend(toned(
             Tone::Muted,
-            indented("No other agents in this workspace.", width),
+            indented(
+                super::popup_input::host().text(
+                    "No other agents in this workspace.",
+                    "No other agents in this Rex session.",
+                ),
+                width,
+            ),
         ));
     } else {
         lines.extend(peers);

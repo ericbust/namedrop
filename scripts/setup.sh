@@ -166,11 +166,11 @@ def invoke():
 def safe(value):
     return "".join(c if c.isprintable() else ascii(c)[1:-1] for c in str(value))
 
-def step(value, prefix="  • "):
+def step(value, prefix="  • ", **wrap):
     if str(value).startswith(("codex ", "herdr ", "claude ")):
         print("    " + safe(value))
         return
-    print(textwrap.fill(safe(value), width=92, initial_indent=prefix, subsequent_indent="    "))
+    print(textwrap.fill(safe(value), width=92, initial_indent=prefix, subsequent_indent="    ", **wrap))
 
 def show_app_server(server):
     print("\nCodex shared app-server")
@@ -228,6 +228,24 @@ def show_report(payload):
     for state in ("held", "failed", "expired", "requeued", "submitted", "terminal_running", "terminal_waiting"):
         if drain.get(state):
             step(f"Deliveries {state.replace('_', ' ')}: {len(drain[state])}. Run namedrop doctor for details.")
+    handoff = data.get("handoff")
+    handoff = [moved for moved in handoff if isinstance(moved, dict)] if isinstance(handoff, list) else []
+    # These lines name paths to copy, so they break only at spaces.
+    whole = dict(break_on_hyphens=False, break_long_words=False)
+    for moved in handoff:
+        print("\nNamedrop on Rex")
+        step(moved.get("notice") or "", **whole)
+        module = moved.get("module") if isinstance(moved.get("module"), dict) else {}
+        if module.get("status") == "not_confirmed":
+            step("The Rex module is not confirmed" + (": " + safe(module["error"]) if module.get("error") else "."),
+                 **whole)
+        bindings = moved.get("invalid_bindings")
+        for path in bindings if isinstance(bindings, list) else []:
+            step("Could not read the Rex session binding " + safe(path), **whole)
+    if handoff:
+        # The move replaces Codex's copy of the package, so a turn that ran
+        # through it ends on hooks that are gone (the U13 review's F2).
+        step("An agent turn that was running during the move may show Hook failed. If one does, restart that agent.")
     server = data.get("agent_integration_hook_activation", {}).get("codex", {}).get("app_server")
     if server:
         show_app_server(server)

@@ -7,7 +7,10 @@
 //! the checkout, so replacing or reinstalling the package never shows the same
 //! presentation twice while a new id is shown exactly once.
 
-use crate::{DiscoveredPane, DiscoveredWorktree, HerdrCommandExecutor, LifecycleRuntime};
+use crate::{
+    DiscoveredPane, DiscoveredWorktree, LifecycleRuntime,
+    mux::{MuxError, PopupScreen},
+};
 use serde_json::{Value, json};
 use std::{
     collections::HashSet,
@@ -241,6 +244,67 @@ pub fn all() -> Result<Vec<Presentation>, String> {
     Ok(presentations)
 }
 
+pub fn all_for(kind: crate::mux::MuxKind) -> Result<Vec<Presentation>, String> {
+    let mut presentations = all()?;
+    if kind == crate::mux::MuxKind::Rex {
+        let palette = |name: &str| {
+            crate::rex_ui::ACTIONS
+                .iter()
+                .find(|action| action.name == name)
+                .expect("the tour names a palette action")
+                .title
+        };
+        // Each Herdr phrase and its Rex words. Every one must be found, so a
+        // reworded Herdr page cannot leave its Herdr keys on a Rex tour.
+        let phrases = [
+            ("this Herdr workspace", "this Rex session".to_owned()),
+            (
+                "Press Prefix, then Shift-S to see",
+                format!("Run {} from Rex's palette to see", palette("status")),
+            ),
+            (
+                "Press Prefix, then Shift-H to open Namedrop Doctor.",
+                format!("Run {} from Rex's palette.", palette("doctor")),
+            ),
+            (
+                "Press Prefix, then Shift-M to manage names:",
+                format!("Run {} from Rex's palette to", palette("manage")),
+            ),
+            (
+                "Press Prefix, then Shift-O to open this tour again.",
+                format!(
+                    "Run {} from Rex's palette to read these pages again.",
+                    palette("tour")
+                ),
+            ),
+        ];
+        for (phrase, rex) in &phrases {
+            let mut found = false;
+            for presentation in &mut presentations {
+                for page in &mut presentation.pages {
+                    for line in &mut page.body {
+                        if line.contains(phrase) {
+                            found = true;
+                            *line = line.replace(phrase, rex);
+                        }
+                    }
+                }
+            }
+            if !found {
+                return Err(format!("the tour has no {phrase:?} to give its Rex words"));
+            }
+        }
+    }
+    Ok(presentations)
+}
+
+pub fn current_for(kind: crate::mux::MuxKind) -> Result<Presentation, String> {
+    all_for(kind)?
+        .into_iter()
+        .find(|presentation| presentation.id == CURRENT_ID)
+        .ok_or_else(|| format!("no embedded presentation has id {CURRENT_ID}"))
+}
+
 pub fn current() -> Result<Presentation, String> {
     all()?
         .into_iter()
@@ -372,78 +436,26 @@ pub fn reset(state_directory: &Path, id: &str) -> Result<bool, String> {
     }
 }
 
-/// The exact `herdr` argv that opens the tour popup for one pane. The popup
-/// learns its invoking pane and state directory from the environment, like
-/// the other Namedrop popups.
-pub fn popup_open_args(
-    workspace: &str,
-    pane: &str,
-    terminal: &str,
-    session: &str,
-    state_directory: &Path,
-    socket: &str,
-) -> Vec<String> {
-    [
-        "plugin",
-        "pane",
-        "open",
-        "--plugin",
-        "namedrop",
-        "--entrypoint",
-        ENTRYPOINT,
-        "--placement",
-        "popup",
-        "--width",
-        POPUP_WIDTH,
-        "--height",
-        POPUP_HEIGHT,
-    ]
-    .into_iter()
-    .map(str::to_owned)
-    .chain([
-        "--env".to_owned(),
-        format!("NAMEDROP_TARGET_WORKSPACE={workspace}"),
-        "--env".to_owned(),
-        format!("NAMEDROP_TARGET_PANE={pane}"),
-        "--env".to_owned(),
-        format!("NAMEDROP_TARGET_TERMINAL={terminal}"),
-        "--env".to_owned(),
-        format!("NAMEDROP_TARGET_SESSION={session}"),
-        "--env".to_owned(),
-        format!("HERDR_PLUGIN_STATE_DIR={}", state_directory.display()),
-        "--env".to_owned(),
-        format!("HERDR_SOCKET_PATH={socket}"),
-        "--focus".to_owned(),
-    ])
-    .collect()
-}
-
 /// Opens the tour popup for `target` and returns Herdr's JSON result.
-pub fn open_popup<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub fn open_popup<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     target: &DiscoveredPane,
 ) -> Result<Value, String>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::MuxAct,
 {
-    let session = target
-        .agent_session_id
-        .as_ref()
-        .map(|id| id.as_str())
-        .unwrap_or_default();
-    let args = popup_open_args(
-        &target.workspace_id,
-        &target.pane_id,
-        &target.terminal_id,
-        session,
-        runtime.state_directory,
-        runtime.session_socket_id,
-    );
-    let output = runtime
-        .herdr
-        .execute(&args.iter().map(String::as_str).collect::<Vec<_>>())?;
-    serde_json::from_str(&output.stdout)
-        .map_err(|error| format!("Herdr returned an unreadable popup result: {error}"))
+    crate::open_popup(runtime, PopupScreen::Tour, target.facts()).map_err(|error| match error {
+        MuxError::Protocol(error) => {
+            format!(
+                "{}: {error}",
+                runtime.mux.endpoint().kind.text(
+                    "Herdr returned an unreadable popup result",
+                    "Rex returned an unreadable screen result"
+                )
+            )
+        }
+        error => error.to_string(),
+    })
 }
 
 /// Shows the current presentation on the first agent pane Namedrop sees.
@@ -454,24 +466,37 @@ where
 /// instead of each opening a popup, and a failed open keeps the marker because
 /// retrying a popup on every later event would be worse than missing it once;
 /// the shortcut reopens it any time.
-pub fn show_for_first_agent<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub fn show_for_first_agent<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     discovered: &DiscoveredWorktree,
     preferred_pane_id: Option<&str>,
 ) -> Value
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::MuxAct,
 {
     let not_shown =
         |reason: &str| json!({"shown": false, "presentation_id": CURRENT_ID, "reason": reason});
     let failed = |reason: &str, error: String| json!({"shown": false, "presentation_id": CURRENT_ID, "reason": reason, "error": error});
 
-    let agents = || discovered.panes.iter().filter(|pane| pane.agent.is_some());
+    // A detached Rex block is in no window for a layer to float over, and
+    // trying would spend the once-only marker on a tour nobody saw.
+    let rex = runtime.mux.endpoint().kind == crate::mux::MuxKind::Rex;
+    let agents = || {
+        discovered
+            .panes
+            .iter()
+            .filter(|pane| pane.reports_kind() && !(rex && pane.tab_id.is_empty()))
+    };
     let Some(target) = preferred_pane_id
         .and_then(|preferred| agents().find(|pane| pane.pane_id == preferred))
         .or_else(|| agents().next())
     else {
-        return not_shown("no_agent_pane");
+        let detached = discovered.panes.iter().any(|pane| pane.reports_kind());
+        return not_shown(if detached {
+            "no_window"
+        } else {
+            "no_agent_pane"
+        });
     };
     if let Err(error) = current() {
         return failed("presentation_error", error);
@@ -486,7 +511,32 @@ where
         Ok(false) => return not_shown("already_shown"),
         Err(error) => return failed("marker_error", error),
     }
-    match open_popup(runtime, target) {
+    let opened = crate::lifecycle::apply_popup(runtime, PopupScreen::Tour, target.facts());
+    if matches!(opened, Ok(crate::mux::Applied::Unsupported))
+        && runtime.mux.endpoint().kind == crate::mux::MuxKind::Rex
+    {
+        return match reset(runtime.state_directory, CURRENT_ID) {
+            Ok(_) => not_shown("unsupported"),
+            Err(error) => failed("marker_error", error),
+        };
+    }
+    match opened
+        .map(|applied| match applied {
+            crate::mux::Applied::Opened(reply) => reply,
+            crate::mux::Applied::Done | crate::mux::Applied::Unsupported => Value::Null,
+        })
+        .map_err(|error| match error {
+            MuxError::Protocol(error) => {
+                format!(
+                    "{}: {error}",
+                    runtime.mux.endpoint().kind.text(
+                        "Herdr returned an unreadable popup result",
+                        "Rex returned an unreadable screen result"
+                    )
+                )
+            }
+            error => error.to_string(),
+        }) {
         Ok(popup) => json!({
             "shown": true,
             "presentation_id": CURRENT_ID,

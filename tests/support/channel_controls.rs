@@ -1,5 +1,4 @@
 use super::*;
-use namedrop::HerdrCommandExecutor;
 use namedrop::dashboard::snapshot::SpaceKey;
 
 fn held_thread(f: &Fixture) -> Value {
@@ -870,21 +869,8 @@ fn later_input_waits_until_stops_proven_interrupt_finishes() {
 
 #[test]
 fn later_doctor_prompt_invalidates_an_old_active_mailbox_stop() {
-    use std::sync::{Mutex, mpsc};
-    struct BlockInput<'a> {
-        herdr: &'a xws::FakeHerdr,
-        entered: mpsc::Sender<()>,
-        release: Mutex<mpsc::Receiver<()>>,
-    }
-    impl HerdrCommandExecutor for BlockInput<'_> {
-        fn execute(&self, args: &[&str]) -> Result<namedrop::HerdrCommandOutput, String> {
-            if args.starts_with(&["agent", "prompt"]) {
-                self.entered.send(()).unwrap();
-                self.release.lock().unwrap().recv().unwrap();
-            }
-            self.herdr.execute(args)
-        }
-    }
+    use namedrop::mux::fake::SentInput;
+    use std::sync::{Arc, Mutex, mpsc};
     let f = fixture();
     let parent = plain_root(&f, "doctor-later", "Please inspect.");
     let session = xws::session("pane-1-planner");
@@ -892,24 +878,18 @@ fn later_doctor_prompt_invalidates_an_old_active_mailbox_stop() {
     let server = Server::start(&f, "not json", true);
     let (entered, input_entered) = mpsc::channel();
     let (release, input_release) = mpsc::channel();
-    let blocked = BlockInput {
-        herdr: &f.herdr,
-        entered,
-        release: Mutex::new(input_release),
-    };
-    let base = f.runtime("w1", "pane-1-planner");
-    let runtime = namedrop::LifecycleRuntime {
-        state_directory: base.state_directory,
-        home_directory: base.home_directory,
-        agent_config: base.agent_config,
-        cwd: base.cwd,
-        workspace_id: base.workspace_id,
-        current_pane_id: base.current_pane_id,
-        session_socket_id: base.session_socket_id,
-        herdr: &blocked,
-        clock: base.clock,
-        ids: base.ids,
-    };
+    let gate = Arc::new(Mutex::new(Some((entered, input_release))));
+    f.herdr.space.answer_with(move |_, _, input| {
+        let held = matches!(input, SentInput::Prompt(_))
+            .then(|| gate.lock().unwrap().take())
+            .flatten();
+        if let Some((entered, release)) = held {
+            entered.send(()).unwrap();
+            release.recv().unwrap();
+        }
+        None
+    });
+    let runtime = f.runtime("w1", "pane-1-planner");
     let (responded, response) = mpsc::channel();
     thread::scope(|scope| {
         let doctor = scope.spawn(|| namedrop::request_doctor_assistance(&runtime, &session));
@@ -1042,9 +1022,288 @@ fn failed_interrupt_reports_committed_stop_with_an_unconfirmed_warning() {
     );
 }
 
-fn dismiss_path(attempt: &str) -> String {
+fn peek_path(alias: &str, endpoint: &str) -> String {
     let key = SpaceKey::of(&StateNamespace::for_space("socket-a", "w1"));
-    format!("/w/{}/attempts/{attempt}/dismiss", key.as_str())
+    format!(
+        "/w/{}/participants/{}/{endpoint}",
+        key.as_str(),
+        xws::address_id("w1", alias)
+    )
+}
+
+/// What the planner's pane was sent, in order: live-peek input and Stop's
+/// interrupt.
+fn planner_input(f: &Fixture) -> Vec<Value> {
+    fs::read_to_string(f.root.join("http-herdr-invocations.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap()["args"].clone())
+        .filter(|args| {
+            args[2] == "pane-1-planner" && matches!(args[1].as_str(), Some("run" | "send-keys"))
+        })
+        .collect()
+}
+
+/// The body of the one 503 live peek answers before it sends to the pane:
+/// SQLite was busy.
+const STORE_BUSY: &str = "Namedrop's state is busy, so nothing was sent.\n";
+
+/// A thread delivered to the planner's pane, the pane reporting `status`,
+/// and a dashboard serving it after the person sent `input` from live peek.
+fn peeked_turn(f: &Fixture, request: &str, status: &str, input: Value) -> (Value, Server, u16) {
+    let parent = plain_root(f, request, "Please inspect.");
+    f.status("pane-1-planner", status);
+    let server = Server::start(f, "not json", true);
+    // Live peek waits only 100 ms for SQLite, and the dashboard's workers
+    // write to it while the turn starts. A stream types nothing, so any of
+    // its 503s is retried. Input retries only the busy store's 503.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let live = loop {
+        let live = server.live(&peek_path("planner", "live"));
+        if live.status != 503 || Instant::now() >= deadline {
+            break live;
+        }
+        thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(live.status, 200, "{}", live.body);
+    let continuity =
+        serde_json::from_str::<Value>(live.body.lines().next().unwrap()).unwrap()["continuity"]
+            .clone();
+    let mut input = input;
+    input["continuity"] = continuity;
+    let status = loop {
+        let sent = planner_input(f).len();
+        let response = server.post(&peek_path("planner", "input"), &input.to_string(), &[]);
+        if response.status != 503 || response.body != STORE_BUSY || Instant::now() >= deadline {
+            break response.status;
+        }
+        assert_eq!(planner_input(f).len(), sent, "a busy store sent input");
+        thread::sleep(Duration::from_millis(50));
+    };
+    (parent, server, status)
+}
+
+/// Makes the planner's pane report `status` to the dashboard already
+/// running, as its turn starts or ends.
+fn report_status(f: &Fixture, status: &str) {
+    f.status("pane-1-planner", status);
+    let key = "pane list --workspace w1";
+    let reply = f
+        .herdr
+        .reply(&["pane", "list", "--workspace", "w1"])
+        .unwrap();
+    let file = f.root.join("http-herdr-responses.json");
+    let mut responses: Value = serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+    responses[key] = json!(reply);
+    let temporary = f.root.join("http-herdr-responses.json.next");
+    fs::write(&temporary, responses.to_string()).unwrap();
+    fs::rename(&temporary, &file).unwrap();
+    let temporary = f.root.join("http-herdr-reply.next");
+    fs::write(&temporary, reply).unwrap();
+    fs::rename(&temporary, f.root.join("http-herdr-replies").join(key)).unwrap();
+}
+
+fn stop(server: &Server, parent: &Value) -> Value {
+    let response = server.post(&control_path("w1", parent, "stop"), "{}", &[]);
+    assert_eq!(response.status, 200, "{}", response.body);
+    serde_json::from_str(&response.body).unwrap()
+}
+
+#[test]
+fn stop_after_a_live_peek_key_still_interrupts_the_turn() {
+    for (key, sent) in [("Enter", "enter"), ("ArrowDown", "down"), ("Escape", "esc")] {
+        let f = fixture();
+        let (parent, server, status) = peeked_turn(
+            &f,
+            "key-then-stop",
+            "working",
+            json!({"kind":"key","key":key}),
+        );
+        assert_eq!(status, 204, "{key}");
+        let receipt = stop(&server, &parent);
+        assert_eq!(
+            receipt["interrupted_pane_ids"],
+            json!(["pane-1-planner"]),
+            "{key}: {receipt}"
+        );
+        assert_eq!(receipt["warnings"], json!([]), "{key}: {receipt}");
+        assert_eq!(
+            planner_input(&f),
+            [
+                json!(["pane", "send-keys", "pane-1-planner", sent]),
+                json!(["agent", "send-keys", "pane-1-planner", "ctrl+c"]),
+            ],
+            "{key}"
+        );
+    }
+}
+
+#[test]
+fn stop_after_an_answer_to_the_delivery_s_blocked_question_still_interrupts_it() {
+    let f = fixture();
+    let (parent, server, sent) = peeked_turn(
+        &f,
+        "answer-then-stop",
+        "blocked",
+        json!({"kind":"text","text":"2"}),
+    );
+    assert_eq!(sent, 204);
+    report_status(&f, "working");
+    let receipt = stop(&server, &parent);
+    assert_eq!(
+        receipt["interrupted_pane_ids"],
+        json!(["pane-1-planner"]),
+        "the person's answer kept Stop from interrupting the delivery's turn: {receipt}"
+    );
+    assert_eq!(receipt["warnings"], json!([]), "{receipt}");
+    assert_eq!(
+        planner_input(&f),
+        [
+            json!(["pane", "run", "pane-1-planner", "2"]),
+            json!(["agent", "send-keys", "pane-1-planner", "ctrl+c"]),
+        ]
+    );
+}
+
+#[test]
+fn stop_after_a_line_that_starts_the_person_s_turn_warns_instead_of_interrupting_it() {
+    // A working agent takes the line as the person's next instruction.
+    for pane in ["idle", "working"] {
+        let f = fixture();
+        let (parent, server, status) = peeked_turn(
+            &f,
+            "line-then-stop",
+            pane,
+            json!({"kind":"text","text":"do this instead"}),
+        );
+        assert_eq!(status, 204, "{pane}");
+        report_status(&f, "working");
+        let receipt = stop(&server, &parent);
+        assert_eq!(
+            receipt["interrupted_pane_ids"],
+            json!([]),
+            "{pane}: Stop interrupted the person's turn: {receipt}"
+        );
+        assert_eq!(
+            receipt["warnings"],
+            json!([
+                "Could not confirm interruption of pane-1-planner after stopping the thread: the stopped thread no longer owns its pane input."
+            ]),
+            "{pane}"
+        );
+        assert_eq!(
+            planner_input(&f),
+            [json!(["pane", "run", "pane-1-planner", "do this instead"])],
+            "{pane}"
+        );
+    }
+}
+
+#[test]
+fn a_live_peek_send_that_fails_leaves_the_turn_to_stop() {
+    // An idle or working line takes the pane and hands it back. A blocked
+    // one never takes it.
+    for (pane, input) in [
+        ("idle", json!({"kind":"text","text":"refused line"})),
+        ("working", json!({"kind":"text","text":"refused line"})),
+        ("blocked", json!({"kind":"text","text":"refused line"})),
+        ("working", json!({"kind":"key","key":"Enter"})),
+    ] {
+        let f = fixture();
+        fs::write(
+            f.root.join("pane-input-error"),
+            r#"{"error":{"code":"invalid_input","message":"refused"}}"#,
+        )
+        .unwrap();
+        let (parent, server, status) = peeked_turn(&f, "failed-then-stop", pane, input.clone());
+        assert_eq!(status, 503, "{input}");
+        report_status(&f, "working");
+        assert_eq!(
+            planner_input(&f).len(),
+            1,
+            "{input}: the refused send was never tried"
+        );
+        fs::remove_file(f.root.join("pane-input-error")).unwrap();
+        let receipt = stop(&server, &parent);
+        assert_eq!(
+            receipt["interrupted_pane_ids"],
+            json!(["pane-1-planner"]),
+            "{input}: {receipt}"
+        );
+        assert_eq!(receipt["warnings"], json!([]), "{input}: {receipt}");
+        assert_eq!(
+            planner_input(&f).last(),
+            Some(&json!(["agent", "send-keys", "pane-1-planner", "ctrl+c"])),
+            "{input}"
+        );
+    }
+}
+
+fn dismiss_path() -> String {
+    let key = SpaceKey::of(&StateNamespace::for_space("socket-a", "w1"));
+    format!("/w/{}/attention/dismiss", key.as_str())
+}
+
+fn dismiss_body(ids: &[&str]) -> String {
+    json!({"confirmed": true, "ids": ids}).to_string()
+}
+
+fn warning_id(attempt: &str) -> String {
+    format!("attention-agent-disposition-{attempt}")
+}
+
+/// The cards the page shows as needing the person, and the space's health.
+fn needs_you(server: &Server) -> (Vec<String>, String) {
+    let frame = next_frame(&mut events(server), &mut String::new());
+    (
+        frame["attention"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["attention_id"].as_str().unwrap().to_owned())
+            .collect(),
+        frame["health"]["level"].as_str().unwrap().to_owned(),
+    )
+}
+
+fn human_dismissals(f: &Fixture) -> i64 {
+    f.count(
+        "SELECT count(*) FROM transition_facts
+         WHERE entity_kind = 'attention_item' AND transition_kind = 'dismissed'
+           AND actor_kind = 'human'",
+    )
+}
+
+/// What `delivery acknowledge` and `handoff acknowledge` record, which closes
+/// the warning it names.
+fn human_acknowledgements(f: &Fixture) -> i64 {
+    f.count(
+        "SELECT count(*) FROM transition_facts
+         WHERE entity_kind = 'attention_item' AND transition_kind = 'acknowledged'
+           AND actor_kind = 'human'",
+    )
+}
+
+fn open_item(f: &Fixture, kind: namedrop::AttentionSourceKind, id: &str, at: u64) {
+    StateStore::open(&f.state)
+        .unwrap()
+        .transaction(|tx| {
+            tx.open_attention_item(
+                &StateNamespace::for_space("socket-a", "w1"),
+                &namedrop::AttentionItemDraft {
+                    id: namedrop::AttentionItemId::new(id),
+                    source_kind: kind,
+                    source_id: format!("source-of-{id}"),
+                    summary: format!("{id} needs you."),
+                },
+                &namedrop::MutationAttribution::new(namedrop::ActorKind::Plugin, "test", at),
+            )
+        })
+        .unwrap();
+}
+
+fn now_ms() -> u64 {
+    namedrop::Clock::now_unix_ms(&namedrop::SystemClock)
 }
 
 /// The person's request to lead, settled with no answer, so it is warned
@@ -1064,7 +1323,8 @@ fn unanswered_ask(f: &Fixture) -> (Value, String) {
                 &StateNamespace::for_space("socket-a", "w1"),
                 &namedrop::DeliveryAttemptId::new(&attempt),
                 namedrop::DeliveryState::Settled,
-                &namedrop::MutationAttribution::new(namedrop::ActorKind::Plugin, "test", 43),
+                // Its warning opens now: Channels shows one for a week.
+                &namedrop::MutationAttribution::new(namedrop::ActorKind::Plugin, "test", now_ms()),
             )
         })
         .unwrap();
@@ -1078,47 +1338,58 @@ fn open_disposition_warnings(f: &Fixture) -> i64 {
     )
 }
 
+/// The warning the person could not clear before: the agent's session is
+/// live, so `delivery acknowledge` refuses. A dismiss takes the card away and
+/// leaves the request owed, so the answer still arrives.
 #[test]
-fn browser_dismiss_clears_a_warning_nobody_can_answer_and_only_then() {
+fn browser_dismiss_clears_a_warning_whose_agent_can_still_answer_and_the_late_answer_arrives() {
     let f = fixture();
-    let attempt = unanswered_request(&f);
-    assert_eq!(open_disposition_warnings(&f), 1);
+    let (asked, attempt) = unanswered_ask(&f);
+    let id = warning_id(&attempt);
     let server = Server::start(&f, "not json", false);
-    let path = dismiss_path(&attempt);
-
-    let unconfirmed = server.post(&path, "{}", &[]);
-    assert_eq!(unconfirmed.status, 409, "{}", unconfirmed.body);
-    let live = server.post(&path, r#"{"confirmed":true}"#, &[]);
-    assert_eq!(live.status, 409, "{}", live.body);
-    assert!(
-        live.body.contains("can still answer"),
-        "a live session's warning was dismissed: {}",
-        live.body
+    assert_eq!(
+        needs_you(&server),
+        (vec![id.clone()], "needs_you".to_owned())
     );
-    assert_eq!(open_disposition_warnings(&f), 1);
+    let path = dismiss_path();
 
-    cancel_and_remove(&f, "w1", "lead");
-    let dismissed = server.post(&path, r#"{"confirmed":true}"#, &[]);
+    let unconfirmed = server.post(&path, &json!({"ids": [id]}).to_string(), &[]);
+    assert_eq!(unconfirmed.status, 409, "{}", unconfirmed.body);
+    assert_eq!(
+        human_dismissals(&f),
+        0,
+        "an unconfirmed dismiss was recorded"
+    );
+
+    let dismissed = server.post(&path, &dismiss_body(&[&id]), &[]);
     assert_eq!(dismissed.status, 200, "{}", dismissed.body);
     let receipt: Value = serde_json::from_str(&dismissed.body).unwrap();
-    assert_eq!(receipt["attempt_id"], attempt.as_str());
-    assert_eq!(receipt["acknowledged"], true);
-    assert_eq!(open_disposition_warnings(&f), 0);
+    assert_eq!(receipt, json!({"dismissed": 1}));
+    let (cards, health) = needs_you(&server);
+    assert!(cards.is_empty(), "the card stayed: {cards:?}");
+    assert_ne!(health, "needs_you");
     assert_eq!(
-        f.count(
-            "SELECT count(*) FROM transition_facts
-             WHERE entity_kind = 'attention_item' AND transition_kind = 'acknowledged'
-               AND actor_kind = 'human'"
-        ),
+        human_dismissals(&f),
         1,
         "the dismiss was not recorded as the person's"
+    );
+    assert_eq!(
+        human_acknowledgements(&f),
+        0,
+        "a dismiss of a request its agent can still answer was recorded as an acknowledgement"
     );
     assert_eq!(
         f.count("SELECT count(*) FROM delivery_dispositions"),
         0,
         "a dismiss recorded a disposition"
     );
-    let replay = server.post(&path, r#"{"confirmed":true}"#, &[]);
+    assert_eq!(
+        open_disposition_warnings(&f),
+        1,
+        "the request is no longer owed, so its agent's answer would be dropped"
+    );
+
+    let replay = server.post(&path, &dismiss_body(&[&id]), &[]);
     assert_eq!(replay.status, 410, "{}", replay.body);
     assert!(
         replay.body.contains("no warning to dismiss"),
@@ -1126,42 +1397,124 @@ fn browser_dismiss_clears_a_warning_nobody_can_answer_and_only_then() {
         replay.body
     );
 
-    assert_eq!(
-        server
-            .post(
-                &dismiss_path("no-such-attempt"),
-                r#"{"confirmed":true}"#,
-                &[]
-            )
-            .status,
-        404
-    );
-}
-
-/// A card whose warning went because the answer came has nothing left to
-/// dismiss, which the browser is told apart from an agent that can still
-/// answer.
-#[test]
-fn browser_dismiss_of_an_answered_request_says_nothing_is_left() {
-    let f = fixture();
-    let (asked, attempt) = unanswered_ask(&f);
-    assert_eq!(open_disposition_warnings(&f), 1);
     agent_reply(
         &f,
-        "dismiss-answer",
+        "dismiss-late-answer",
         &asked,
         "pane-1-lead",
         "@operator The build passes.",
     )
     .unwrap();
-    assert_eq!(open_disposition_warnings(&f), 0);
+    assert_eq!(f.count("SELECT count(*) FROM delivery_dispositions"), 1);
+    assert_eq!(
+        open_disposition_warnings(&f),
+        0,
+        "the answer did not close it"
+    );
+    assert!(needs_you(&server).0.is_empty());
+}
+
+/// A warning nobody can answer is closed for good, as `delivery acknowledge`
+/// closes it.
+#[test]
+fn browser_dismiss_closes_a_warning_nobody_can_answer() {
+    let f = fixture();
+    let attempt = unanswered_request(&f);
+    cancel_and_remove(&f, "w1", "lead");
     let server = Server::start(&f, "not json", false);
-    let answered = server.post(&dismiss_path(&attempt), r#"{"confirmed":true}"#, &[]);
-    assert_eq!(answered.status, 410, "{}", answered.body);
+    let id = warning_id(&attempt);
+    let dismissed = server.post(&dismiss_path(), &dismiss_body(&[&id]), &[]);
+    assert_eq!(dismissed.status, 200, "{}", dismissed.body);
+    assert_eq!(open_disposition_warnings(&f), 0);
+    assert_eq!(human_acknowledgements(&f), 1);
+    assert_eq!(f.count("SELECT count(*) FROM delivery_dispositions"), 0);
+    let replay = server.post(&dismiss_path(), &dismiss_body(&[&id]), &[]);
+    assert_eq!(replay.status, 410, "{}", replay.body);
+}
+
+/// Every kind of card goes with one post, each recorded, and only the cards
+/// the person named.
+#[test]
+fn browser_dismiss_all_clears_every_kind_named_and_leaves_a_card_that_came_later() {
+    use namedrop::AttentionSourceKind::{
+        ContextGrant, Coordination, DeliveryAttempt, IntegrationRegistration, PaneBinding,
+    };
+    let f = fixture();
+    let attempt = unanswered_request(&f);
+    let at = now_ms();
+    for (kind, id) in [
+        (Coordination, "card-coordination"),
+        (DeliveryAttempt, "card-delivery"),
+        (PaneBinding, "card-pane"),
+        (IntegrationRegistration, "card-integration"),
+        (ContextGrant, "card-grant"),
+    ] {
+        open_item(&f, kind, id, at);
+    }
+    let server = Server::start(&f, "not json", false);
+    let (mut seen, health) = needs_you(&server);
+    seen.sort();
+    let mut expected = vec![
+        warning_id(&attempt),
+        "card-coordination".to_owned(),
+        "card-delivery".to_owned(),
+        "card-grant".to_owned(),
+        "card-integration".to_owned(),
+        "card-pane".to_owned(),
+    ];
+    expected.sort();
+    assert_eq!(seen, expected);
+    assert_eq!(health, "needs_you");
+
+    open_item(&f, Coordination, "card-later", at);
+    let ids: Vec<&str> = seen.iter().map(String::as_str).collect();
+    let dismissed = server.post(&dismiss_path(), &dismiss_body(&ids), &[]);
+    assert_eq!(dismissed.status, 200, "{}", dismissed.body);
+    assert_eq!(
+        serde_json::from_str::<Value>(&dismissed.body).unwrap(),
+        json!({"dismissed": 6})
+    );
+    assert_eq!(human_dismissals(&f), 6);
+    assert_eq!(human_acknowledgements(&f), 0);
+    assert_eq!(
+        needs_you(&server),
+        (vec!["card-later".to_owned()], "needs_you".to_owned()),
+        "a card the person never saw went with the rest"
+    );
+    assert_eq!(f.count("SELECT count(*) FROM delivery_dispositions"), 0);
+
+    let nothing = server.post(&dismiss_path(), &dismiss_body(&[]), &[]);
+    assert_eq!(nothing.status, 409, "{}", nothing.body);
+    let unknown = server.post(&dismiss_path(), &dismiss_body(&["no-such-card"]), &[]);
+    assert_eq!(unknown.status, 410, "{}", unknown.body);
+}
+
+/// Channels shows a stored warning for a week. An older one is not red any
+/// more, and Doctor still has it.
+#[test]
+fn a_warning_older_than_a_week_no_longer_needs_the_person() {
+    use namedrop::AttentionSourceKind::PaneBinding;
+    let f = fixture();
+    let week = 7 * 24 * 60 * 60 * 1_000;
+    let at = now_ms();
+    open_item(&f, PaneBinding, "card-old", at - week - 60_000);
+    let server = Server::start(&f, "not json", false);
+    let (cards, health) = needs_you(&server);
     assert!(
-        answered.body.contains("no warning to dismiss"),
-        "{}",
-        answered.body
+        cards.is_empty(),
+        "a warning over a week old is shown: {cards:?}"
+    );
+    assert_ne!(health, "needs_you");
+    assert_eq!(
+        f.count("SELECT count(*) FROM attention_items WHERE resolved_at_ms IS NULL"),
+        1,
+        "the old warning was closed, not left for Doctor"
+    );
+
+    open_item(&f, PaneBinding, "card-recent", at - week + 600_000);
+    assert_eq!(
+        needs_you(&server),
+        (vec!["card-recent".to_owned()], "needs_you".to_owned())
     );
 }
 
@@ -1169,10 +1522,11 @@ fn browser_dismiss_of_an_answered_request_says_nothing_is_left() {
 fn browser_dismiss_enforces_message_post_auth_and_workspace_scope() {
     let f = fixture();
     let attempt = unanswered_request(&f);
-    cancel_and_remove(&f, "w1", "lead");
     let server = Server::start(&f, "not json", false);
-    let path = dismiss_path(&attempt);
-    let body = r#"{"confirmed":true}"#;
+    let path = dismiss_path();
+    let id = warning_id(&attempt);
+    let body = dismiss_body(&[&id]);
+    let body = body.as_str();
     assert_eq!(server.request("POST", &path, &[], body).status, 401);
     assert_eq!(
         server
@@ -1188,16 +1542,17 @@ fn browser_dismiss_enforces_message_post_auth_and_workspace_scope() {
         assert_eq!(server.post(&path, body, &headers).status, 403);
     }
     let other = SpaceKey::of(&StateNamespace::for_space("socket-a", "w2"));
-    assert_eq!(
-        server
-            .post(
-                &format!("/w/{}/attempts/{attempt}/dismiss", other.as_str()),
-                body,
-                &[]
-            )
-            .status,
-        404,
-        "another workspace dismissed this one's warning"
+    let elsewhere = server.post(
+        &format!("/w/{}/attention/dismiss", other.as_str()),
+        body,
+        &[],
     );
-    assert_eq!(open_disposition_warnings(&f), 1);
+    assert!(
+        matches!(elsewhere.status, 404 | 410),
+        "another workspace dismissed this one's warning: {} {}",
+        elsewhere.status,
+        elsewhere.body
+    );
+    assert_eq!(human_dismissals(&f), 0);
+    assert_eq!(needs_you(&server).0, [id]);
 }

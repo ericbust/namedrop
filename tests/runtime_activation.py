@@ -1,0 +1,661 @@
+"""U4 activation contracts, fixture differential, and release upgrade lane.
+
+Run directly for the local checks. The upgrade lane is exposed through
+update_lifecycle.py --upgrade-from TAG and uses NAMEDROP_TEST_PREVIOUS_BINARY
+and NAMEDROP_TEST_BINARY built from that tag and this checkout respectively.
+"""
+import contextlib
+import fcntl
+import hashlib
+import io
+import json
+import os
+from pathlib import Path
+import shutil
+import socket as socketlib
+import sqlite3
+import stat
+import subprocess
+import sys
+import tarfile
+import tempfile
+import unittest
+from unittest import mock
+
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO / 'scripts'))
+import runtime
+import update
+
+HOST = '''#!{python}
+import json, os, pathlib, sys
+args = sys.argv[1:]
+base = pathlib.Path(os.environ['FIXTURE'])
+with (base/'calls').open('a') as log: log.write(json.dumps(args)+'\\n')
+def out(value): print(json.dumps({{'result':value}}))
+pane = dict(pane_id='p', workspace_id='w', tab_id='t', terminal_id='terminal')
+key = args[:2]
+if key == ['session','list']: print(json.dumps({{'sessions':[]}}))
+elif key == ['pane','list']: out({{'panes':[pane]}})
+elif key == ['pane','process-info']:
+    out({{'process_info':dict(pane_id='p',shell_pid=int(os.environ['SHELLPID']),
+          foreground_process_group_id=int(os.environ['SHELLPID']),foreground_processes=[])}})
+elif key == ['worktree','list']: out({{'worktrees':[dict(path=str(base/'workspace'),open_workspace_id='w')]}})
+elif key == ['workspace','list']: out({{'workspaces':[dict(workspace_id='w',label='fixture')]}})
+elif key == ['workspace','get']: out({{'workspace':dict(workspace_id='w',label='fixture')}})
+elif key == ['tab','get']: out({{'tab':dict(tab_id='t',label='fixture')}})
+elif key == ['status','server']: print('running: yes\\nsocket: '+os.environ['HERDR_SOCKET_PATH'])
+else: print('{{}}')
+'''
+
+
+def environment(base):
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(('HERDR_', 'REX_', 'CODEX_', 'CLAUDE', 'NAMEDROP_', 'GIT_CONFIG_'))}
+    tools = base / 'tools'
+    tools.mkdir()
+    host = tools / 'herdr'
+    host.write_text(HOST.format(python=sys.executable))
+    host.chmod(0o700)
+    (base / 'home').mkdir()
+    (base / 'state').mkdir()
+    (base / 'workspace').mkdir()
+    env.update(HOME=str(base / 'home'), PATH=str(tools) + ':/usr/bin:/bin',
+               XDG_CONFIG_HOME=str(base / 'home/.config'), XDG_STATE_HOME=str(base / 'home/.local/state'),
+               XDG_RUNTIME_DIR=str(base / 'run'), CODEX_HOME=str(base / 'home/.codex'),
+               CLAUDE_CONFIG_DIR=str(base / 'home/.claude'), FIXTURE=str(base), SHELLPID=str(os.getpid()),
+               HERDR_BIN_PATH=str(host), HERDR_SOCKET_PATH=str(base / 'herdr.sock'),
+               HERDR_PANE_ID='p', HERDR_WORKSPACE_ID='w', HERDR_PLUGIN_STATE_DIR=str(base / 'state'))
+    return env
+
+
+def schema(path):
+    with sqlite3.connect(path) as db:
+        for file in ('src/store.rs', 'src/store/coordination.rs'):
+            sql = (REPO / file).read_text().split('const SCHEMA: &str = r#"', 1)[1].split('"#;', 1)[0]
+            db.executescript(sql)
+        db.execute('PRAGMA user_version=8')
+
+
+@contextlib.contextmanager
+def rex_server():
+    """A listening Unix socket, as a running Rex server's, under /tmp so the
+    path fits sun_path."""
+    directory = tempfile.mkdtemp(prefix='nd-u4-', dir='/tmp')
+    path = os.path.join(directory, 'rex.sock')
+    try:
+        with contextlib.closing(socketlib.socket(socketlib.AF_UNIX, socketlib.SOCK_STREAM)) as listener:
+            listener.bind(path)
+            listener.listen(16)
+            yield path
+    finally:
+        shutil.rmtree(directory)
+
+
+def rex_agent(path, endpoint, pane, *, alias, runtime, status):
+    """An active binding of `pane` on `endpoint` with an alias, a registration
+    and an observed session, the rows an agent's hooks leave in the store."""
+    address, session = pane + '-address', pane + '-session'
+    with contextlib.closing(sqlite3.connect(path)) as db, db:
+        db.execute("INSERT INTO pane_addresses (session_socket_id,worktree_id,address_id,role_id,retired,collaboration_disabled,created_at_ms) VALUES (?, 's', ?, 'role', 0, 0, 0)", (endpoint, address))
+        db.execute("INSERT INTO pane_bindings VALUES (?, 's', ?, ?, ?, 1, 'tab', 5, NULL)",
+                   (endpoint, pane + '-binding', address, pane))
+        db.execute("INSERT INTO alias_claims VALUES (?, 's', ?, ?, 'active', NULL)", (endpoint, alias, address))
+        db.execute("INSERT INTO integration_registrations VALUES (?, 's', ?, ?, ?, ?, 'v', 'p', 1)",
+                   (endpoint, pane + '-registration', address, session, runtime))
+        db.execute("INSERT INTO agent_session_observations VALUES (?, 's', ?, ?, ?, ?, 5)",
+                   (endpoint, pane + '-observation', address, session, status))
+
+
+def confirm(answer):
+    """update.confirm_when_ready's output, answering `answer` to its prompt."""
+    shown = io.StringIO()
+    with mock.patch.object(update, 'registration', return_value='installed'), \
+            mock.patch('builtins.input', return_value=answer), contextlib.redirect_stdout(shown):
+        update.confirm_when_ready('installed')
+    return shown.getvalue()
+
+
+def archive(ref, destination):
+    repository = os.environ.get('NAMEDROP_TEST_REPOSITORY', str(REPO))
+    contents = subprocess.check_output(['git', '-C', repository, 'archive', ref])
+    with tarfile.open(fileobj=io.BytesIO(contents)) as source:
+        source.extractall(destination, filter='data')
+
+
+def git(*args):
+    repository = os.environ.get('NAMEDROP_TEST_REPOSITORY', str(REPO))
+    result = subprocess.run(['git', '-C', repository, *args], capture_output=True, text=True)
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def before_this_file():
+    """The parent of the commit that added this file: the scripts as U4
+    found them. None in a clone without it, such as a shallow one."""
+    added = (git('log', '--diff-filter=A', '--format=%H', '--', 'tests/runtime_activation.py') or '').split()
+    return added and git('rev-parse', '--verify', '--quiet', added[-1] + '^{commit}^') or None
+
+
+def release_tags():
+    repository = os.environ.get('NAMEDROP_TEST_REPOSITORY', str(REPO))
+    result = subprocess.run(['git', '-C', repository, 'tag', '--list', 'v*', '--sort=-v:refname'],
+                            capture_output=True, text=True)
+    return result.stdout.split() if result.returncode == 0 else []
+
+
+# Run in its own interpreter: the release's update.py and runtime.py, with an
+# installed checkout of that release, a published runtime, and a target ref
+# that holds the release's contract and manifest and the given run.sh.
+RELEASED_UPDATER = r'''
+import json, os, shutil, subprocess, sys
+from pathlib import Path
+old, run_sh, work = map(Path, sys.argv[1:4])
+def git(root, *args):
+    return subprocess.check_output(['git', '-C', str(root), *args], text=True).strip()
+installed = work / 'installed'
+shutil.copytree(old / 'scripts', installed / 'scripts')
+for name in ('runtime.json', 'herdr-plugin.toml'):
+    shutil.copyfile(old / name, installed / name)
+sys.path.insert(0, str(installed / 'scripts'))
+import update, runtime
+state = Path(os.environ['HERDR_PLUGIN_STATE_DIR'])
+release = state / 'runtime/releases' / ('a' * 64)
+release.mkdir(parents=True)
+shutil.copyfile(old / 'runtime.json', release / 'runtime.json')
+(release / 'namedrop').write_text('#!/bin/sh\nexit 0\n')
+(release / 'namedrop').chmod(0o700)
+(state / 'runtime/current').symlink_to(Path('releases') / ('a' * 64))
+(state / 'runtime/namedrop').write_text(runtime.LAUNCHER)
+(state / 'runtime/namedrop').chmod(0o700)
+source = work / 'source'
+(source / 'scripts').mkdir(parents=True)
+git(source, 'init', '--quiet')
+for name in ('runtime.json', 'herdr-plugin.toml'):
+    shutil.copyfile(old / name, source / name)
+shutil.copyfile(run_sh, source / 'scripts/run.sh')
+git(source, 'add', '.')
+git(source, '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--quiet', '-m', 'target')
+git(source, 'tag', 'target')
+git(work, 'clone', '--quiet', '--bare', str(source), str(work / 'origin.git'))
+git(work / 'origin.git', 'config', 'uploadpack.allowFilter', 'true')
+(work / 'inspect').mkdir()
+target = update.prepare_target({'plugin_root': str(installed), 'source': {
+    'owner': 'fixture', 'repo': 'source', 'requested_ref': 'target', 'managed_path': str(installed)}},
+    work / 'inspect')
+print(json.dumps(target['live']))
+'''
+
+
+def invoke(root, env, *, explicit=True):
+    args = [sys.executable, str(root / 'scripts/runtime.py'), str(root)]
+    if explicit:
+        args += ['--state-dir', env['HERDR_PLUGIN_STATE_DIR'], '--verify', 'activate']
+    return subprocess.run([*args, 'activate', '--input-json', '{"confirmed":true}'],
+                          env=env, cwd=Path(env['FIXTURE']) / 'workspace', capture_output=True, text=True, timeout=60)
+
+
+def fixture_release(root, *, number=1, state_schema=8, failure=False):
+    (root / 'bin').mkdir(exist_ok=True)
+    contract = dict(json.loads((REPO / 'runtime.json').read_text()), state_schema=state_schema,
+                    command_gate=0, live_migrate_from=[])
+    (root / 'runtime.json').write_text(json.dumps(contract))
+    executable = root / 'bin/namedrop'
+    executable.write_text(f'''#!{sys.executable}
+import json, os, sqlite3, sys
+if sys.argv[1:] == ['--runtime-info']:
+    print({json.dumps(contract)!r})
+else:
+    with sqlite3.connect(os.environ['HERDR_PLUGIN_STATE_DIR']+'/namedrop.sqlite3') as db:
+        db.execute('PRAGMA user_version={state_schema}')
+    print(json.dumps(dict(status='ok',operation='activate',data=dict(activated=True,
+        space_id='w',state_directory=os.environ['HERDR_PLUGIN_STATE_DIR'],
+        integration_packages={{'codex':{{'installed':True}}}},
+        agent_integration_hook_activation={{'codex':{{'cache_current':True,'migration_ready':True}}}}))))
+    sys.exit({7 if failure else 0})
+# release {number}
+''')
+    executable.chmod(0o700)
+
+
+class ActivationChecks(unittest.TestCase):
+    def test_explicit_state_and_owner(self):
+        with tempfile.TemporaryDirectory(prefix='namedrop-u4-') as directory:
+            base = Path(directory)
+            env = environment(base)
+            root = base / 'checkout'
+            shutil.copytree(REPO / 'scripts', root / 'scripts')
+            fixture_release(root)
+            chosen = base / 'chosen'
+            chosen.mkdir()
+            args = [sys.executable, str(root / 'scripts/runtime.py'), str(root),
+                    '--state-dir', str(chosen), '--verify', 'activate', 'activate']
+            result = subprocess.run(args, env=env, cwd=base, capture_output=True, text=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout)['data']['state_directory'], str(chosen))
+            self.assertEqual((chosen / 'runtime/owner').read_text(), 'herdr\n')
+            self.assertFalse(any((base / 'state').iterdir()))
+            selected = os.readlink(chosen / 'runtime/current')
+            fixture_release(root, number=2)
+            foreign = base / 'foreign-owner'
+            foreign.write_text('preserve')
+            owner = chosen / 'runtime/owner'
+            owner.unlink()
+            owner.symlink_to(foreign)
+            failed = subprocess.run(args, env=env, cwd=base, capture_output=True, text=True, timeout=60)
+            self.assertEqual(failed.returncode, 2, failed.stderr)
+            self.assertIn('Runtime file has an unexpected type', failed.stderr)
+            self.assertEqual(os.readlink(chosen / 'runtime/current'), selected)
+            self.assertEqual(foreign.read_text(), 'preserve')
+            owner.unlink()
+            misspelled = [*args[:5], '--verifiy', *args[6:]]
+            refused = subprocess.run(misspelled, env=env, cwd=base, capture_output=True, text=True, timeout=60)
+            self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
+                             (2, '', 'Namedrop runtime activation stopped: Usage: runtime.py ROOT '
+                                     '[--state-dir DIR --verify activate] [ARGUMENT...]\n'))
+            self.assertEqual(os.readlink(chosen / 'runtime/current'), selected)
+            self.assertFalse(owner.exists())
+            args[args.index('activate')] = 'unknown'
+            rejected = subprocess.run(args, env=env, cwd=base, capture_output=True, text=True, timeout=60)
+            self.assertEqual((rejected.returncode, rejected.stdout, rejected.stderr),
+                             (2, '', 'Namedrop runtime activation stopped: Unsupported runtime verification: unknown\n'))
+            self.assertEqual(os.readlink(chosen / 'runtime/current'), selected)
+            self.assertFalse(owner.exists())
+
+    def test_owner_is_written_under_the_lease_after_the_switch(self):
+        with tempfile.TemporaryDirectory(prefix='namedrop-u4-') as directory:
+            base = Path(directory)
+            env = environment(base)
+            root = base / 'checkout'
+            shutil.copytree(REPO / 'scripts', root / 'scripts')
+            fixture_release(root)
+            runtime_directory = base / 'state/runtime'
+            owner = runtime_directory / 'owner'
+            # A publish that stops at the switch leaves no owner.
+            runtime_directory.mkdir(mode=0o700)
+            (runtime_directory / 'next').symlink_to('releases/foreign')
+            refused = invoke(root, env, explicit=False)
+            self.assertEqual(refused.returncode, 2, refused.stderr)
+            self.assertIn('A foreign runtime publication entry needs inspection', refused.stderr)
+            self.assertFalse(owner.exists() or owner.is_symlink())
+            (runtime_directory / 'next').unlink()
+            held = []
+            write_owned = runtime.write_owned
+            def checked(path, contents, mode):
+                if path == owner:
+                    with open(runtime_directory / 'packages.lock') as other:
+                        try:
+                            fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            held.append(False)
+                        except BlockingIOError:
+                            held.append(True)
+                    held.append(os.readlink(runtime_directory / 'current'))
+                write_owned(path, contents, mode)
+            with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(runtime, 'write_owned', checked), \
+                    contextlib.redirect_stdout(io.StringIO()) as shown:
+                self.assertEqual(runtime.activate(root.resolve(), ['activate']), 0)
+            self.assertEqual(json.loads(shown.getvalue())['status'], 'ok')
+            self.assertEqual(held, [True, os.readlink(runtime_directory / 'current')])
+            self.assertEqual((owner.read_text(), stat.S_IMODE(owner.stat().st_mode)), ('herdr\n', 0o600))
+
+    def test_run_sh_shape_means_herdr_state_and_activate(self):
+        with tempfile.TemporaryDirectory(prefix='namedrop-u4-') as directory:
+            base = Path(directory)
+            env = environment(base)
+            root = base / 'checkout'
+            shutil.copytree(REPO / 'scripts', root / 'scripts')
+            fixture_release(root)
+            result = invoke(root, env, explicit=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout)['data']['state_directory'], env['HERDR_PLUGIN_STATE_DIR'])
+            self.assertEqual((base / 'state/runtime/owner').read_text(), 'herdr\n')
+
+    def test_run_sh_is_the_released_one(self):
+        # Every released updater calls an update live only when the new
+        # scripts/run.sh is byte for byte the installed one (prepare_target),
+        # so an edit makes the update to that release a session refresh. This
+        # digest is run.sh in v1.7.9 through v1.11.1; change it only with a
+        # release that is meant to need a session refresh.
+        self.assertEqual(hashlib.sha256((REPO / 'scripts/run.sh').read_bytes()).hexdigest(),
+                         'f71ed068a60e14590a1d056b5fe7dd8ce96ec8f229c0dab3cdc9896c047fadc7')
+
+    def test_runtime_json_is_the_released_one(self):
+        # This is runtime.json in v1.11.1, byte for byte. On macOS a running
+        # process of an older release reads the new release's runtime.json
+        # through runtime/current, compares it with its own copy, and stops
+        # working when they differ. A new capability goes in --capabilities.
+        self.assertEqual(
+            (REPO / 'runtime.json').read_bytes(),
+            b'{"runtime_protocol":1,"live_upgrade_epoch":1,"state_schema":8,"collaboration_protocol":"collab/v1",'
+            b'"command_gate":1,"live_migrate_from":[3,4,5,6,7],"helper_gate":1}\n',
+            'Change runtime.json only with a state_schema migration, which makes old Channels servers hand off and '
+            'old helpers refuse the store: on macOS a running older process reads it through runtime/current and '
+            'stops working when it differs from its own copy (docs/releasing.md#live-update-compatibility).')
+
+    def test_scripts_import_no_socket_module(self):
+        # macOS's system Python caches each newly imported module under HOME;
+        # update.py imports socket only when a Rex session needs checking.
+        result = subprocess.run([sys.executable, '-I', '-B', '-c', 'import sys; sys.path.insert(0, sys.argv[1]); '
+                                 'import runtime, update; print("socket" in sys.modules)', str(REPO / 'scripts')],
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual((result.returncode, result.stdout), (0, 'False\n'), result.stderr)
+
+    def test_run_sh_passes_the_pane_and_arguments(self):
+        with tempfile.TemporaryDirectory(prefix='namedrop-u4-') as directory:
+            base = Path(directory)
+            env = environment(base)
+            capture = base / 'tools/python3'
+            capture.write_text(f'#!{sys.executable}\nimport json,sys\nprint(json.dumps(sys.argv[1:]))\n')
+            capture.chmod(0o700)
+            (base / 'tools/dirname').symlink_to('/usr/bin/dirname')
+            result = subprocess.run(['/bin/sh', str(REPO / 'scripts/run.sh'), 'activate', '--input-json',
+                                     '{"confirmed":true}'], env=dict(env, PATH=str(base / 'tools')),
+                                    capture_output=True, text=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            args = json.loads(result.stdout)
+            # The shape every release's run.sh passes; runtime.py reads it as
+            # --state-dir "$HERDR_PLUGIN_STATE_DIR" --verify activate.
+            self.assertEqual(args[1:], [str(REPO), '--herdr-pane', 'p', 'activate', '--input-json',
+                                        '{"confirmed":true}'])
+
+    def test_released_updaters_call_this_update_live(self):
+        # A released updater calls an update live only when the target's
+        # run.sh is byte for byte the installed one (scripts/update.py's
+        # prepare_target), so run.sh must not change.
+        refs = os.environ.get('NAMEDROP_TEST_RELEASE_REFS', '').split() or release_tags()[:1]
+        if not refs:
+            self.skipTest('no release tag in this clone')
+        for ref in refs:
+            with self.subTest(ref=ref), tempfile.TemporaryDirectory(prefix='namedrop-u4-live-') as directory:
+                base = Path(directory)
+                old = base / 'old'
+                archive(ref, old)
+                changed = base / 'changed-run.sh'
+                changed.write_text((REPO / 'scripts/run.sh').read_text() + '# changed\n')
+                verdicts = {}
+                for name, run_sh in (('head', REPO / 'scripts/run.sh'), ('changed', changed)):
+                    work = base / name
+                    profile = base / (name + '-profile')
+                    profile.mkdir()
+                    env = environment(profile)
+                    remote = work / 'origin.git'
+                    env.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull, GIT_ALLOW_PROTOCOL='file',
+                               GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0=f'url.{remote.as_uri()}.insteadOf',
+                               GIT_CONFIG_VALUE_0='https://github.com/fixture/source.git')
+                    result = subprocess.run([sys.executable, '-I', '-c', RELEASED_UPDATER, str(old), str(run_sh),
+                                             str(work)], env=env, capture_output=True, text=True, timeout=120)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    verdicts[name] = json.loads(result.stdout)
+                self.assertEqual(verdicts, {'head': True, 'changed': False})
+
+    def test_rex_preflight(self):
+        with tempfile.TemporaryDirectory(prefix='namedrop-u4-') as directory, rex_server() as listening:
+            base = Path(directory)
+            env = environment(base)
+            path = base / 'state/namedrop.sqlite3'
+            with mock.patch.dict(os.environ, env, clear=True):
+                with self.assertRaisesRegex(RuntimeError, 'Cannot verify durable collaboration state'):
+                    update.preflight()
+            schema(path)
+            socket = 'rex:' + listening
+            rex_agent(path, socket, 'block', alias='alpha', runtime='claude-code', status='idle')
+            with contextlib.closing(sqlite3.connect(path)) as db, db:
+                # The kind is the session's own registration, and the status
+                # its latest observation.
+                db.execute("INSERT INTO integration_registrations VALUES (?, 's', 'older', 'block-address', "
+                           "'older-session', 'codex', 'v', 'p', 1)", (socket,))
+                db.execute("INSERT INTO agent_session_observations VALUES (?, 's', 'newer', 'block-address', "
+                           "'block-session', 'working', 6)", (socket,))
+            # A Herdr binding with an observed session: Herdr's own survey
+            # reports it, so the store's copy must not count a second time.
+            rex_agent(path, listening, 'herdr-pane', alias='beta', runtime='claude-code', status='idle')
+            with mock.patch.dict(os.environ, env, clear=True):
+                state, agents = update.preflight()
+                self.assertEqual(state['session_count'], 1)
+                self.assertEqual(state['stopped_rex_servers'], [])
+                self.assertEqual([(p['_socket'], p['agent_session']['value'], p['label'], p['agent'], p['agent_status'])
+                                  for p in agents], [(socket, 'block-session', 'alpha', 'claude', 'working')])
+                self.assertFalse(update.ready(state, agents))
+                with mock.patch.object(update, 'structured', return_value={'result': {'workspaces': [], 'tabs': []}}) as host:
+                    metadata = update.labels(agents)
+                    self.assertEqual([call.kwargs['socket'] for call in host.call_args_list],
+                                     [env['HERDR_SOCKET_PATH']] * 2)
+                shown = io.StringIO()
+                with contextlib.redirect_stdout(shown):
+                    update.show_agents(agents, metadata)
+                self.assertIn(f'→ alpha (claude, working; block) [Rex: {socket}]', shown.getvalue())
+                rt = base / 'state/runtime'
+                rt.mkdir()
+                migration = rt / 'legacy-sessions.json'
+                migration.write_text(json.dumps(dict(sessions=[], codex_ready=True, packages_ready=True)))
+                live_state, live_agents = update.preflight(live=True)
+                self.assertEqual(live_state['session_count'], 1)
+                self.assertTrue(update.ready(live_state, live_agents))
+                migration.write_text(json.dumps(dict(sessions=[[socket, 'block-session']],
+                                                     codex_ready=True, packages_ready=True)))
+                self.assertFalse(update.ready(*update.preflight(live=True)))
+                # Codex's setup still pending blocks only Codex sessions.
+                migration.write_text(json.dumps(dict(sessions=[], codex_ready=False, packages_ready=True)))
+                self.assertTrue(update.ready(*update.preflight(live=True)))
+                with sqlite3.connect(path) as db:
+                    db.execute("UPDATE integration_registrations SET runtime='codex' WHERE agent_session_id='block-session'")
+                self.assertFalse(update.ready(*update.preflight(live=True)))
+                with sqlite3.connect(path) as db:
+                    db.execute("INSERT INTO agent_session_observations VALUES (?, 's','ended','block-address','','unknown',7)", (socket,))
+                self.assertTrue(update.ready(*update.preflight()))
+                with sqlite3.connect(path) as db:
+                    db.execute("DELETE FROM agent_session_observations WHERE observation_id='ended'")
+                    db.execute('UPDATE pane_bindings SET active=0')
+                self.assertTrue(update.ready(*update.preflight()))
+                with sqlite3.connect(path) as db:
+                    db.execute('UPDATE pane_bindings SET active=1, bound_at_ms=7')
+                self.assertTrue(update.ready(*update.preflight()))
+                with sqlite3.connect(path) as db:
+                    db.execute('UPDATE pane_bindings SET bound_at_ms=5')
+                    db.execute('UPDATE pane_addresses SET retired=1')
+                self.assertTrue(update.ready(*update.preflight()))
+
+    def test_rex_preflight_leaves_out_stopped_servers(self):
+        with tempfile.TemporaryDirectory(prefix='namedrop-u4-') as directory, rex_server() as listening:
+            base = Path(directory)
+            env = environment(base)
+            path = base / 'state/namedrop.sqlite3'
+            schema(path)
+            refused = str(Path(listening).with_name('stopped.sock'))
+            with contextlib.closing(socketlib.socket(socketlib.AF_UNIX, socketlib.SOCK_STREAM)) as stopped:
+                stopped.bind(refused)  # the file stays, and nothing listens on it
+            missing = str(Path(listening).with_name('missing.sock'))
+            for endpoint in (refused, missing):
+                rex_agent(path, 'rex:' + endpoint, 'block', alias='alpha', runtime='claude-code', status='idle')
+            with mock.patch.dict(os.environ, env, clear=True):
+                state, agents = update.preflight()
+                self.assertEqual((state['session_count'], agents), (0, []))
+                self.assertEqual(state['stopped_rex_servers'], sorted(['rex:' + refused, 'rex:' + missing]))
+                self.assertTrue(update.ready(state, agents))
+                notices = ''.join(f'  Not counted: the Rex server at rex:{endpoint} is not running, so its sessions '
+                                  'have ended.\n' for endpoint in sorted([refused, missing]))
+                # The updater names them whether or not they decided the outcome.
+                self.assertIn('\n' + notices + '\n  Ready to install.\n', confirm('n'))
+                rex_agent(path, 'rex:' + listening, 'block', alias='alpha', runtime='claude-code', status='idle')
+                state, agents = update.preflight()
+                self.assertEqual([p['_socket'] for p in agents], ['rex:' + listening])
+                self.assertFalse(update.ready(state, agents))
+                waiting = confirm('2')
+                self.assertIn(notices, waiting)
+                self.assertNotIn('Ready to install.', waiting)
+
+    def test_runtime_preflight_names_rex_servers_it_left_out(self):
+        with tempfile.TemporaryDirectory(prefix='namedrop-u4-') as directory, rex_server() as listening:
+            base = Path(directory)
+            env = environment(base)
+            root = base / 'checkout'
+            shutil.copytree(REPO / 'scripts', root / 'scripts')
+            fixture_release(root)
+            self.assertEqual(invoke(root, env, explicit=False).returncode, 0)
+            path = base / 'state/namedrop.sqlite3'
+            path.unlink()
+            schema(path)
+            missing = str(Path(listening).with_name('missing.sock'))
+            rex_agent(path, 'rex:' + missing, 'block', alias='alpha', runtime='claude-code', status='idle')
+            fixture_release(root, number=2, state_schema=9)  # a session refresh, which runs the preflight
+            result = invoke(root, env, explicit=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(f'Not counted: the Rex server at rex:{missing} is not running, so its sessions have ended.\n',
+                          result.stderr)
+
+    def test_rex_preflight_counts_servers_it_cannot_check(self):
+        # Only a refused or missing socket shows a stopped server. A denied
+        # one, a timeout or a path that is not a Unix socket may hide a live
+        # server, so its sessions count, and the updater says why.
+        with tempfile.TemporaryDirectory(prefix='namedrop-u4-') as directory, rex_server() as listening:
+            base = Path(directory)
+            env = environment(base)
+            path = base / 'state/namedrop.sqlite3'
+            schema(path)
+            locked = Path(listening).with_name('locked')
+            locked.mkdir()
+            denied = str(locked / 'rex.sock')
+            long = str(Path(listening).with_name('x' * 110 + '.sock'))
+            with contextlib.ExitStack() as stack:
+                held = stack.enter_context(contextlib.closing(socketlib.socket(socketlib.AF_UNIX, socketlib.SOCK_STREAM)))
+                held.bind(denied)
+                held.listen(16)
+                locked.chmod(0)
+                stack.callback(locked.chmod, 0o700)
+                expected = [('rex:' + long, None), ('rex:relative/rex.sock', 'not a Unix socket path')]
+                if os.geteuid() != 0:  # root enters a mode-000 directory
+                    expected.append(('rex:' + denied, 'Permission denied'))
+                for number, (endpoint, _) in enumerate(expected):
+                    rex_agent(path, endpoint, f'block{number}', alias=f'alpha{number}', runtime='claude-code', status='idle')
+                with mock.patch.dict(os.environ, env, clear=True):
+                    state, agents = update.preflight()
+                    self.assertEqual(state['stopped_rex_servers'], [])
+                    unchecked = dict(state['unchecked_rex_servers'])
+                    self.assertEqual(sorted(unchecked), sorted(endpoint for endpoint, _ in expected))
+                    for endpoint, why in expected:
+                        if why is not None:
+                            self.assertEqual(unchecked[endpoint], why)
+                    self.assertEqual(sorted(p['_socket'] for p in agents), sorted(unchecked))
+                    self.assertEqual(state['session_count'], len(expected))
+                    self.assertFalse(update.ready(state, agents))
+                    waiting = confirm('2')
+                    for endpoint, why in unchecked.items():
+                        self.assertIn(f'  Counted: could not check the Rex server at {endpoint} ({why}), so its '
+                                      'sessions count as open.\n', waiting)
+                    self.assertNotIn('Not counted', waiting)
+                    # A connect that times out, as a server that has stopped
+                    # accepting does on Linux.
+                    with mock.patch.object(socketlib.socket, 'connect', side_effect=socketlib.timeout('timed out')):
+                        self.assertEqual(update.rex_server_check('rex:' + listening), 'timed out')
+                    self.assertIsNone(update.rex_server_check('rex:' + listening))
+
+    def test_unknown_store_schema_keeps_its_message(self):
+        with tempfile.TemporaryDirectory(prefix='namedrop-u4-') as directory:
+            base = Path(directory)
+            env = environment(base)
+            root = base / 'checkout'
+            shutil.copytree(REPO / 'scripts', root / 'scripts')
+            fixture_release(root)
+            self.assertEqual(invoke(root, env, explicit=False).returncode, 0)
+            (base / 'state/namedrop.sqlite3').write_bytes(b'')  # a store file with no tables
+            fixture_release(root, number=2, state_schema=9)
+            result = invoke(root, env, explicit=False)
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertEqual(result.stderr, 'Namedrop runtime activation stopped: Unknown collaboration database '
+                             'schema; use the matching Namedrop release to inspect unfinished work.\n')
+
+    def test_fixture_differential(self):
+        ref = os.environ.get('NAMEDROP_TEST_BASE_REF') or before_this_file()
+        if ref is None:
+            self.skipTest('no commit before this file in this clone; set NAMEDROP_TEST_BASE_REF')
+        with tempfile.TemporaryDirectory(prefix='namedrop-u4-diff-') as directory:
+            base = Path(directory)
+            old = base / 'old'
+            archive(ref, old)
+            fixture = base / 'fixture'
+            results = []
+            # Herdr runs run.sh's shape; the explicit options must mean the same.
+            for source, explicit in ((old, False), (REPO, False), (REPO, True)):
+                fixture.mkdir()
+                env = environment(fixture)
+                root = fixture / 'checkout'
+                shutil.copytree(source / 'scripts', root / 'scripts')
+                schema(fixture / 'state/namedrop.sqlite3')
+                snapshots = []
+                for number, version, failure in ((1, 8, False), (2, 8, False), (3, 9, False), (4, 9, True)):
+                    fixture_release(root, number=number, state_schema=version, failure=failure)
+                    result = invoke(root, env, explicit=explicit)
+                    self.assertEqual(result.returncode, 7 if failure else 0, result.stderr)
+                    files = {}
+                    for path in sorted((fixture / 'state').rglob('*')):
+                        if path.is_symlink():
+                            contents = os.readlink(path)
+                        elif path.is_file():
+                            if path.name == 'owner':
+                                self.assertEqual(path.read_text(), 'herdr\n')
+                                continue
+                            contents = path.read_bytes()
+                        else:
+                            continue
+                        files[str(path.relative_to(fixture))] = contents
+                    if source is REPO:
+                        self.assertEqual((fixture / 'state/runtime/owner').read_text(), 'herdr\n')
+                    snapshots.append((result.returncode, result.stdout, result.stderr, files,
+                                      (fixture / 'calls').read_bytes()))
+                results.append(snapshots)
+                shutil.rmtree(fixture)
+            self.assertEqual(results[0], results[1], 'publish/live/schema/rollback differ beyond owner')
+            self.assertEqual(results[1], results[2], 'the explicit options differ from run.sh\'s shape')
+
+
+def upgrade_from(ref):
+    binary = Path(os.environ['NAMEDROP_TEST_BINARY']).resolve()
+    previous = Path(os.environ['NAMEDROP_TEST_PREVIOUS_BINARY']).resolve()
+    with tempfile.TemporaryDirectory(prefix='namedrop-u4-upgrade-') as directory:
+        base = Path(directory)
+        old = base / 'old'
+        archive(ref, old)
+        (old / 'bin').mkdir(exist_ok=True)
+        shutil.copy2(previous, old / 'bin/namedrop')
+        new = base / 'new'
+        shutil.copytree(REPO / 'scripts', new / 'scripts')
+        shutil.copy2(REPO / 'runtime.json', new / 'runtime.json')
+        (new / 'bin').mkdir()
+        shutil.copy2(binary, new / 'bin/namedrop')
+        env = environment(base)
+        old_contract = json.loads(subprocess.check_output([previous, '--runtime-info'], env=env))
+        assert old_contract == json.loads((old / 'runtime.json').read_text())
+        assert old_contract['state_schema'] == 8
+        first = invoke(old, env, explicit=False)
+        assert first.returncode == 0, (first.stdout, first.stderr)
+        launcher = base / 'state/runtime/namedrop'
+        args = [str(launcher), '--herdr-socket', env['HERDR_SOCKET_PATH'], '--herdr-workspace', 'w',
+                '--herdr-pane', 'p', '--json']
+        named = subprocess.run([*args, 'name', 'survivor', '--type', 'terminal'], env=env, cwd=base / 'workspace',
+                               capture_output=True, text=True, timeout=60)
+        assert named.returncode == 0, (named.stdout, named.stderr)
+        def names():
+            result = subprocess.run([*args, 'address', 'list'], env=env, cwd=base / 'workspace',
+                                    capture_output=True, text=True, timeout=60)
+            assert result.returncode == 0, (result.stdout, result.stderr)
+            return json.loads(result.stdout)['data']
+        before = names()
+        assert 'survivor' in json.dumps(before)
+        with sqlite3.connect(base / 'state/namedrop.sqlite3') as db:
+            rows = db.execute('SELECT * FROM pane_addresses ORDER BY address_id').fetchall()
+            claims = db.execute('SELECT * FROM alias_claims ORDER BY alias').fetchall()
+        result = invoke(new, env, explicit=False)
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        expected = 'releases/' + hashlib.sha256(binary.read_bytes()).hexdigest()
+        assert os.readlink(base / 'state/runtime/current') == expected
+        assert json.loads(result.stdout)['data']['runtime']['live_update'] is True
+        assert names() == before
+        with sqlite3.connect(base / 'state/namedrop.sqlite3') as db:
+            assert db.execute('PRAGMA user_version').fetchone()[0] == 8
+            assert db.execute('SELECT * FROM pane_addresses ORDER BY address_id').fetchall() == rows
+            assert db.execute('SELECT * FROM alias_claims ORDER BY alias').fetchall() == claims
+        assert (base / 'state/runtime/owner').read_text() == 'herdr\n'
+        print(f'upgrade from {ref}: names and schema-8 store preserved; owner=herdr')
+
+
+if __name__ == '__main__':
+    unittest.main()

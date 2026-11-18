@@ -1,3 +1,6 @@
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/executable.rs"]
@@ -135,7 +138,7 @@ impl Fixture {
     }
 
     fn command(&self) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_namedrop"));
+        let mut command = crate::binary::namedrop();
         command
             .env("HERDR_PLUGIN_STATE_DIR", self.state())
             .env("HERDR_SOCKET_PATH", "test-socket")
@@ -337,7 +340,7 @@ impl Fixture {
         namedrop::install_integration_package(
             &self.root.join("home"),
             namedrop::AgentRuntime::ClaudeCode,
-            &fs::canonicalize(env!("CARGO_BIN_EXE_namedrop")).unwrap(),
+            &fs::canonicalize(crate::binary::namedrop_path()).unwrap(),
             &self.state(),
         )
         .unwrap();
@@ -430,9 +433,28 @@ impl Fixture {
         marker
     }
 
+    /// The binary with the state directory, endpoint, and space under their
+    /// neutral names alone, and no pane.
+    fn neutral_command(&self) -> Command {
+        let mut command = self.command();
+        command
+            .env_remove("HERDR_PLUGIN_STATE_DIR")
+            .env_remove("HERDR_SOCKET_PATH")
+            .env_remove("HERDR_WORKSPACE_ID")
+            .env_remove("HERDR_PANE_ID")
+            .env("NAMEDROP_STATE_DIR", self.state())
+            .env("NAMEDROP_ENDPOINT", "test-socket")
+            .env("NAMEDROP_SPACE_ID", "workspace-1");
+        command
+    }
+
     fn worker(&self) -> Worker {
+        self.worker_in(self.command())
+    }
+
+    fn worker_in(&self, mut command: Command) -> Worker {
         Worker(
-            self.command()
+            command
                 .args(["hook", "agent-status-worker"])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -597,50 +619,86 @@ fn a_retrying_status_worker_lets_an_update_take_the_command_gate() {
 /// way forever.
 #[test]
 fn a_status_worker_whose_starting_directory_is_removed_still_reconciles() {
-    let fixture = Fixture::new();
-    fixture.initialize();
-    fs::create_dir_all(fixture.state().join("runtime")).unwrap();
-    let gate = fs::File::create(fixture.state().join("runtime/commands.lock")).unwrap();
-    gate.lock().unwrap();
-    let started_in = fixture.root.join("removed-checkout");
-    fs::create_dir(&started_in).unwrap();
-    let marker = fixture.queue_status("after-checkout-removed");
-    let mut worker = Worker(
-        fixture
-            .command()
-            .args(["hook", "agent-status-worker"])
-            .current_dir(&started_in)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap(),
-    );
-    thread::sleep(Duration::from_millis(300));
-    fs::remove_dir(&started_in).unwrap();
-    gate.unlock().unwrap();
-    worker.finish();
-    assert_eq!(fixture.recipient_status(), "idle");
-    assert!(!marker.exists());
+    for neutral in [false, true] {
+        let fixture = Fixture::new();
+        fixture.initialize();
+        fs::create_dir_all(fixture.state().join("runtime")).unwrap();
+        let gate = fs::File::create(fixture.state().join("runtime/commands.lock")).unwrap();
+        gate.lock().unwrap();
+        let started_in = fixture.root.join("removed-checkout");
+        fs::create_dir(&started_in).unwrap();
+        let marker = fixture.queue_status("after-checkout-removed");
+        let mut command = if neutral {
+            fixture.neutral_command()
+        } else {
+            fixture.command()
+        };
+        command.current_dir(&started_in);
+        let mut worker = fixture.worker_in(command);
+        thread::sleep(Duration::from_millis(300));
+        fs::remove_dir(&started_in).unwrap();
+        gate.unlock().unwrap();
+        worker.finish();
+        assert_eq!(fixture.recipient_status(), "idle", "neutral: {neutral}");
+        assert!(!marker.exists());
+    }
 }
 
 /// The gate exists so state never changes under a migration: while an update
 /// holds it, the worker waits with the event still queued.
 #[test]
 fn a_status_worker_reconciles_nothing_while_an_update_holds_the_gate() {
+    for neutral in [false, true] {
+        let fixture = Fixture::new();
+        fixture.initialize();
+        fs::create_dir_all(fixture.state().join("runtime")).unwrap();
+        let gate = fs::File::create(fixture.state().join("runtime/commands.lock")).unwrap();
+        gate.lock().unwrap();
+        let marker = fixture.queue_status("during-update");
+        let mut worker = fixture.worker_in(if neutral {
+            fixture.neutral_command()
+        } else {
+            fixture.command()
+        });
+        thread::sleep(Duration::from_millis(1_500));
+        assert_eq!(fixture.recipient_status(), "working", "neutral: {neutral}");
+        assert!(marker.exists());
+        gate.unlock().unwrap();
+        worker.finish();
+        assert_eq!(fixture.recipient_status(), "idle");
+        assert!(!marker.exists());
+    }
+}
+
+/// Under the neutral names alone, the status hook queues its event in its
+/// space's queue, and the worker it starts reconciles the space as nobody's
+/// pane: the hook's `NAMEDROP_PANE_ID`, whose shell is not this process's
+/// ancestor here, never reaches the worker.
+#[test]
+fn the_status_hook_s_worker_reconciles_its_space_under_neutral_names() {
     let fixture = Fixture::new();
     fixture.initialize();
-    fs::create_dir_all(fixture.state().join("runtime")).unwrap();
-    let gate = fs::File::create(fixture.state().join("runtime/commands.lock")).unwrap();
-    gate.lock().unwrap();
-    let marker = fixture.queue_status("during-update");
-    let mut worker = fixture.worker();
-    thread::sleep(Duration::from_millis(1_500));
-    assert_eq!(fixture.recipient_status(), "working");
-    assert!(marker.exists());
-    gate.unlock().unwrap();
-    worker.finish();
-    assert_eq!(fixture.recipient_status(), "idle");
-    assert!(!marker.exists());
+    let event = r#"{"event":"pane_agent_status_changed","data":{"type":"pane_agent_status_changed","pane_id":"pane-recipient","workspace_id":"workspace-1","agent_status":"idle"}}"#;
+    let output = fixture
+        .neutral_command()
+        .env("NAMEDROP_PANE_ID", "pane-recipient")
+        .env("TEST_SHELL_PID", i32::MAX.to_string())
+        .env_remove("CLAUDE_CODE_SESSION_ID")
+        .env_remove("CODEX_SESSION_ID")
+        .env("HERDR_PLUGIN_EVENT", "pane.agent_status_changed")
+        .env("HERDR_PLUGIN_EVENT_JSON", event)
+        .args(["hook", "agent-status-changed"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while fixture.recipient_status() != "idle" {
+        assert!(
+            Instant::now() < deadline,
+            "the worker never reconciled the event"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// Once an update selects another runtime, a worker started by the old one
@@ -774,71 +832,6 @@ fn timeout_overrides_are_bounded_and_cannot_disable_command_execution() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("timed out after 25 ms"));
     assert!(started.elapsed() < Duration::from_secs(2));
-}
-
-#[test]
-fn timeout_and_unknown_prompt_results_never_authorize_an_automatic_resend() {
-    use namedrop::{HerdrCommandExecutor, ProcessHerdr, PromptFailureKind};
-    let herdr = ProcessHerdr::default();
-    for error in [
-        "Herdr command timed out after 10000 ms",
-        "connection closed after writing prompt",
-        r#"{"error":{"code":"connection_refused"}}"#,
-        r#"{"error":{"code":"unexpected"}}"#,
-        // Both can only be reported after Herdr accepted the submission, so
-        // the recipient may already have the prompt.
-        r#"{"error":{"code":"agent_prompt_stalled"}}"#,
-        r#"{"error":{"code":"timeout"}}"#,
-    ] {
-        assert_eq!(
-            herdr.classify_prompt_failure(error),
-            PromptFailureKind::AmbiguousInvocation,
-            "{error}"
-        );
-    }
-    // Herdr rejects both before any input is sent. The `agent_blocked` payload
-    // is the verbatim stderr of `herdr agent prompt` 0.8.2 against a blocked
-    // recipient, exit code 1.
-    for error in [
-        r#"{"error":{"code":"agent_busy"}}"#,
-        r#"{"error":{"code":"agent_blocked","message":"agent w1:p1 is blocked and requires interactive input"},"id":"cli:agent:prompt"}"#,
-    ] {
-        assert_eq!(
-            herdr.classify_prompt_failure(error),
-            PromptFailureKind::TemporaryPreInvocation,
-            "{error}"
-        );
-    }
-}
-
-#[test]
-fn temporary_prompt_failures_only_request_polling_without_a_guaranteed_event() {
-    use namedrop::{HerdrCommandExecutor, ProcessHerdr, PromptFailureKind};
-    let herdr = ProcessHerdr::default();
-    for (codes, expected) in [
-        (
-            &["server_busy", "conflict", "agent_not_ready"][..],
-            PromptFailureKind::TemporaryPreInvocationWithoutEvent,
-        ),
-        (
-            &[
-                "agent_busy",
-                "agent_blocked",
-                "agent_not_found",
-                "pane_not_found",
-            ][..],
-            PromptFailureKind::TemporaryPreInvocation,
-        ),
-    ] {
-        for code in codes {
-            let kind = herdr
-                .classify_prompt_failure(&serde_json::json!({"error": {"code": code}}).to_string());
-            assert_eq!(kind, expected, "{code}");
-            assert!(kind.is_temporary_pre_invocation());
-        }
-    }
-    assert!(!PromptFailureKind::AmbiguousInvocation.is_temporary_pre_invocation());
-    assert!(!PromptFailureKind::DefinitiveNonRetryable.is_temporary_pre_invocation());
 }
 
 #[test]

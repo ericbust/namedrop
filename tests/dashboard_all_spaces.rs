@@ -1,3 +1,6 @@
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/executable.rs"]
@@ -89,7 +92,7 @@ else
 fi
 "#,
         );
-        let child = Command::new(env!("CARGO_BIN_EXE_namedrop"))
+        let child = crate::binary::namedrop()
             .arg("--plugin-state")
             .arg(root.join("state"))
             .arg("dashboard-server")

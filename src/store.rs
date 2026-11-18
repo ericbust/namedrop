@@ -14,6 +14,7 @@ use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params, types::Type,
 };
 use serde::Serialize;
+use std::collections::HashMap;
 use std::{
     collections::HashSet,
     error::Error,
@@ -23,7 +24,7 @@ use std::{
     time::Duration,
 };
 
-const DATABASE_FILE_NAME: &str = "namedrop.sqlite3";
+pub(crate) const DATABASE_FILE_NAME: &str = "namedrop.sqlite3";
 /// Dispositions Namedrop records itself when a turn ends: the terminal relay's
 /// and the final-reply claim's no-reply. An explicit reply after either one
 /// still reaches the thread.
@@ -106,12 +107,18 @@ mod coordination_bridge;
 mod coordination_ownership;
 pub(crate) mod coordination_review;
 pub mod dashboard;
+#[cfg(test)]
+mod dismissal_tests;
 mod missing_disposition;
 pub(crate) use missing_disposition::{LostSettle, SessionGone};
 mod operator;
+mod relay_author;
 pub(crate) use coordination::WakeReadiness;
 pub(crate) use coordination_bridge::TrackedMessage;
 pub(crate) use coordination_ownership::CoordinationRole;
+#[cfg(test)]
+pub(crate) use relay_author::TO_RELAY_AUTHORS;
+pub(crate) use relay_author::{RelayAuthor, RelayOrigin, RelayRecipient, Relayed, ToRelayAuthor};
 mod groups;
 mod handoff;
 mod terminal;
@@ -124,6 +131,14 @@ pub struct StateStore {
     connection: Connection,
     state_directory: PathBuf,
     read_only: bool,
+}
+
+/// What already holds an alias in one space. Every claim blocks a new address.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum AliasClaim {
+    InUse,
+    Retired,
+    Renamed(Option<String>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -517,6 +532,24 @@ impl StateTransaction<'_> {
         }
     }
 
+    /// The spaces of `session_socket_id` that Namedrop is activated for.
+    pub(crate) fn activated_spaces(
+        &self,
+        session_socket_id: &str,
+    ) -> Result<Vec<crate::SpaceId>, StoreError> {
+        let mut statement = self.transaction.prepare(
+            "SELECT worktree_id FROM worktrees
+             WHERE session_socket_id = ?1 AND activated = 1 AND deactivated = 0
+             ORDER BY worktree_id",
+        )?;
+        statement
+            .query_map(params![session_socket_id], |row| {
+                row.get::<_, String>(0).map(crate::SpaceId::new)
+            })?
+            .collect::<Result<_, _>>()
+            .map_err(Into::into)
+    }
+
     pub(crate) fn any_activated_worktrees(&self) -> Result<bool, StoreError> {
         self.transaction
             .query_row(
@@ -594,6 +627,30 @@ impl StateTransaction<'_> {
         namespace: &StateNamespace,
         alias: &str,
     ) -> Result<(), StoreError> {
+        let history = match self.alias_claim(namespace, alias)? {
+            None => return Ok(()),
+            Some(AliasClaim::InUse) => {
+                return Err(StoreError::invalid_input(format!(
+                    "the name @{alias} is already in use in this workspace; choose a new name"
+                )));
+            }
+            Some(AliasClaim::Retired) => "was retired".to_owned(),
+            Some(AliasClaim::Renamed(Some(replacement))) => {
+                format!("was renamed to @{replacement}")
+            }
+            Some(AliasClaim::Renamed(None)) => "was renamed away".to_owned(),
+        };
+        Err(StoreError::invalid_input(format!(
+            "the name @{alias} {history} in this workspace and cannot be reused; choose a new name"
+        )))
+    }
+
+    /// Why `alias` can't be given to a new address in this space, if it can't.
+    pub(crate) fn alias_claim(
+        &self,
+        namespace: &StateNamespace,
+        alias: &str,
+    ) -> Result<Option<AliasClaim>, StoreError> {
         let claim = self
             .transaction
             .query_row(
@@ -619,24 +676,15 @@ impl StateTransaction<'_> {
                 },
             )
             .optional()?;
-        let Some((retired, claim_state, replacement)) = claim else {
-            return Ok(());
-        };
-        let history = if retired {
-            "was retired".to_owned()
-        } else if claim_state == "tombstone" {
-            match replacement {
-                Some(replacement) => format!("was renamed to @{replacement}"),
-                None => "was renamed away".to_owned(),
+        Ok(claim.map(|(retired, claim_state, replacement)| {
+            if retired {
+                AliasClaim::Retired
+            } else if claim_state == "tombstone" {
+                AliasClaim::Renamed(replacement)
+            } else {
+                AliasClaim::InUse
             }
-        } else {
-            return Err(StoreError::invalid_input(format!(
-                "the name @{alias} is already in use in this workspace; choose a new name"
-            )));
-        };
-        Err(StoreError::invalid_input(format!(
-            "the name @{alias} {history} in this workspace and cannot be reused; choose a new name"
-        )))
+        }))
     }
 
     pub fn create_pane_address(
@@ -1061,6 +1109,9 @@ impl StateTransaction<'_> {
     ) -> Result<Option<RoutingAddressSnapshot>, StoreError> {
         if let Some(operator) = self.operator_snapshot(namespace, address_id)? {
             return Ok(Some(operator));
+        }
+        if let Some(relay_author) = self.relay_author_snapshot(namespace, address_id)? {
+            return Ok(Some(relay_author));
         }
         let found = self
             .transaction
@@ -3126,7 +3177,10 @@ impl StateTransaction<'_> {
             && draft.in_reply_to.is_some()
             && !matches!(
                 draft.grammar_version.as_str(),
-                "result-set/v1" | "terminal-result/v1" | "reminder/v1"
+                "result-set/v1"
+                    | "terminal-result/v1"
+                    | "reminder/v1"
+                    | relay_author::NOTICE_GRAMMAR
             );
         let controls = self.thread_control_state(namespace, &draft.thread_id)?;
         if draft.in_reply_to.is_some()
@@ -3141,9 +3195,7 @@ impl StateTransaction<'_> {
             ));
         }
         if is_agent_reply && controls.reply_allowance == 0 {
-            return Err(StoreError::invalid_input(
-                "the Automatic Reply Limit requires human continuation",
-            ));
+            return Err(StoreError::reply_limit());
         }
 
         let thread_order =
@@ -3348,9 +3400,13 @@ impl StateTransaction<'_> {
                 attribution,
             )?;
             if self.is_operator_address(namespace, &recipient.address_id)?
+                || self.is_relay_author(namespace, &recipient.address_id)?
                 || (matches!(
                     grammar,
-                    "terminal-result/v1" | "result-set/v1" | "mention-return/v1"
+                    "terminal-result/v1"
+                        | "result-set/v1"
+                        | "mention-return/v1"
+                        | relay_author::NOTICE_GRAMMAR
                 ) && self.pane_type(namespace, &recipient.address_id)?
                     == crate::PaneType::Terminal)
             {
@@ -3410,9 +3466,7 @@ impl StateTransaction<'_> {
             ],
         )?;
         if changed != 1 {
-            return Err(StoreError::invalid_input(
-                "the Automatic Reply Limit requires human continuation",
-            ));
+            return Err(StoreError::reply_limit());
         }
         if self
             .thread_control_state(namespace, thread_id)?
@@ -6936,6 +6990,132 @@ impl StateTransaction<'_> {
         Ok(!acknowledged || resolved)
     }
 
+    /// Records that the person dismissed an attention item, and says whether
+    /// there was one to dismiss. A warning that nobody can answer is closed
+    /// as `delivery acknowledge` closes it. Any other item stays as its
+    /// source left it, so a late answer still arrives and closes it, and it
+    /// is no longer shown as needing the person. It records no disposition
+    /// and resends nothing.
+    pub fn dismiss_attention_item(
+        &mut self,
+        namespace: &StateNamespace,
+        item_id: &str,
+        by: &MutationAttribution,
+    ) -> Result<bool, StoreError> {
+        if by.actor_kind != ActorKind::Human {
+            return Err(StoreError::invalid_input(
+                "only a human may dismiss an attention item",
+            ));
+        }
+        let stored = self
+            .transaction
+            .query_row(
+                "SELECT source_kind, source_id, opened_at_ms FROM attention_items
+                 WHERE session_socket_id = ?1 AND worktree_id = ?2
+                   AND attention_item_id = ?3 AND resolved_at_ms IS NULL",
+                params![
+                    namespace.session_socket_id,
+                    namespace.space_id.as_str(),
+                    item_id
+                ],
+                |row| {
+                    Ok((
+                        parse_attention_source_kind(row.get(0)?)?,
+                        row.get::<_, String>(1)?,
+                        from_i64(row.get(2)?)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let opened_at_ms = match &stored {
+            Some((crate::AttentionSourceKind::AgentDisposition, attempt, opened_at_ms)) => {
+                match self.acknowledge_disposition_attention(
+                    namespace,
+                    &crate::DeliveryAttemptId::new(attempt.as_str()),
+                    by,
+                ) {
+                    Ok(_) => return Ok(true),
+                    // Its agent can still answer, so the request stays owed.
+                    Err(error) if error.kind() == StoreErrorKind::InvalidInput => *opened_at_ms,
+                    Err(error) => return Err(error),
+                }
+            }
+            Some((_, _, opened_at_ms)) => *opened_at_ms,
+            // An agent waiting in its pane has a card and no stored item.
+            None => match item_id.strip_prefix(AGENT_STATUS_ITEM_PREFIX) {
+                Some(address)
+                    if self
+                        .transaction
+                        .query_row(
+                            "SELECT 1 FROM pane_addresses
+                             WHERE session_socket_id = ?1 AND worktree_id = ?2
+                               AND address_id = ?3",
+                            params![
+                                namespace.session_socket_id,
+                                namespace.space_id.as_str(),
+                                address
+                            ],
+                            |_| Ok(()),
+                        )
+                        .optional()?
+                        .is_some() =>
+                {
+                    0
+                }
+                _ => return Ok(false),
+            },
+        };
+        if stored.is_some()
+            && attention_dismissed(
+                &self.attention_dismissals(namespace)?,
+                item_id,
+                opened_at_ms,
+            )
+        {
+            return Ok(false);
+        }
+        // The dismissal holds from when the item opened, whatever the clocks say.
+        let at = by.occurred_at_ms.max(opened_at_ms);
+        self.append_transition(
+            namespace,
+            TransitionEntityKind::AttentionItem,
+            item_id,
+            TransitionKind::Dismissed,
+            &MutationAttribution::new(ActorKind::Human, by.actor_id.clone(), at),
+        )?;
+        Ok(true)
+    }
+
+    /// When the person last dismissed each attention item of the space.
+    pub fn attention_dismissals(
+        &self,
+        namespace: &StateNamespace,
+    ) -> Result<HashMap<String, u64>, StoreError> {
+        let mut statement = self.transaction.prepare_cached(
+            "SELECT entity_id, MAX(occurred_at_ms) FROM transition_facts
+             WHERE session_socket_id = ?1 AND worktree_id = ?2
+               AND entity_kind = 'attention_item' AND transition_kind = 'dismissed'
+             GROUP BY entity_id",
+        )?;
+        statement
+            .query_map(namespace_params(namespace), |row| {
+                Ok((row.get::<_, String>(0)?, from_i64(row.get(1)?)?))
+            })?
+            .collect::<Result<_, _>>()
+            .map_err(StoreError::from)
+    }
+
+    /// The open attention items the person has not dismissed.
+    pub fn attention_items_needing_the_person(
+        &self,
+        namespace: &StateNamespace,
+    ) -> Result<Vec<crate::AttentionItemRecord>, StoreError> {
+        let dismissals = self.attention_dismissals(namespace)?;
+        let mut items = self.unresolved_attention_items(namespace)?;
+        items.retain(|item| !attention_dismissed(&dismissals, item.id.as_str(), item.opened_at_ms));
+        Ok(items)
+    }
+
     fn complete_result_set_for_delivery(
         &mut self,
         namespace: &StateNamespace,
@@ -6978,16 +7158,20 @@ impl StateTransaction<'_> {
             )
             .optional()?;
         if let Some(existing) = existing {
+            // A source that says something new raises the item again: its
+            // week starts over, and a dismissal of the old wording lapses.
             self.transaction.execute(
-                "UPDATE attention_items SET summary = ?5
+                "UPDATE attention_items SET summary = ?5, opened_at_ms = ?6
                  WHERE session_socket_id = ?1 AND worktree_id = ?2
-                   AND source_kind = ?3 AND source_id = ?4 AND resolved_at_ms IS NULL",
+                   AND source_kind = ?3 AND source_id = ?4 AND resolved_at_ms IS NULL
+                   AND summary <> ?5",
                 params![
                     namespace.session_socket_id,
                     namespace.space_id.as_str(),
                     draft.source_kind.as_str(),
                     draft.source_id,
                     draft.summary,
+                    to_i64(attribution.occurred_at_ms)?,
                 ],
             )?;
             return Ok(crate::AttentionItemId::new(existing));
@@ -7440,6 +7624,8 @@ pub enum StoreErrorKind {
     Storage,
 }
 
+const REPLY_LIMIT: &str = "the Automatic Reply Limit requires human continuation";
+
 #[derive(Debug)]
 pub struct StoreError {
     kind: StoreErrorKind,
@@ -7462,6 +7648,18 @@ impl StoreError {
             message: message.into(),
             source: None,
         }
+    }
+
+    /// The refusal of an agent's reply in a thread the Automatic Reply
+    /// Limit paused, here or in a thread paired with it.
+    fn reply_limit() -> Self {
+        Self::invalid_input(REPLY_LIMIT)
+    }
+
+    /// Whether this is the Automatic Reply Limit's refusal, which a person's
+    /// message or Continue lifts, rather than another refusal.
+    pub(crate) fn is_reply_limit(&self) -> bool {
+        self.kind == StoreErrorKind::InvalidInput && self.message == REPLY_LIMIT
     }
 
     pub fn kind(&self) -> StoreErrorKind {
@@ -7898,6 +8096,7 @@ fn parse_transition_kind(value: String) -> rusqlite::Result<TransitionKind> {
         "resolved" => Ok(TransitionKind::Resolved),
         "adopted" => Ok(TransitionKind::Adopted),
         "read" => Ok(TransitionKind::Read),
+        "dismissed" => Ok(TransitionKind::Dismissed),
         _ => Err(invalid_text("transition kind", value)),
     }
 }
@@ -7910,6 +8109,23 @@ fn parse_actor_kind(value: String) -> rusqlite::Result<ActorKind> {
         "system" => Ok(ActorKind::System),
         _ => Err(invalid_text("actor kind", value)),
     }
+}
+
+/// The id of the card Channels shows for an agent waiting in its pane.
+pub(crate) const AGENT_STATUS_ITEM_PREFIX: &str = "agent-status-";
+
+/// Whether the person dismissed the item as it stands. `raised_at_ms` is
+/// when the item opened or its wording last changed: a dismissal covers the
+/// warning the person read, so one its source closed and raised again, or
+/// said differently, shows again.
+pub(crate) fn attention_dismissed(
+    dismissals: &HashMap<String, u64>,
+    item_id: &str,
+    raised_at_ms: u64,
+) -> bool {
+    dismissals
+        .get(item_id)
+        .is_some_and(|dismissed_at_ms| *dismissed_at_ms >= raised_at_ms)
 }
 
 fn parse_attention_source_kind(value: String) -> rusqlite::Result<crate::AttentionSourceKind> {
@@ -9113,9 +9329,7 @@ mod tests {
             workspace_id: "workspace".to_owned(),
             cwd: None,
             pane_label: None,
-            agent_session_id: None,
             agent: None,
-            occupant_label: None,
             agent_status: None,
             idle_state_label: None,
         };

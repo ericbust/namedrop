@@ -3,9 +3,10 @@ use super::popup_input::InputMode;
 use super::*;
 use crate::agent_status_ui::{Tone, sanitize, tint, wrap};
 use namedrop::{
-    DiscoveredPane, HealthStatus, MAX_PERSONA_CHARS, PaneAddressRecord, PaneType,
+    DiscoveredPane, HealthStatus, MAX_PERSONA_CHARS, PaneAddressRecord, PaneType, SpaceId,
     cli::UiMode,
     discover_worktree_for_workspace,
+    mux::{PaneFacts, PaneId, PopupScreen},
     tour::{self, PageAction, Presentation},
 };
 use std::{
@@ -43,8 +44,11 @@ pub(super) fn install_shortcuts(config: Option<&Path>) -> Result<serde_json::Val
 
 /// Clears the once-only marker so the current tour opens again the next time
 /// Namedrop sees an agent pane.
-pub(super) fn reset_tour(options: &RuntimeOptions) -> Result<serde_json::Value, String> {
-    with_runtime_options(options, |runtime| {
+pub(super) fn reset_tour(
+    options: &RuntimeOptions,
+    inherited: &dyn Inherited,
+) -> Result<serde_json::Value, String> {
+    with_runtime_options(options, inherited, |runtime| {
         let cleared = tour::reset(runtime.state_directory, tour::CURRENT_ID)?;
         Ok(serde_json::json!({
             "presentation_id": tour::CURRENT_ID,
@@ -53,101 +57,93 @@ pub(super) fn reset_tour(options: &RuntimeOptions) -> Result<serde_json::Value, 
     })
 }
 
-pub(super) fn launch(options: &RuntimeOptions, mode: UiMode) -> Result<serde_json::Value, String> {
-    with_runtime_options(options, |runtime| {
-        let workspace = runtime
-            .workspace_id
-            .ok_or("This popup requires an active Herdr space")?;
-        let pane = runtime
-            .current_pane_id
-            .ok_or("This popup requires an active Herdr pane")?;
-        let origin = target_pane(runtime)?;
-        if mode == UiMode::Tour {
-            return tour::open_popup(runtime, &origin);
-        }
-        let terminal = origin.terminal_id;
-        // The popup carries the Agent Session it was opened for, so asking for
-        // help later cannot reach a replacement session in the same pane.
-        let session = origin
-            .agent_session_id
-            .map(|id| id.as_str().to_owned())
-            .unwrap_or_default();
-        let args = [
-            "plugin".to_owned(),
-            "pane".to_owned(),
-            "open".to_owned(),
-            "--plugin".to_owned(),
-            "namedrop".to_owned(),
-            "--entrypoint".to_owned(),
-            match mode {
-                UiMode::Name => "naming",
-                UiMode::Manage => "management",
-                UiMode::Doctor => "doctor",
-                UiMode::Status => "agent-status",
-                UiMode::Tour => tour::ENTRYPOINT,
-            }
-            .to_owned(),
-            "--placement".to_owned(),
-            "popup".to_owned(),
-            "--width".to_owned(),
-            if mode == UiMode::Status { "84" } else { "72" }.to_owned(),
-            "--height".to_owned(),
-            if mode == UiMode::Name { "20" } else { "24" }.to_owned(),
-            "--env".to_owned(),
-            format!("NAMEDROP_TARGET_WORKSPACE={workspace}"),
-            "--env".to_owned(),
-            format!("NAMEDROP_TARGET_PANE={pane}"),
-            "--env".to_owned(),
-            format!("NAMEDROP_TARGET_TERMINAL={terminal}"),
-            "--env".to_owned(),
-            format!("NAMEDROP_TARGET_SESSION={session}"),
-            "--env".to_owned(),
-            format!(
-                "HERDR_PLUGIN_STATE_DIR={}",
-                runtime.state_directory.display()
-            ),
-            "--env".to_owned(),
-            format!("HERDR_SOCKET_PATH={}", runtime.session_socket_id),
-            "--focus".to_owned(),
-        ];
-        let output = runtime
-            .herdr
-            .execute(&args.iter().map(String::as_str).collect::<Vec<_>>())?;
-        serde_json::from_str(&output.stdout).map_err(|e| e.to_string())
+pub(super) fn launch(
+    options: &RuntimeOptions,
+    inherited: &dyn Inherited,
+    mode: UiMode,
+) -> Result<serde_json::Value, String> {
+    with_runtime_options(options, inherited, |runtime| {
+        launch_in_runtime(runtime, mode)
     })
 }
 
-fn target_pane(
-    runtime: &LifecycleRuntime<'_, ProcessHerdr, SystemClock, ProcessIds>,
-) -> Result<DiscoveredPane, String> {
+pub(super) fn launch_in_runtime(
+    runtime: &Runtime<'_>,
+    mode: UiMode,
+) -> Result<serde_json::Value, String> {
     let workspace = runtime
         .workspace_id
-        .ok_or("This popup is missing its invoking space")?;
-    discover_worktree_for_workspace(runtime.herdr, workspace)?
+        .ok_or(runtime.mux.endpoint().kind.text(
+            "This popup requires an active Herdr space",
+            "This screen requires an active Rex session",
+        ))?;
+    let pane = runtime
+        .current_pane_id
+        .ok_or(runtime.mux.endpoint().kind.text(
+            "This popup requires an active Herdr pane",
+            "This screen requires an active Rex pane",
+        ))?;
+    let origin = target_pane(runtime)?;
+    if mode == UiMode::Tour {
+        return tour::open_popup(runtime, &origin);
+    }
+    // The popup carries the Agent Session it was opened for, so asking for
+    // help later cannot reach a replacement session in the same pane.
+    let screen = match mode {
+        UiMode::Name => PopupScreen::Name,
+        UiMode::Manage => PopupScreen::Manage,
+        UiMode::Doctor => PopupScreen::Doctor,
+        UiMode::Status => PopupScreen::Status,
+        UiMode::Tour => PopupScreen::Tour,
+    };
+    let target = PaneFacts {
+        id: PaneId::new(pane),
+        space: SpaceId::new(workspace),
+        ..origin.facts()
+    };
+    namedrop::open_popup(runtime, screen, target).map_err(|error| error.to_string())
+}
+
+fn target_pane(runtime: &Runtime<'_>) -> Result<DiscoveredPane, String> {
+    let kind = runtime.mux.endpoint().kind;
+    let workspace = runtime.workspace_id.ok_or(kind.text(
+        "This popup is missing its invoking space",
+        "This screen is missing its invoking session",
+    ))?;
+    discover_worktree_for_workspace(runtime.mux, workspace)?
         .panes
         .into_iter()
         .find(|p| Some(p.pane_id.as_str()) == runtime.current_pane_id)
         .ok_or_else(|| {
-            "The invoking pane has closed. Open the popup again from your pane.".to_owned()
+            kind.text(
+                "The invoking pane has closed. Open the popup again from your pane.",
+                "The invoking pane has closed. Open the screen again from your pane.",
+            )
+            .to_owned()
         })
 }
 
-fn target_terminal(
-    runtime: &LifecycleRuntime<'_, ProcessHerdr, SystemClock, ProcessIds>,
-) -> Result<String, String> {
+fn target_terminal(runtime: &Runtime<'_>) -> Result<String, String> {
     target_pane(runtime).map(|pane| pane.terminal_id)
 }
 
-pub(super) fn run(options: &RuntimeOptions, mode: UiMode) -> ExitCode {
+pub(super) fn run(options: &RuntimeOptions, inherited: &dyn Inherited, mode: UiMode) -> ExitCode {
+    super::popup_input::host_for(options, inherited);
     if mode == UiMode::Status {
-        return crate::agent_status_ui::run(options);
+        let observing = observing_pane(options, inherited);
+        return crate::agent_status_ui::run(options, inherited, observing.as_deref());
     }
-    match run_prompt(options, mode) {
+    match run_prompt(options, inherited, mode) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             // Keep actionable errors visible instead of closing the popup immediately.
             eprintln!("\nNamedrop: {}", error.escape_debug());
-            if io::stdin().is_terminal() {
+            if super::popup_input::is_rex(options, inherited) {
+                // Rex retains quick nonzero exits, even after the error was acknowledged.
+                if super::popup_input::wait_for_key().is_ok() {
+                    return ExitCode::SUCCESS;
+                }
+            } else if io::stdin().is_terminal() {
                 let _ = prompt_line("Enter or Esc closes: ");
             }
             ExitCode::from(65)
@@ -155,25 +151,61 @@ pub(super) fn run(options: &RuntimeOptions, mode: UiMode) -> ExitCode {
     }
 }
 
-fn run_prompt(options: &RuntimeOptions, mode: UiMode) -> Result<(), String> {
-    let workspace = env::var("NAMEDROP_TARGET_WORKSPACE")
-        .map_err(|_| "This popup is missing its invoking space")?;
-    let pane =
-        env::var("NAMEDROP_TARGET_PANE").map_err(|_| "This popup is missing its invoking pane")?;
-    let terminal = env::var("NAMEDROP_TARGET_TERMINAL")
-        .map_err(|_| "This popup is missing its invoking terminal")?;
+/// The pane the status panel itself occupies. A Rex layer runs with an
+/// explicit `--endpoint`, so its home has no pane: its own block is only in
+/// the `REX_BLOCK` Rex gives it.
+fn observing_pane(options: &RuntimeOptions, inherited: &dyn Inherited) -> Option<String> {
+    if let Ok(Home::Rex(place)) = home::resolve(&options.flags(), inherited) {
+        return inherited
+            .var("REX_BLOCK")
+            .and_then(|block| block.into_string().ok())
+            .filter(|block| !block.is_empty())
+            .or(place.pane.map(|pane| pane.as_str().to_owned()));
+    }
+    super::location(options, inherited)
+        .and_then(|location| location.pane)
+        .map(|pane| pane.as_str().to_owned())
+}
+
+fn run_prompt(
+    options: &RuntimeOptions,
+    inherited: &dyn Inherited,
+    mode: UiMode,
+) -> Result<(), String> {
+    let kind = super::popup_input::host();
+    let workspace = env::var("NAMEDROP_TARGET_WORKSPACE").map_err(|_| {
+        kind.text(
+            "This popup is missing its invoking space",
+            "This screen is missing its invoking session",
+        )
+    })?;
+    let pane = env::var("NAMEDROP_TARGET_PANE").map_err(|_| {
+        kind.text(
+            "This popup is missing its invoking pane",
+            "This screen is missing its invoking pane",
+        )
+    })?;
+    let terminal = env::var("NAMEDROP_TARGET_TERMINAL").map_err(|_| {
+        kind.text(
+            "This popup is missing its invoking terminal",
+            "This screen is missing its invoking terminal",
+        )
+    })?;
     // Empty when the pane held no agent session as the popup opened.
     let session = env::var("NAMEDROP_TARGET_SESSION").unwrap_or_default();
-    with_runtime_options(options, |runtime| {
+    with_runtime_options(options, inherited, |runtime| {
         let targeted = LifecycleRuntime {
             workspace_id: Some(&workspace),
             current_pane_id: Some(&pane),
             ..*runtime
         };
         if target_terminal(&targeted)? != terminal {
-            return Err(
-                "The invoking pane changed. Close this popup and open it again.".to_owned(),
-            );
+            return Err(kind
+                .text(
+                    "The invoking pane changed. Close this popup and open it again.",
+                    "The invoking pane changed. Close this screen and open it again.",
+                )
+                .to_owned());
         }
         match mode {
             UiMode::Name => name_prompt(&targeted, &terminal).map(drop),
@@ -185,11 +217,7 @@ fn run_prompt(options: &RuntimeOptions, mode: UiMode) -> Result<(), String> {
     })
 }
 
-fn doctor_prompt(
-    runtime: &LifecycleRuntime<'_, ProcessHerdr, SystemClock, ProcessIds>,
-    terminal: &str,
-    session: &str,
-) -> Result<(), String> {
+fn doctor_prompt(runtime: &Runtime<'_>, terminal: &str, session: &str) -> Result<(), String> {
     let _input_mode = InputMode::enter()?;
     let mut notice = String::new();
     'refresh: loop {
@@ -268,17 +296,9 @@ fn doctor_prompt(
                         );
                     }
                     match namedrop::request_doctor_assistance(runtime, session) {
-                        // The pane's agent may be unnamed, so name the pane
-                        // rather than echoing a mention that may not exist.
-                        Ok(_) => {
+                        Ok(accepted) => {
                             clear_screen();
-                            say(
-                                Tone::Plain,
-                                "Herdr accepted the prompt. That is not the agent acting,\n\
-                                 and no issue is fixed yet.\n\n\
-                                 Go back to the pane you opened Doctor from for the agent's\n\
-                                 report and any steps it needs from you.\n",
-                            );
+                            say(Tone::Plain, accepted);
                             say(Tone::Keys, "Enter or Esc closes");
                             io::stdout().flush().map_err(|e| e.to_string())?;
                             let mut key = [0];
@@ -305,10 +325,56 @@ fn doctor_prompt(
 
 /// Names the invoking pane and returns the confirmation it printed, or
 /// `None` when the person cancelled.
-fn name_prompt(
-    runtime: &LifecycleRuntime<'_, ProcessHerdr, SystemClock, ProcessIds>,
-    terminal: &str,
-) -> Result<Option<String>, String> {
+fn name_prompt(runtime: &Runtime<'_>, terminal: &str) -> Result<Option<String>, String> {
+    if runtime.mux.endpoint().kind == namedrop::mux::MuxKind::Rex {
+        let workspace = runtime
+            .workspace_id
+            .ok_or("This screen is missing its invoking session")?;
+        let active = match namedrop::StateStore::open_read_only(runtime.state_directory)
+            .map_err(|e| e.to_string())?
+        {
+            Some(mut store) => store
+                .transaction(|tx| {
+                    tx.worktree_state(&namedrop::StateNamespace::for_space(
+                        runtime.session_socket_id,
+                        workspace,
+                    ))
+                })
+                .map_err(|e| e.to_string())?
+                .is_some_and(|state| state.activated && !state.deactivated),
+            None => false,
+        };
+        if !active {
+            say(
+                Tone::Warn,
+                "Namedrop is not active in this session. Press Enter to activate it, or Esc to cancel.",
+            );
+            if menu_key()? != MenuKey::Enter {
+                return Ok(None);
+            }
+            let activation = namedrop::activate_from_naming_screen(runtime)?;
+            clear_screen();
+            // The CLI fails an incomplete activation. Naming continues here,
+            // so what needs attention stays above it.
+            if !activation_complete(&activation) {
+                say(
+                    Tone::Warn,
+                    "Namedrop is active, but part of its setup needs attention:",
+                );
+                let packages = activation["integration_packages"].as_object();
+                for (agent, package) in packages.into_iter().flatten() {
+                    if package["installed"] != true || !package["error"].is_null() {
+                        let error = package["error"].as_str().unwrap_or("not installed");
+                        say(
+                            Tone::Plain,
+                            &format!("{}: {}", sanitize(agent), sanitize(error)),
+                        );
+                    }
+                }
+                say(Tone::Muted, "Namedrop Doctor lists the repair.\n");
+            }
+        }
+    }
     let default = namedrop::default_pane_type(runtime)?;
     say(Tone::Strong, "Name this pane\n");
     say(
@@ -363,7 +429,7 @@ fn name_prompt(
                 .map_err(|e| e.to_string())?,
             None => None,
         };
-        persona_editor(&alias, saved.as_deref(), &origin.agent.unwrap_or_default())?
+        persona_editor(&alias, saved.as_deref(), &persona_host(&origin))?
     } else {
         Persona::Keep
     };
@@ -427,29 +493,22 @@ const TOUR_OFFER: &str = "Press T for the tour.";
 
 /// The tour popup. Opening it counts as showing the current presentation, so
 /// a tour someone opened by hand never pops up again on its own.
-fn tour_prompt(
-    runtime: &LifecycleRuntime<'_, ProcessHerdr, SystemClock, ProcessIds>,
-    terminal: &str,
-) -> Result<(), String> {
+fn tour_prompt(runtime: &Runtime<'_>, terminal: &str) -> Result<(), String> {
     let _input_mode = InputMode::enter()?;
     // A marker that cannot be written only means the tour may open again, so
     // it is reported on the page instead of costing the tour itself.
     let warning = tour::mark_shown(runtime.state_directory, tour::CURRENT_ID)
         .err()
         .map(|error| format!("The tour may open again: {}", error.escape_debug()));
-    let presentation = tour::current()?;
+    let presentation = tour::current_for(runtime.mux.endpoint().kind)?;
     tour_pages(runtime, terminal, &presentation, warning.as_deref())
 }
 
 /// Pages the current tour from Manage or Doctor, which stay open after it; a
 /// tour that cannot load becomes their notice. Only the tour popup records
 /// the tour as shown, so Doctor stays read-only.
-fn inline_tour(
-    runtime: &LifecycleRuntime<'_, ProcessHerdr, SystemClock, ProcessIds>,
-    terminal: &str,
-    notice: &mut String,
-) -> Result<(), String> {
-    match tour::current() {
+fn inline_tour(runtime: &Runtime<'_>, terminal: &str, notice: &mut String) -> Result<(), String> {
+    match tour::current_for(runtime.mux.endpoint().kind) {
         Ok(presentation) => tour_pages(runtime, terminal, &presentation, None),
         Err(error) => {
             *notice = format!("Could not open the tour: {}", error.escape_debug());
@@ -463,7 +522,7 @@ fn inline_tour(
 /// the ordinary name prompt on N and then returns to that page, showing what
 /// was named once at its top.
 fn tour_pages(
-    runtime: &LifecycleRuntime<'_, ProcessHerdr, SystemClock, ProcessIds>,
+    runtime: &Runtime<'_>,
     terminal: &str,
     presentation: &Presentation,
     warning: Option<&str>,
@@ -518,9 +577,7 @@ fn tour_pages(
 /// Whether this space has no names at all. It reads without creating or
 /// changing state, because Doctor stays read-only; a store that cannot be
 /// read answers `false`, so the tour is offered only where it is known to fit.
-fn space_has_no_names(
-    runtime: &LifecycleRuntime<'_, ProcessHerdr, SystemClock, ProcessIds>,
-) -> bool {
+fn space_has_no_names(runtime: &Runtime<'_>) -> bool {
     let Some(workspace) = runtime.workspace_id else {
         return false;
     };
@@ -538,10 +595,7 @@ fn space_has_no_names(
     }
 }
 
-fn manage_prompt(
-    runtime: &LifecycleRuntime<'_, ProcessHerdr, SystemClock, ProcessIds>,
-    terminal: &str,
-) -> Result<(), String> {
+fn manage_prompt(runtime: &Runtime<'_>, terminal: &str) -> Result<(), String> {
     let _input_mode = InputMode::enter()?;
     let mut selected = 0usize;
     let mut notice = String::new();
@@ -714,7 +768,7 @@ fn manage_prompt(
                     // The saved persona stays until a replacement is accepted
                     // here, so a rename alone never redefines the agent.
                     clear_screen();
-                    let host = target_pane(runtime)?.agent.unwrap_or_default();
+                    let host = persona_host(&target_pane(runtime)?);
                     follow_up = persona_editor(&alias, address.persona.as_deref(), &host)?
                         .description()
                         .map(|description| {
@@ -728,7 +782,7 @@ fn manage_prompt(
             }
             b'p' if is_agent => {
                 clear_screen();
-                let host = target_pane(runtime)?.agent.unwrap_or_default();
+                let host = persona_host(&target_pane(runtime)?);
                 let choice = persona_editor(&address.alias, address.persona.as_deref(), &host)?;
                 let Some(description) = choice.description() else {
                     notice = if choice == Persona::Cancel {
@@ -1036,6 +1090,18 @@ impl Editor {
         lines.extend(hints.iter().map(|hint| (Tone::Keys, (*hint).to_owned())));
         lines
     }
+}
+
+/// The CLI a pane runs, as the persona worker names it. A pane whose agent kind
+/// is unreported has none.
+fn persona_host(pane: &namedrop::DiscoveredPane) -> String {
+    match pane.agent.as_ref().map(|agent| &agent.kind) {
+        Some(namedrop::mux::AgentKind::Known(namedrop::AgentRuntime::ClaudeCode)) => "claude",
+        Some(namedrop::mux::AgentKind::Known(namedrop::AgentRuntime::Codex)) => "codex",
+        Some(namedrop::mux::AgentKind::Other(word)) => word,
+        Some(namedrop::mux::AgentKind::Unreported) | None => "",
+    }
+    .to_owned()
 }
 
 /// Edits one agent's persona, asking an isolated worker for a suggestion in the
@@ -1466,7 +1532,86 @@ fn prompt_line(label: &str) -> Result<Option<String>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::wrap_exact;
+    use super::{observing_pane, wrap_exact};
+    use clap::Parser;
+    use namedrop::mux::home::{Claimed, Inherited};
+    use std::{collections::BTreeMap, ffi::OsString, io, path::Path};
+
+    /// Inherited names only: no socket, ancestor or process is ever read.
+    struct Names(BTreeMap<&'static str, &'static str>);
+
+    impl Inherited for Names {
+        fn var(&self, name: &str) -> Option<OsString> {
+            self.0.get(name).map(OsString::from)
+        }
+        fn id(&self) -> u32 {
+            0
+        }
+        fn ancestors(&self) -> Vec<u32> {
+            Vec::new()
+        }
+        fn peer(&self, _socket: &Path) -> io::Result<u32> {
+            Err(io::ErrorKind::NotFound.into())
+        }
+        fn claimed(&self, _socket: &Path, _session: &str, _block: &str) -> Result<Claimed, String> {
+            Err("no Rex claim".to_owned())
+        }
+        fn incarnation(&self, _pid: u32) -> Option<String> {
+            None
+        }
+    }
+
+    fn observing(argv: &[&str], names: &[(&'static str, &'static str)]) -> Option<String> {
+        let cli = namedrop::cli::Cli::try_parse_from(
+            ["namedrop"]
+                .iter()
+                .chain(argv)
+                .chain(&["ui", "run", "status"]),
+        )
+        .unwrap();
+        observing_pane(&cli.runtime, &Names(names.iter().copied().collect()))
+    }
+
+    #[test]
+    fn a_rex_status_layer_observes_its_own_block_not_the_target() {
+        let layer = [
+            ("REX_BLOCK", "block:layer"),
+            ("REX_SESSION", "session:s"),
+            ("NAMEDROP_TARGET_PANE", "block:target"),
+        ];
+        assert_eq!(
+            observing(&["--endpoint", "rex:/tmp/r.sock"], &layer).as_deref(),
+            Some("block:layer")
+        );
+        assert_eq!(
+            observing(
+                &["--endpoint", "rex:/tmp/r.sock", "--pane", "block:flag"],
+                &layer
+            )
+            .as_deref(),
+            Some("block:layer")
+        );
+        assert_eq!(
+            observing(
+                &["--endpoint", "rex:/tmp/r.sock", "--pane", "block:flag"],
+                &[]
+            )
+            .as_deref(),
+            Some("block:flag")
+        );
+        assert_eq!(observing(&["--endpoint", "rex:/tmp/r.sock"], &[]), None);
+        // A Herdr popup keeps its own pane, and an inherited Rex block (Herdr
+        // inside Rex) never stands in for it.
+        let herdr = [
+            ("HERDR_SOCKET_PATH", "/tmp/herdr.sock"),
+            ("HERDR_PANE_ID", "popup-pane"),
+            ("REX_BLOCK", "block:outer"),
+        ];
+        assert_eq!(
+            observing(&["--endpoint", "/tmp/herdr.sock"], &herdr).as_deref(),
+            Some("popup-pane")
+        );
+    }
 
     #[test]
     fn doctor_wrapping_breaks_at_spaces_and_keeps_every_character() {
@@ -1481,5 +1626,301 @@ mod tests {
         assert_eq!(wrapped.concat(), long);
         assert!(wrapped.iter().all(|piece| piece.len() <= 9), "{wrapped:?}");
         assert_eq!(wrap_exact("", 9), [""]);
+    }
+}
+
+/// `name_prompt` reads the popup's own stdin, so each case runs it in a child
+/// copy of this test binary whose stdin and stdout are pipes, against an
+/// in-memory Rex host.
+#[cfg(test)]
+mod rex_name_prompt_tests {
+    use super::name_prompt;
+    use namedrop::{
+        AgentConfigDirectories, LifecycleRuntime, ProcessIds, StateNamespace, StateStore,
+        SystemClock,
+        mux::{Effect, Mux, fake::FakeMux},
+    };
+    use serde_json::{Value, json};
+    use std::{
+        env, fs,
+        io::Write,
+        path::{Path, PathBuf},
+        process::{Command, Stdio},
+        sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering},
+        },
+    };
+
+    const CASE: &str = "NAMEDROP_TEST_REX_NAME_PROMPT";
+    const ROOT: &str = "NAMEDROP_TEST_REX_NAME_ROOT";
+    const OFFER: &str =
+        "Namedrop is not active in this session. Press Enter to activate it, or Esc to cancel.";
+    const ENDPOINT: &str = "rex:/tmp/nd-name-prompt.sock";
+
+    fn mux() -> FakeMux {
+        FakeMux::world()
+            .endpoint(ENDPOINT)
+            .space("s1")
+            .pane("p1")
+            .terminal("t1")
+            .tab("window:w")
+            .claude()
+            .session("agent-1")
+            .idle()
+            .build()
+    }
+
+    fn activated(state: &Path) -> bool {
+        StateStore::open_read_only(state)
+            .unwrap()
+            .and_then(|mut store| {
+                store
+                    .transaction(|tx| tx.worktree_state(&StateNamespace::for_space(ENDPOINT, "s1")))
+                    .unwrap()
+            })
+            .is_some_and(|state| state.activated && !state.deactivated)
+    }
+
+    /// The child's half: one `name_prompt` on the piped stdin, then what it
+    /// left behind, as one marked JSON line.
+    #[test]
+    fn child_runs_one_name_prompt() {
+        let Ok(case) = env::var(CASE) else { return };
+        let root = PathBuf::from(env::var(ROOT).unwrap());
+        let (state, home) = (root.join("state"), root.join("home"));
+        let fake = mux();
+        let shared: Arc<dyn Mux> = Arc::new(fake.clone());
+        let ids = ProcessIds::default();
+        let runtime = LifecycleRuntime {
+            state_directory: &state,
+            home_directory: Some(&home),
+            agent_config: AgentConfigDirectories::default(),
+            cwd: &root,
+            workspace_id: Some("s1"),
+            current_pane_id: Some("p1"),
+            session_socket_id: ENDPOINT,
+            mux: &shared,
+            clock: &SystemClock,
+            ids: &ids,
+        };
+        if matches!(case.as_str(), "active" | "deactivated" | "marked") {
+            namedrop::activate_from_naming_screen(&runtime).unwrap();
+        }
+        if case == "deactivated" {
+            namedrop::execute_lifecycle_operation("deactivate", json!({}), &runtime).unwrap();
+            assert!(!activated(&state));
+        }
+        if case == "marked" {
+            // `deactivate` also clears `activated`, so only a row written by
+            // hand shows that the deactivated mark alone refuses.
+            rusqlite::Connection::open(state.join("namedrop.sqlite3"))
+                .unwrap()
+                .execute("UPDATE worktrees SET deactivated = 1", [])
+                .unwrap();
+            assert!(!activated(&state));
+        }
+        if case == "incomplete" {
+            // Codex's package cannot be written under a file.
+            fs::create_dir_all(home.join(".agents")).unwrap();
+            fs::write(home.join(".agents/skills"), "not a directory").unwrap();
+        }
+        let result = name_prompt(&runtime, "t1");
+        let popups = fake
+            .attempted_effects()
+            .iter()
+            .filter(|effect| matches!(effect, Effect::OpenPopup(_)))
+            .count();
+        println!(
+            "\nREPORT {}",
+            json!({
+                "result": result,
+                "activated": activated(&state),
+                "popups": popups,
+                "tour_shown": namedrop::tour::is_shown(&state, namedrop::tour::CURRENT_ID).unwrap(),
+            })
+        );
+    }
+
+    /// The parent's half: what the person saw, and the child's report.
+    fn run(case: &str, keys: &[u8]) -> (String, Value) {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let root = env::temp_dir().join(format!(
+            "nd-rex-name-prompt-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("home")).unwrap();
+        let mut command = Command::new(env::current_exe().unwrap());
+        for name in ["REX_BLOCK", "REX_SESSION", "REX_SERVER", "REX_CLIENT"] {
+            command.env_remove(name);
+        }
+        let mut child = command
+            .args([
+                "naming_ui::rex_name_prompt_tests::child_runs_one_name_prompt",
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CASE, case)
+            .env(ROOT, &root)
+            .env("HOME", root.join("home"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(keys).unwrap();
+        let output = child.wait_with_output().unwrap();
+        fs::remove_dir_all(&root).unwrap();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(
+            output.status.success(),
+            "{stdout}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let (shown, report) = stdout
+            .rsplit_once("\nREPORT ")
+            .unwrap_or_else(|| panic!("no report: {stdout}"));
+        let report = report.lines().next().unwrap();
+        (shown.to_owned(), serde_json::from_str(report).unwrap())
+    }
+
+    #[test]
+    fn an_inactive_rex_session_offers_activation_and_enter_activates_without_a_tour() {
+        let (shown, report) = run("inactive", b"\nu5-term\nt\n");
+        let offer = shown.find(OFFER).expect(&shown);
+        let naming = shown.find("Name this pane").expect(&shown);
+        assert!(offer < naming, "{shown}");
+        assert_eq!(
+            report["result"]["Ok"], "Named @u5-term as terminal.",
+            "{report}"
+        );
+        assert_eq!(report["activated"], true);
+        assert_eq!(report["popups"], 0, "activation opened a popup");
+        assert_eq!(report["tour_shown"], false, "activation claimed the tour");
+    }
+
+    #[test]
+    fn escape_at_the_offer_names_nothing_and_activates_nothing() {
+        let (shown, report) = run("inactive", b"\x1b");
+        assert!(shown.contains(OFFER), "{shown}");
+        assert!(!shown.contains("Name this pane"), "{shown}");
+        assert_eq!(report["result"], json!({"Ok": null}));
+        assert_eq!(report["activated"], false);
+        assert_eq!(report["popups"], 0);
+    }
+
+    #[test]
+    fn an_active_rex_session_goes_straight_to_naming() {
+        let (shown, report) = run("active", b"u5-term\nt\n");
+        assert!(!shown.contains(OFFER), "{shown}");
+        assert!(shown.contains("Name this pane"), "{shown}");
+        assert_eq!(
+            report["result"]["Ok"], "Named @u5-term as terminal.",
+            "{report}"
+        );
+        assert_eq!(report["popups"], 0);
+    }
+
+    #[test]
+    fn a_deactivated_rex_session_offers_activation_again() {
+        for case in ["deactivated", "marked"] {
+            let (shown, report) = run(case, b"\nu5-term\nt\n");
+            let offer = shown.find(OFFER).expect(&shown);
+            assert!(
+                offer < shown.find("Name this pane").expect(&shown),
+                "{case}: {shown}"
+            );
+            assert_eq!(
+                report["result"]["Ok"], "Named @u5-term as terminal.",
+                "{case}: {report}"
+            );
+            assert_eq!(report["activated"], true, "{case}");
+        }
+    }
+
+    #[test]
+    fn an_incomplete_activation_shows_its_report_and_naming_continues() {
+        let (shown, report) = run("incomplete", b"\nu5-term\nt\n");
+        let attention = shown
+            .find("Namedrop is active, but part of its setup needs attention:")
+            .expect(&shown);
+        let repair = shown
+            .find("Namedrop Doctor lists the repair.")
+            .expect(&shown);
+        // Claude Code's package installed, so only Codex's is listed.
+        let listed: Vec<&str> = shown[attention..repair].lines().skip(1).collect();
+        assert!(
+            listed.len() == 1
+                && listed[0].starts_with("codex: ")
+                && listed[0].ends_with("is not a directory"),
+            "{shown}"
+        );
+        assert!(
+            attention < shown.find("Name this pane").expect(&shown),
+            "{shown}"
+        );
+        assert_eq!(
+            report["result"]["Ok"], "Named @u5-term as terminal.",
+            "{report}"
+        );
+        assert_eq!(report["activated"], true);
+    }
+
+    #[test]
+    fn a_complete_activation_shows_no_report() {
+        let (shown, _) = run("inactive", b"\nu5-term\nt\n");
+        assert!(!shown.contains("needs attention"), "{shown}");
+    }
+}
+
+#[cfg(all(test, feature = "test-support"))]
+mod words_host_tests {
+    use super::*;
+
+    #[test]
+    fn target_errors_keep_the_invoking_hosts_words() {
+        for (endpoint, missing, closed) in [
+            (
+                "/tmp/words-naming.sock",
+                "This popup is missing its invoking space",
+                "The invoking pane has closed. Open the popup again from your pane.",
+            ),
+            (
+                "rex:/tmp/words-naming.sock",
+                "This screen is missing its invoking session",
+                "The invoking pane has closed. Open the screen again from your pane.",
+            ),
+        ] {
+            let mux: Arc<dyn namedrop::mux::Mux> = Arc::new(
+                namedrop::mux::fake::FakeMux::world()
+                    .endpoint(endpoint)
+                    .space("s1")
+                    .pane("p1")
+                    .build(),
+            );
+            let clock = SystemClock;
+            let ids = ProcessIds::default();
+            let runtime = LifecycleRuntime {
+                state_directory: Path::new("/unused"),
+                home_directory: None,
+                agent_config: namedrop::AgentConfigDirectories::default(),
+                cwd: Path::new("/unused"),
+                workspace_id: None,
+                current_pane_id: Some("p9"),
+                session_socket_id: endpoint,
+                mux: &mux,
+                clock: &clock,
+                ids: &ids,
+            };
+            assert_eq!(target_pane(&runtime).unwrap_err(), missing);
+            let runtime = LifecycleRuntime {
+                workspace_id: Some("s1"),
+                ..runtime
+            };
+            assert_eq!(target_pane(&runtime).unwrap_err(), closed);
+        }
     }
 }

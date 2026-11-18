@@ -2,6 +2,10 @@
 //! command Herdr runs before it registers the plugin, and the setup helper that
 //! links a local checkout or activates an already registered installation.
 //! Every fixture path contains a space so quoting is exercised throughout.
+
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/executable.rs"]
@@ -195,7 +199,7 @@ chmod 755 "$directory/$target/release/namedrop"
     }
 
     fn build(&self, checkout: &Path) -> Command {
-        let mut command = Command::new("/bin/sh");
+        let mut command = crate::binary::command("/bin/sh");
         command
             .arg(checkout.join("scripts/build.sh"))
             .env("PATH", &self.tools)
@@ -214,7 +218,7 @@ chmod 755 "$directory/$target/release/namedrop"
     }
 
     fn setup(&self, checkout: &Path, operation: Option<&str>) -> Command {
-        let mut command = Command::new("/bin/sh");
+        let mut command = crate::binary::command("/bin/sh");
         command.arg(checkout.join("scripts/setup.sh"));
         if let Some(operation) = operation {
             command.arg(operation);
@@ -376,7 +380,7 @@ fn source_build_stages_each_supported_target_where_every_entrypoint_looks() {
             "{target}: the staged executable is not executable"
         );
         // Before activation, host entrypoints resolve through run.sh to it.
-        let resolved = Command::new("/bin/sh")
+        let resolved = crate::binary::command("/bin/sh")
             .args(["./scripts/run.sh", "reconcile"])
             .current_dir(&checkout)
             .env("PATH", "/usr/bin:/bin")
@@ -431,7 +435,7 @@ fn source_manifest_routes_every_entrypoint_through_the_launcher_scripts() {
                 };
                 assert_eq!(command, expected);
                 assert!(
-                    Command::new("sh")
+                    crate::binary::command("sh")
                         .args([command[1], "--help"])
                         .current_dir(&checkout)
                         .output()

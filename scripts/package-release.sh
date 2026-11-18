@@ -66,14 +66,15 @@ mkdir -p "$package/bin" "$package/scripts" "$package/docs"
 cp "$binary" "$package/bin/namedrop"
 cp "$namedrop_root/README.md" "$namedrop_root/CHANGELOG.md" "$namedrop_root/CONTRIBUTING.md" "$namedrop_root/LICENSE" "$package/"
 cp "$namedrop_root/scripts/setup.sh" "$package/scripts/"
+cp "$namedrop_root/scripts/install.sh" "$package/scripts/"
 cp "$namedrop_root/scripts/update.sh" "$namedrop_root/scripts/update.py" "$package/scripts/"
-cp "$namedrop_root/scripts/run.sh" "$namedrop_root/scripts/runtime.py" "$package/scripts/"
+cp "$namedrop_root/scripts/run.sh" "$namedrop_root/scripts/runtime.py" "$namedrop_root/scripts/runtime_install.py" "$package/scripts/"
 cp "$namedrop_root/scripts/check-linux-prerequisites.sh" "$package/scripts/"
 cp "$namedrop_root/runtime.json" "$package/"
-for doc in operations compatibility releasing; do
+for doc in operations compatibility releasing rex rex-reference channels-testing; do
   cp "$namedrop_root/docs/$doc.md" "$package/docs/"
 done
-chmod 755 "$package/bin/namedrop" "$package/scripts/setup.sh" "$package/scripts/update.sh"
+chmod 755 "$package/bin/namedrop" "$package/scripts/setup.sh" "$package/scripts/install.sh" "$package/scripts/update.sh"
 # Keep one manifest source. A released package has no build step, runs the
 # bundled bin/namedrop through run.sh, and declares only its own platform.
 awk -v platform="$platform" '
@@ -85,7 +86,7 @@ awk -v platform="$platform" '
 ' "$namedrop_root/herdr-plugin.toml" > "$package/herdr-plugin.toml"
 (
   cd "$package"
-  sha256 bin/namedrop herdr-plugin.toml runtime.json README.md CHANGELOG.md CONTRIBUTING.md LICENSE scripts/setup.sh scripts/update.sh scripts/update.py scripts/run.sh scripts/runtime.py scripts/check-linux-prerequisites.sh docs/*.md > SHA256SUMS
+  sha256 bin/namedrop herdr-plugin.toml runtime.json README.md CHANGELOG.md CONTRIBUTING.md LICENSE scripts/setup.sh scripts/install.sh scripts/update.sh scripts/update.py scripts/run.sh scripts/runtime.py scripts/runtime_install.py scripts/check-linux-prerequisites.sh docs/*.md > SHA256SUMS
 )
 COPYFILE_DISABLE=1 tar -czf "$stage/$name.tar.gz" -C "$stage" "$name"
 (

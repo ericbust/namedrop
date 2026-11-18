@@ -1,11 +1,14 @@
 //! Shared wiring and conflict-safe shortcut installation acceptance.
+
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 
 use std::{
     fs,
     path::PathBuf,
-    process::Command,
     sync::atomic::{AtomicU64, Ordering},
 };
 static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -36,10 +39,11 @@ mod popup_input;
 #[allow(dead_code)]
 fn with_runtime_options<T>(
     _options: &namedrop::cli::RuntimeOptions,
+    _inherited: &dyn namedrop::mux::home::Inherited,
     _action: impl FnOnce(
         &namedrop::LifecycleRuntime<
             '_,
-            namedrop::ProcessHerdr,
+            std::sync::Arc<dyn namedrop::mux::Mux>,
             namedrop::SystemClock,
             namedrop::ProcessIds,
         >,
@@ -166,8 +170,8 @@ struct Fixture(PathBuf);
 #[ignore = "requires explicit live acceptance and authenticated model usage"]
 fn live_origin_probe() {
     use namedrop::{
-        LifecycleRuntime, ProcessHerdr, ProcessIds, SystemClock, collect_agent_status,
-        discover_worktree_for_workspace, summarize_agent_status,
+        LifecycleRuntime, ProcessIds, SystemClock, collect_agent_status,
+        discover_worktree_for_workspace, mux, summarize_agent_status,
     };
     use serde_json::json;
     use std::{env, sync::atomic::AtomicBool, time::Instant};
@@ -178,14 +182,18 @@ fn live_origin_probe() {
     let state = PathBuf::from(env::var("HERDR_PLUGIN_STATE_DIR").expect("state required"));
     let home = env::var_os("HOME").map(PathBuf::from);
     let cwd = env::current_dir().unwrap();
-    let herdr = ProcessHerdr::default().with_socket(Some(socket.clone()));
+    let herdr = mux::herdr::connect(
+        Some(&socket),
+        mux::Budget::ADAPTER_DEFAULT,
+        Default::default(),
+    );
     let before = discover_worktree_for_workspace(&herdr, &workspace).unwrap();
     let origin = before
         .panes
         .iter()
         .find(|p| p.pane_id == pane_id)
         .expect("origin gone");
-    let session = origin.agent_session_id.as_ref().map(|id| id.as_str());
+    let session = origin.agent_session_id().map(|id| id.as_str());
     let clock = SystemClock;
     let ids = ProcessIds::default();
     let runtime = LifecycleRuntime {
@@ -196,14 +204,20 @@ fn live_origin_probe() {
         workspace_id: Some(&workspace),
         current_pane_id: Some(&pane_id),
         session_socket_id: &socket,
-        herdr: &herdr,
+        mux: &herdr,
         clock: &clock,
         ids: &ids,
     };
     let cancelled = AtomicBool::new(false);
     let started = Instant::now();
-    let mut snapshot =
-        collect_agent_status(&runtime, &origin.terminal_id, session, &cancelled).unwrap();
+    let mut snapshot = collect_agent_status(
+        &runtime,
+        &origin.terminal_id,
+        session,
+        env::var("HERDR_PANE_ID").ok().as_deref(),
+        &cancelled,
+    )
+    .unwrap();
     let facts_ms = started.elapsed().as_millis();
     if env::var("NAMEDROP_VERIFY_FACTS_ONLY").as_deref() == Ok("1") {
         assert_eq!(snapshot["handoffs_available"], true, "{snapshot}");
@@ -249,7 +263,7 @@ fn live_origin_probe() {
     let unchanged = after.panes.iter().any(|p| {
         p.pane_id == pane_id
             && p.terminal_id == origin.terminal_id
-            && p.agent_session_id == origin.agent_session_id
+            && p.agent_session_id() == origin.agent_session_id()
     });
     let observation = json!({
         "pane":pane_id,"host":snapshot["origin"]["host"],"facts_ms":facts_ms,
@@ -275,7 +289,7 @@ impl Fixture {
         Self(root)
     }
     fn install(&self) -> std::process::Output {
-        Command::new(env!("CARGO_BIN_EXE_namedrop"))
+        crate::binary::namedrop()
             .args(["--json", "ui", "install-shortcuts", "--config"])
             .arg(self.0.join("config.toml"))
             .env("TMPDIR", &self.0)

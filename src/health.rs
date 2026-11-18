@@ -1,10 +1,11 @@
 use crate::codex_app_server::ServedPanes;
 use crate::integration::pane_agent_runtime;
 use crate::lifecycle::{CollaborationSetup, terminal_safe_text};
+use crate::locator::{Locator, Name};
+use crate::mux::{AgentState, InputOutcome};
 use crate::{
-    AgentSessionId, AttentionSourceKind, Clock, HerdrCommandExecutor, IdGenerator,
-    LifecycleRuntime, PaneAddressLifecycle, StateStore, discover_worktree,
-    discover_worktree_for_workspace,
+    AgentSessionId, AttentionSourceKind, Clock, IdGenerator, LifecycleRuntime,
+    PaneAddressLifecycle, StateStore, discover_worktree, discover_worktree_for_workspace,
 };
 use serde::{Deserialize, Serialize};
 
@@ -71,17 +72,37 @@ pub struct HealthReport {
 }
 
 /// Inspect Namedrop without reconciling, retrying, cancelling, or changing state.
-pub fn diagnose_collaboration<E, C, I>(runtime: &LifecycleRuntime<'_, E, C, I>) -> HealthReport
+pub fn diagnose_collaboration<M, C, I>(runtime: &LifecycleRuntime<'_, M, C, I>) -> HealthReport
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
+    use crate::dashboard::tailscale::Repair;
     let mut report = diagnose_space(runtime);
+    if let Some(home) = runtime.home_directory {
+        for warning in crate::rex_ui::predecessor_warnings(home, runtime.state_directory) {
+            report.issues.push(issue("ND-INSTALL-001",HealthSeverity::Notice,"Agents on Rex have not run the new hooks yet.",&warning,HealthRepairKind::AgentRepair,"In each Rex session, run Activate Namedrop again and name the panes again. Restart an agent that shows Hook failed or does not answer a mention."));
+            if report.status == HealthStatus::Healthy {
+                report.status = HealthStatus::NeedsAttention;
+            }
+        }
+    }
+    if runtime.mux.endpoint().kind == crate::mux::MuxKind::Rex
+        && let Some(inspected) =
+            crate::rex_ui::inspect(runtime.home_directory, runtime.mux.endpoint())
+    {
+        let check = rex_module_issue(inspected);
+        if check.severity != HealthSeverity::Info && report.status == HealthStatus::Healthy {
+            report.status = HealthStatus::NeedsAttention;
+        }
+        report.issues.push(check);
+    }
     if let Some(diagnostic) = crate::dashboard::tailscale::diagnose(runtime.state_directory) {
+        let idle = crate::dashboard::idle_policy(runtime.state_directory);
         let explanation = match (&diagnostic.url, &diagnostic.problem) {
             (Some(url), Some(problem)) => format!("{url}: {problem}"),
-            (Some(url), None) => url.clone(),
+            (Some(url), None) => format!("{url}. {}", idle.sentence()),
             (None, Some(problem)) => problem.clone(),
             (None, None) => unreachable!(),
         };
@@ -100,25 +121,57 @@ where
             },
             &explanation,
             HealthRepairKind::HumanDecision,
-            if problem {
-                "Run `namedrop channels --tailscale off`, then `namedrop channels --tailscale` to configure access again."
-            } else {
-                "Run `namedrop channels --tailscale --no-open` for a one-time sign-in link."
+            &match diagnostic.repair {
+                Repair::Start => tailnet_start_repair(runtime.mux.endpoint().kind).to_owned(),
+                Repair::FreePort(port) => format!("Stop the program that uses port {port}, then run `namedrop channels --no-open`. To move Channels to another port instead, run `namedrop channels --tailscale off`, then `namedrop channels --tailscale`."),
+                Repair::Reconfigure => "Run `namedrop channels --tailscale off`, then `namedrop channels --tailscale` to configure access again.".to_owned(),
+                Repair::SignIn => "Run `namedrop channels --tailscale --no-open` for a one-time sign-in link.".to_owned(),
             },
         );
-        check.diagnostic =
-            serde_json::json!({"url": diagnostic.url, "problem": diagnostic.problem});
+        check.diagnostic = serde_json::json!({
+            "url": diagnostic.url,
+            "problem": diagnostic.problem,
+            "idle": idle.json(),
+        });
         report.issues.push(check);
         if problem && report.status == HealthStatus::Healthy {
             report.status = HealthStatus::NeedsAttention;
         }
     }
+    let idle = crate::dashboard::idle_policy(runtime.state_directory);
+    let setting = match crate::dashboard::idle::saved(runtime.state_directory) {
+        Err(unreadable) => Some(issue(
+            "ND-CHANNELS-001",
+            HealthSeverity::Notice,
+            "Channels cannot read its saved idle setting.",
+            &format!("{unreadable}. The 10 minute default applies."),
+            HealthRepairKind::HumanDecision,
+            "Run `namedrop channels --idle <minutes|never>` to save it again.",
+        )),
+        // With Tailscale access on, the tailnet entry above already says the setting is unused.
+        Ok(Some(_)) if idle.source == crate::dashboard::idle::Source::Setting => Some(issue(
+            "ND-CHANNELS-001",
+            HealthSeverity::Info,
+            "Channels has a saved idle setting.",
+            &idle.sentence(),
+            HealthRepairKind::HumanDecision,
+            "Run `namedrop channels --idle <minutes|never>` to change it.",
+        )),
+        Ok(_) => None,
+    };
+    if let Some(mut check) = setting {
+        if check.severity == HealthSeverity::Notice && report.status == HealthStatus::Healthy {
+            report.status = HealthStatus::NeedsAttention;
+        }
+        check.diagnostic = serde_json::json!({"idle": idle.json()});
+        report.issues.push(check);
+    }
     report
 }
 
-fn diagnose_space<E, C, I>(runtime: &LifecycleRuntime<'_, E, C, I>) -> HealthReport
+fn diagnose_space<M, C, I>(runtime: &LifecycleRuntime<'_, M, C, I>) -> HealthReport
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
@@ -131,7 +184,7 @@ where
         worktree,
     } = match load_health_snapshot(runtime) {
         Ok(snapshot) => snapshot,
-        Err(error) => return unavailable_report(&error),
+        Err(error) => return unavailable_report(&error, runtime.mux.endpoint().kind),
     };
     let worktree_issue = worktree.as_deref().and_then(|worktree| {
         crate::install::codex_sandbox::check_worktree(runtime.state_directory, worktree)
@@ -139,7 +192,7 @@ where
             .map(|error| issue(
                 "ND-INTEGRATION-001",
                 HealthSeverity::Broken,
-                "The Space worktree exposes trusted Namedrop state to Codex.",
+                runtime.mux.endpoint().kind.text("The Space worktree exposes trusted Namedrop state to Codex.", "The Rex session worktree exposes trusted Namedrop state to Codex."),
                 &error,
                 HealthRepairKind::HumanDecision,
                 "Move the worktree or Namedrop state as instructed, then activate Namedrop again.",
@@ -165,7 +218,10 @@ where
         let mut inactive = issue(
             "ND-SETUP-001",
             HealthSeverity::Blocked,
-            "Namedrop is not active in this space.",
+            runtime.mux.endpoint().kind.text(
+                "Namedrop is not active in this space.",
+                "Namedrop is not active in this Rex session.",
+            ),
             "Messages will wait until Namedrop is activated.",
             HealthRepairKind::ProductAction,
             "Activate Namedrop?",
@@ -271,12 +327,99 @@ where
                 HealthRepairKind::ProductAction,
                 "Follow the reported Codex plugin setup steps.",
             );
-            hook_issue.diagnostic =
-                crate::user_hook_activation_guidance(runtime.home_directory, runtime.agent_config)
-                    ["codex"]
-                    .clone();
+            hook_issue.diagnostic = crate::user_hook_activation_guidance(
+                runtime.home_directory,
+                runtime.agent_config,
+                runtime.mux.endpoint().kind,
+            )["codex"]
+                .clone();
             issues.push(hook_issue);
         }
+    }
+    // UI.md's third case: a Herdr release from before step 6 rebaked the
+    // packages for its own state and left the module naming the standalone
+    // one. Activating again here would take the packages back, so the
+    // record's repair is not offered beside this one.
+    let module_mismatch = runtime.mux.endpoint().kind == crate::mux::MuxKind::Rex
+        && runtime.home_directory.is_some_and(|home| {
+            std::fs::read(crate::locator::rex_registration(home))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .and_then(|registration| {
+                    registration["state"].as_str().map(std::path::PathBuf::from)
+                })
+                .is_some_and(|module| crate::install::packages_bake_another_state(home, &module))
+        });
+    if module_mismatch {
+        issues.push(issue(
+            "ND-INSTALL-003",
+            HealthSeverity::Notice,
+            "The Rex module and the shared agent packages name different installs.",
+            "An older Herdr release updated the packages without updating the Rex module.",
+            HealthRepairKind::AgentRepair,
+            "Update Namedrop in Herdr, then run Activate Namedrop there again.",
+        ));
+    }
+    if !module_mismatch
+        && let Some((record, recorded)) = runtime
+            .home_directory
+            .and_then(|home| crate::install::install_record_mismatch(home, runtime.agent_config))
+    {
+        let mut record_issue = issue(
+            "ND-INTEGRATION-002",
+            HealthSeverity::Notice,
+            "The install record names another state directory than the hooks write.",
+            &format!(
+                "{} names {}, and an installed hook wrapper writes elsewhere, so Namedrop in a {} would read a directory its hooks never write.",
+                record.display(),
+                recorded.display(),
+                runtime.mux.endpoint().kind.text("Rex block", "Rex pane"),
+            ),
+            HealthRepairKind::AgentRepair,
+            "Activate Namedrop again, which rewrites the wrappers and the record together.",
+        );
+        add_operation(
+            &mut record_issue,
+            runtime,
+            &space_id,
+            "activate",
+            serde_json::json!({"confirmed":true}),
+            None,
+        );
+        issues.push(record_issue);
+    }
+    let rex =
+        crate::mux::Endpoint::parse(runtime.session_socket_id).kind == crate::mux::MuxKind::Rex;
+    let unbindable = runtime
+        .home_directory
+        .filter(|_| rex)
+        .map(crate::install::wrappers_without_runtime)
+        .unwrap_or_default();
+    if !unbindable.is_empty() {
+        let mut wrapper_issue = issue(
+            "ND-INTEGRATION-003",
+            HealthSeverity::Blocked,
+            "An installed hook wrapper does not name its agent, so its sessions never bind in a Rex pane.",
+            &format!(
+                "{} sets no NAMEDROP_HOOK_RUNTIME. It was installed by an older Namedrop, and an agent whose hooks do not bind cannot register or receive mentions here.",
+                unbindable
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(" and ")
+            ),
+            HealthRepairKind::AgentRepair,
+            "Activate Namedrop again, which rewrites the wrappers, then restart the agent.",
+        );
+        add_operation(
+            &mut wrapper_issue,
+            runtime,
+            &space_id,
+            "activate",
+            serde_json::json!({"confirmed":true}),
+            None,
+        );
+        issues.push(wrapper_issue);
     }
     if setup
         .worktree_state
@@ -286,7 +429,10 @@ where
         let mut paused = issue(
             "ND-SPACE-001",
             HealthSeverity::Notice,
-            "Namedrop is paused in this space.",
+            runtime.mux.endpoint().kind.text(
+                "Namedrop is paused in this space.",
+                "Namedrop is paused in this Rex session.",
+            ),
             "Messages are preserved and will wait until Namedrop resumes.",
             HealthRepairKind::ProductAction,
             "Resume Namedrop?",
@@ -302,7 +448,7 @@ where
         issues.push(paused);
     }
     if let Some(stale) = crate::installed_runtime::stale_release(runtime.state_directory, || {
-        registered_plugin_root(runtime.herdr)
+        registered_plugin_root(runtime.mux)
     }) {
         issues.push(stale_runtime_issue(&stale));
     }
@@ -313,10 +459,33 @@ where
             workspace,
         );
         issues.extend(status_queue_issues(&queue, runtime.clock.now_unix_ms()));
+        if crate::mux::Endpoint::parse(runtime.session_socket_id).kind == crate::mux::MuxKind::Rex {
+            issues.extend(expired_replies_issue(&crate::relay::expired_replies(
+                runtime.state_directory,
+            )));
+            issues.extend(unsent_issue(&crate::relay::unsent_by_label(
+                runtime.state_directory,
+                runtime.session_socket_id,
+            )));
+            match crate::relay::conditions(runtime.state_directory, runtime.session_socket_id) {
+                Ok(conditions) => issues.extend(relay_conditions_issue(&conditions)),
+                Err(error) => issues.push(issue(
+                    "ND-RELAY-005",
+                    HealthSeverity::Notice,
+                    "Relay conditions could not be read.",
+                    &error.to_string(),
+                    HealthRepairKind::HumanDecision,
+                    "Check the relay database and filesystem permissions, then run Doctor again.",
+                )),
+            }
+            issues.extend(relay_set_aside_issue(&crate::relay::store::set_aside_in(
+                runtime.state_directory,
+            )));
+        }
     }
-    match crate::update_check::settings() {
+    match crate::update_check::settings(runtime.state_directory) {
         Err(error) => {
-            let path = crate::update_check::settings_path().ok();
+            let path = crate::update_check::settings_path(runtime.state_directory).ok();
             let mut setting = issue(
                 "ND-UPDATE-002",
                 HealthSeverity::Info,
@@ -330,6 +499,14 @@ where
         }
         Ok(_) => {
             if let Some(update) = crate::update_check::available(runtime.state_directory) {
+                let instruction = update.instruction();
+                let detail = if update.standalone {
+                    format!("Update: {instruction}")
+                } else {
+                    format!(
+                        "Updating keeps your names, groups, handoffs and running agents. Run `{instruction}` from a plain shell tab."
+                    )
+                };
                 let mut update_issue = issue(
                     "ND-UPDATE-001",
                     HealthSeverity::Info,
@@ -338,19 +515,20 @@ where
                         update.version,
                         env!("CARGO_PKG_VERSION")
                     ),
-                    &format!(
-                        "Updating keeps your names, groups, handoffs and running agents. Run `{}` from a plain shell tab.",
-                        crate::update_check::UPDATE_COMMAND
-                    ),
+                    &detail,
                     HealthRepairKind::HumanDecision,
-                    "Run Update Namedrop when you are ready.",
+                    if update.standalone {
+                        &detail
+                    } else {
+                        "Run Update Namedrop when you are ready."
+                    },
                 );
-                update_issue.repair.command = Some(
+                update_issue.repair.command = (!update.standalone).then(|| {
                     crate::update_check::UPDATE_COMMAND
                         .split(' ')
                         .map(str::to_owned)
-                        .collect(),
-                );
+                        .collect()
+                });
                 update_issue.diagnostic = serde_json::json!({
                     "installed_version": env!("CARGO_PKG_VERSION"), "available_version": update.version,
                     "checked_at":update.checked_at, "last_success_at":update.last_success_at,
@@ -363,7 +541,11 @@ where
 
     let served = crate::codex_app_server::served_codex_panes(runtime, &setup.panes);
     if let Some(served) = &served {
-        issues.push(shared_app_server_issue(served, &space_id));
+        issues.push(shared_app_server_issue(
+            served,
+            &space_id,
+            runtime.mux.endpoint().kind,
+        ));
     }
     let served_pane = |pane_id: Option<&str>| {
         served
@@ -377,28 +559,84 @@ where
         .iter()
         .filter(|pane| pane_agent_runtime(pane).is_some())
         .count();
+    // A Rex block reports a session only through the binding its own hook
+    // wrote, so an agent's block with no session says why when its live
+    // foreground's hook was refused.
+    let mut refused = Vec::new();
+    for pane in setup.panes.iter().filter(|_| rex) {
+        let Some(crate::mux::SessionClaim::Unreported { incarnation }) =
+            pane.agent.as_ref().map(|agent| &agent.session)
+        else {
+            continue;
+        };
+        let Some(refusal) =
+            crate::mux::rex::refusal(runtime.state_directory, &pane.pane_id, incarnation)
+        else {
+            continue;
+        };
+        let mut binding = issue(
+            "ND-SESSION-004",
+            HealthSeverity::Blocked,
+            &format!(
+                "Namedrop refused to bind the agent session in block {}.",
+                pane.pane_id
+            ),
+            &format!(
+                "Its latest hook ({}) was refused because {}.",
+                refusal.session,
+                refused_bind_reason(&refusal.condition)
+            ),
+            HealthRepairKind::HumanDecision,
+            "Start the agent as the block's own program, then send it one prompt so its hook binds the session.",
+        );
+        binding.diagnostic = serde_json::json!({
+            "pane_id": pane.pane_id, "workspace_id": space_id, "endpoint": refusal.endpoint,
+            "condition": refusal.condition, "session": refusal.session, "refused_at_ms": refusal.at_ms,
+        });
+        issues.push(binding);
+        refused.push(pane.pane_id.as_str());
+    }
     for pane in setup
         .panes
         .iter()
         .filter(|pane| pane_agent_runtime(pane).is_some())
     {
-        if pane.agent_session_id.is_none() && !served_pane(Some(&pane.pane_id)) {
+        if pane.agent_session_id().is_none()
+            && !served_pane(Some(&pane.pane_id))
+            && !refused.contains(&pane.pane_id.as_str())
+        {
             let agent_runtime = pane_agent_runtime(pane).expect("supported panes were filtered");
-            let setup = crate::install::native_session_setup(agent_runtime);
+            let setup =
+                crate::install::native_session_setup(agent_runtime, runtime.mux.endpoint().kind);
             let mut native = issue(
                 "ND-SESSION-002",
                 HealthSeverity::Blocked,
-                &format!("Herdr has no session identity for pane {}.", pane.pane_id),
+                &format!(
+                    "{} has no session identity for pane {}.",
+                    runtime.mux.endpoint().kind.text("Herdr", "Namedrop"),
+                    pane.pane_id
+                ),
                 setup["explanation"]
                     .as_str()
                     .expect("static setup explanation"),
                 HealthRepairKind::ProductAction,
-                "Install the Herdr native integration if needed, then restart this agent.",
+                runtime.mux.endpoint().kind.text("Install the Herdr native integration if needed, then restart this agent.", "Run Activate Namedrop again, then restart this agent to load the Namedrop hooks."),
             );
             native.diagnostic = serde_json::json!({"pane_id":pane.pane_id,"runtime":agent_runtime,"workspace_id":space_id});
-            native.repair.operation = Some("herdr.integration.install".to_owned());
-            native.repair.input = Some(serde_json::json!({"runtime":setup["command"][3]}));
-            native.repair.command = serde_json::from_value(setup["command"].clone()).ok();
+            if rex {
+                add_operation(
+                    &mut native,
+                    runtime,
+                    &space_id,
+                    "activate",
+                    serde_json::json!({"confirmed":true}),
+                    None,
+                );
+            } else {
+                native.repair.operation = Some("herdr.integration.install".to_owned());
+                native.repair.input = Some(serde_json::json!({"runtime":setup["command"][3]}));
+                native.repair.command = serde_json::from_value(setup["command"].clone()).ok();
+            }
             issues.push(native);
         }
         if setup
@@ -450,8 +688,8 @@ where
                 .find(|p| address.pane_id.as_deref() == Some(p.pane_id.as_str()))
             {
                 if pane.agent.is_none()
-                    && pane.agent_session_id.is_none()
-                    && crate::terminal::shell_is_available(runtime.herdr, &pane.pane_id)
+                    && pane.agent_session_id().is_none()
+                    && crate::terminal::shell_is_available(runtime.mux, &pane.pane_id)
                 {
                     available_terminals += 1;
                 } else {
@@ -469,7 +707,7 @@ where
             && !served_pane(address.pane_id.as_deref())
             && !setup.panes.iter().any(|pane| {
                 address.pane_id.as_deref() == Some(pane.pane_id.as_str())
-                    && pane.agent_session_id.is_none()
+                    && pane.agent_session_id().is_none()
             })
             && matches!(
                 address.lifecycle,
@@ -490,7 +728,7 @@ where
                 "registered_session_id": address.agent_session_id,
                 "live_session_id": setup.panes.iter()
                     .find(|pane| address.pane_id.as_deref() == Some(pane.pane_id.as_str()))
-                    .and_then(|pane| pane.agent_session_id.as_ref()),
+                    .and_then(|pane| pane.agent_session_id()),
             });
             add_operation(
                 &mut disconnected,
@@ -521,10 +759,19 @@ where
         issues.push(issue(
             "ND-SETUP-003",
             HealthSeverity::Blocked,
-            "No supported agents are open in this space.",
-            "Start Codex or Claude Code in a Herdr pane, then check again.",
+            runtime.mux.endpoint().kind.text(
+                "No supported agents are open in this space.",
+                "No supported agents are open in this Rex session.",
+            ),
+            runtime.mux.endpoint().kind.text(
+                "Start Codex or Claude Code in a Herdr pane, then check again.",
+                "Start Codex or Claude Code in a Rex pane, then check again.",
+            ),
             HealthRepairKind::ProductAction,
-            "Start an agent in this space?",
+            runtime.mux.endpoint().kind.text(
+                "Start an agent in this space?",
+                "Start an agent in this Rex session?",
+            ),
         ));
     }
     for address in &setup.addresses {
@@ -534,7 +781,7 @@ where
             .find(|pane| address.pane_id.as_deref() == Some(pane.pane_id.as_str()));
         if let Some(session) = pane
             .filter(|pane| pane_agent_runtime(pane) == Some(crate::AgentRuntime::Codex))
-            .and_then(|pane| pane.agent_session_id.as_ref())
+            .and_then(|pane| pane.agent_session_id())
             && crate::hook_runs::refused(runtime.state_directory, session.as_str())
         {
             let mut refused = issue(
@@ -693,23 +940,29 @@ where
 /// the pane had no identity at launch and nothing is sent.
 ///
 /// `Ok` means only that the host accepted the prompt: nothing is repaired and
-/// no delivery is recorded. `Err` states, in its first words, why nothing was
-/// sent.
-pub fn request_doctor_assistance<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+/// no delivery is recorded. It holds what the Doctor screen then says. `Err`
+/// states, in its first words, why nothing was sent.
+pub fn request_doctor_assistance<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     expected_session_id: &str,
-) -> Result<(), String>
+) -> Result<&'static str, String>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
     let space_id = runtime
         .workspace_id
-        .ok_or("Asking the agent requires the popup's invoking space")?;
+        .ok_or(runtime.mux.endpoint().kind.text(
+            "Asking the agent requires the popup's invoking space",
+            "Asking the agent requires the screen's invoking session",
+        ))?;
     let pane_id = runtime
         .current_pane_id
-        .ok_or("Asking the agent requires the popup's invoking pane")?;
+        .ok_or(runtime.mux.endpoint().kind.text(
+            "Asking the agent requires the popup's invoking pane",
+            "Asking the agent requires the screen's invoking pane",
+        ))?;
     // A pane opened before its agent's first turn has no identity yet, which is
     // ordinary: the first prompt establishes one. Reinstalling or restarting is
     // the remedy only once a turn has passed without one appearing.
@@ -717,11 +970,11 @@ where
         if invoking_pane_is_served(runtime, space_id, pane_id) {
             return Err(format!(
                 "Nothing was sent: {} Follow the steps Doctor lists.",
-                crate::codex_app_server::SUMMARY
+                crate::codex_app_server::summary(runtime.mux.endpoint().kind)
             ));
         }
         return Err(
-            "Submit the first prompt in this pane, then open Doctor again: Namedrop has no session identity for it yet. If it is still missing after a turn, check or reinstall the Herdr native integration and restart the agent."
+            runtime.mux.endpoint().kind.text("Submit the first prompt in this pane, then open Doctor again: Namedrop has no session identity for it yet. If it is still missing after a turn, check or reinstall the Herdr native integration and restart the agent.", "Submit the first prompt in this Rex pane, then open Doctor again. If its session identity is still missing after a turn, run Activate Namedrop again and restart the agent.")
                 .to_owned(),
         );
     }
@@ -756,35 +1009,47 @@ where
         pane_id,
     )
     .map_err(|error| error.with_alias(alias.as_deref()).to_string())?;
-    let live = live_agent_session(runtime, space_id, pane_id)?;
+    let (live, expect) = live_agent_session(runtime, space_id, pane_id)?;
     if live.as_str() != expected_session_id {
         return Err("The pane changed session; nothing was sent.".to_owned());
     }
-    let prompt = doctor_assistance_prompt(&report, pane_id, &live);
+    let prompt = doctor_assistance_prompt(&report, pane_id, &live, runtime.mux.endpoint().kind);
+    let request = crate::mux::PromptRequest {
+        expect: &expect,
+        text: &prompt,
+    };
     match effects.prompt(
-        runtime.herdr,
+        runtime.mux,
         &crate::pane_effects::InputOwner::Other,
-        &prompt,
+        request,
     ) {
-        Ok(_) => Ok(()),
-        Err(error)
-            if runtime
-                .herdr
-                .classify_prompt_failure(&error)
-                .is_temporary_pre_invocation() =>
-        {
+        // The pane's agent may be unnamed, so this names the pane rather than
+        // echoing a mention that may not exist.
+        InputOutcome::Delivered => Ok(runtime.mux.endpoint().kind.text(
+            "Herdr accepted the prompt. That is not the agent acting,\n\
+             and no issue is fixed yet.\n\n\
+             Go back to the pane you opened Doctor from for the agent's\n\
+             report and any steps it needs from you.\n",
+            "Rex accepted the prompt. That is not the agent acting,\n\
+             and no issue is fixed yet.\n\n\
+             Go back to the pane you opened Doctor from for the agent's\n\
+             report and any steps it needs from you.\n",
+        )),
+        InputOutcome::Declined(_, error) => {
             Err(format!("Not sent, the agent did not accept it: {error}"))
         }
-        Err(error) => Err(format!("Unconfirmed, do not assume it arrived: {error}")),
+        InputOutcome::Refused(error) | InputOutcome::Ambiguous(error) => {
+            Err(format!("Unconfirmed, do not assume it arrived: {error}"))
+        }
     }
 }
 
-fn invoking_pane_is_served<E: HerdrCommandExecutor, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+fn invoking_pane_is_served<M: crate::mux::Mux, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     space_id: &str,
     pane_id: &str,
 ) -> bool {
-    discover_worktree_for_workspace(runtime.herdr, space_id)
+    discover_worktree_for_workspace(runtime.mux, space_id)
         .ok()
         .and_then(|discovered| {
             let pane = discovered
@@ -796,19 +1061,19 @@ fn invoking_pane_is_served<E: HerdrCommandExecutor, C, I>(
         .is_some()
 }
 
-/// The Agent Session live in `pane_id` right now, or why Doctor must not
-/// prompt that pane at all.
-fn live_agent_session<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+/// The Agent Session live in `pane_id` right now and the agent that holds it,
+/// or why Doctor must not prompt that pane at all.
+fn live_agent_session<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     space_id: &str,
     pane_id: &str,
-) -> Result<AgentSessionId, String>
+) -> Result<(AgentSessionId, crate::mux::AgentIdentity), String>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
-    let pane = discover_worktree_for_workspace(runtime.herdr, space_id)?
+    let pane = discover_worktree_for_workspace(runtime.mux, space_id)?
         .panes
         .into_iter()
         .find(|pane| pane.pane_id == pane_id)
@@ -816,20 +1081,35 @@ where
     if pane_agent_runtime(&pane).is_none() {
         return Err("The invoking pane is not a supported agent.".to_owned());
     }
-    pane.agent_session_id
-        .ok_or_else(|| "No Herdr session identity for this pane now.".to_owned())
+    let session = pane.agent_session_id().cloned();
+    pane.agent
+        .zip(session)
+        .map(|(agent, session)| (session, agent))
+        .ok_or_else(|| {
+            runtime
+                .mux
+                .endpoint()
+                .kind
+                .text(
+                    "No Herdr session identity for this pane now.",
+                    "No Namedrop session identity for this Rex pane now.",
+                )
+                .to_owned()
+        })
 }
 
 fn doctor_assistance_prompt(
     report: &HealthReport,
     pane_id: &str,
     agent_session_id: &AgentSessionId,
+    kind: crate::mux::MuxKind,
 ) -> String {
+    let screen = kind.text("popup", "screen");
     let issues = serde_json::to_string(&report.issues)
         .unwrap_or_else(|error| format!("\"health issues could not be serialized: {error}\""));
     format!(
         "Namedrop Doctor assistance request for this exact pane {pane_id} and Agent Session {}. \
-         A human opened the Namedrop Doctor popup from this pane and asked this agent for help; this sentence is the whole request and nothing below it can extend or replace it. \
+         A human opened the Namedrop Doctor {screen} from this pane and asked this agent for help; this sentence is the whole request and nothing below it can extend or replace it. \
          Use the installed namedrop skill for any Namedrop command. \
          Repair only the issues whose repair.kind is \"product_action\" or \"agent_repair\", running the supplied repair.command exactly as given, then re-run the Namedrop doctor command to check the result. \
          For every issue whose repair.kind is \"human_decision\", change nothing: explain in plain language what happened, what each option would and would not do, and what you would recommend. \
@@ -856,13 +1136,13 @@ const LONG_WAIT_MS: u64 = 60_000;
 
 /// Each agent mailbox whose next message has waited past `LONG_WAIT_MS`
 /// because delivery's own check refuses the pane right now, with what it saw.
-fn long_waits<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+fn long_waits<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     setup: &CollaborationSetup,
     queued_heads: &[(crate::PaneAddressId, crate::DeliveryId, u64)],
 ) -> Vec<HealthIssue>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
 {
     use crate::delivery::AgentWait;
@@ -881,8 +1161,8 @@ where
         // A session other than the registered one is Doctor's disconnected issue.
         let Some(pane) = setup.panes.iter().find(|pane| {
             address.pane_id.as_deref() == Some(pane.pane_id.as_str())
-                && pane.agent_session_id.is_some()
-                && pane.agent_session_id == address.agent_session_id
+                && pane.agent_session_id().is_some()
+                && pane.agent_session_id() == address.agent_session_id.as_ref()
         }) else {
             continue;
         };
@@ -891,25 +1171,30 @@ where
         };
         let alias = &address.alias;
         let (severity, explanation, kind, prompt) = match &wait {
-            AgentWait::Status(Some(status)) if status == "blocked" => (
+            AgentWait::Status(Some(AgentState::Blocked)) => (
                 HealthSeverity::Notice,
                 format!(
-                    "Herdr reports @{alias} waiting on a question or permission prompt. The message goes in once it is answered."
+                    "{} reports @{alias} waiting on a question or permission prompt. The message goes in once it is answered.",
+                    runtime.mux.endpoint().kind.title()
                 ),
                 HealthRepairKind::HumanDecision,
                 format!("Answer @{alias}'s prompt."),
             ),
-            AgentWait::Status(Some(status)) if status == "working" => (
+            AgentWait::Status(Some(AgentState::Working)) => (
                 HealthSeverity::Info,
-                format!("Herdr reports @{alias} working. The message goes in when its turn ends."),
+                format!(
+                    "{} reports @{alias} working. The message goes in when its turn ends.",
+                    runtime.mux.endpoint().kind.title()
+                ),
                 HealthRepairKind::ProductAction,
                 format!("Wait for @{alias}'s turn to end."),
             ),
             AgentWait::Status(status) => (
                 HealthSeverity::Info,
                 format!(
-                    "Herdr reports @{alias} {}. The message goes in once Herdr reports it idle.",
-                    status.as_deref().unwrap_or("with no status")
+                    "{host} reports @{alias} {}. The message goes in once {host} reports it idle.",
+                    status.as_ref().map_or("with no status", AgentState::as_str),
+                    host = runtime.mux.endpoint().kind.title()
                 ),
                 HealthRepairKind::ProductAction,
                 format!("Wait for @{alias} to be ready."),
@@ -930,10 +1215,21 @@ where
                 HealthRepairKind::HumanDecision,
                 format!("Clear @{alias}'s prompt box."),
             ),
+            AgentWait::ScreenUnread(_, why) => (
+                HealthSeverity::Notice,
+                format!(
+                    "Namedrop cannot read @{alias}'s screen in Rex ({why}), so it cannot see that the prompt box is empty, and the message waits until a read works."
+                ),
+                HealthRepairKind::ProductAction,
+                format!(
+                    "Leave @{alias}'s screen on its prompt, or report the escape sequence Namedrop does not read."
+                ),
+            ),
             AgentWait::PromptBoxUnseen => (
                 HealthSeverity::Info,
                 format!(
-                    "@{alias} finished its turn while its background agents run on, but Namedrop could not find its prompt box to check that it is empty, so the message waits until Herdr reports @{alias} idle."
+                    "@{alias} finished its turn while its background agents run on, but Namedrop could not find its prompt box to check that it is empty, so the message waits until {} reports @{alias} idle.",
+                    runtime.mux.endpoint().kind.title()
                 ),
                 HealthRepairKind::ProductAction,
                 format!("Wait for @{alias} to be ready."),
@@ -960,27 +1256,31 @@ where
                 AgentWait::Status(_) => "status",
                 AgentWait::Draft(_) => "draft",
                 AgentWait::PromptBoxUnseen => "prompt_box_unseen",
+                AgentWait::ScreenUnread(..) => "screen_unread",
                 AgentWait::SentPrompt => "sent_prompt",
             },
             "queued_at_ms": queued_at_ms,
             "waited_ms": waited_ms,
         });
+        if let AgentWait::ScreenUnread(_, why) = wait {
+            waiting.diagnostic["screen_fault"] = serde_json::Value::String(why);
+        }
         issues.push(waiting);
     }
     issues
 }
 
-fn load_health_snapshot<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+fn load_health_snapshot<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<HealthSnapshot, String>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
     let discovered = match runtime.workspace_id {
-        Some(workspace_id) => discover_worktree_for_workspace(runtime.herdr, workspace_id)?,
-        None => discover_worktree(runtime.herdr, runtime.cwd)?,
+        Some(workspace_id) => discover_worktree_for_workspace(runtime.mux, workspace_id)?,
+        None => discover_worktree(runtime.mux, runtime.cwd)?,
     };
     let namespace = discovered.namespace(runtime.session_socket_id);
     let Some(mut store) =
@@ -1029,7 +1329,7 @@ where
     })
 }
 
-fn unavailable_report(error: &str) -> HealthReport {
+fn unavailable_report(error: &str, kind: crate::mux::MuxKind) -> HealthReport {
     HealthReport {
         status: HealthStatus::Unavailable,
         available_agents: 0,
@@ -1040,7 +1340,10 @@ fn unavailable_report(error: &str) -> HealthReport {
         issues: vec![issue(
             "ND-INSPECT-001",
             HealthSeverity::Broken,
-            "Namedrop could not inspect this space safely.",
+            kind.text(
+                "Namedrop could not inspect this space safely.",
+                "Namedrop could not inspect this Rex session safely.",
+            ),
             error,
             HealthRepairKind::AgentRepair,
             "Ask an agent to diagnose it?",
@@ -1117,22 +1420,14 @@ fn health_issue_for_attention(source: AttentionSourceKind) -> HealthIssue {
     }
 }
 
-fn registered_plugin_root<E: HerdrCommandExecutor>(herdr: &E) -> Option<std::path::PathBuf> {
-    let output = herdr
-        .execute_bounded(
-            &["plugin", "list", "--plugin", "namedrop", "--json"],
-            std::time::Duration::from_secs(2),
-            &std::sync::atomic::AtomicBool::new(false),
-            64 * 1024,
-        )
-        .ok()?;
-    let list: serde_json::Value = serde_json::from_str(&output.stdout).ok()?;
-    let root = list["result"]["plugins"]
-        .as_array()?
-        .iter()
-        .find(|plugin| plugin["plugin_id"] == "namedrop")?["plugin_root"]
-        .as_str()?;
-    Some(std::path::PathBuf::from(root)).filter(|root| root.is_absolute())
+pub(crate) fn registered_plugin_root(mux: &impl crate::mux::MuxRead) -> Option<std::path::PathBuf> {
+    mux.within(crate::mux::Allowance::fixed(crate::mux::Budget {
+        timeout: std::time::Duration::from_secs(2),
+        max_output_bytes: 64 * 1024,
+    }))
+    .integration_root()
+    .ok()
+    .flatten()
 }
 
 /// The status worker runs detached with its output discarded, so the event it
@@ -1195,6 +1490,131 @@ fn status_queue_issues(queue: &std::path::Path, now_ms: u64) -> Vec<HealthIssue>
     issues
 }
 
+/// One notice for the replies the relay kept for other machines that
+/// expired before those machines acknowledged them.
+fn expired_replies_issue(expired: &[(String, i64)]) -> Option<HealthIssue> {
+    if expired.is_empty() {
+        return None;
+    }
+    let senders = expired
+        .iter()
+        .map(|(sender, count)| format!("{count} for @{sender}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(issue(
+        "ND-RELAY-001",
+        HealthSeverity::Info,
+        "Replies for another machine expired before its Namedrop acknowledged them.",
+        &format!(
+            "This machine keeps each reply for a remote sender for 7 days, until that sender's Namedrop acknowledges it. These expired: {senders}."
+        ),
+        HealthRepairKind::HumanDecision,
+        "Nothing needs doing. A remote sender collects replies while it has a thread open with this machine.",
+    ))
+}
+
+/// One notice for the messages to other machines that failed or expired,
+/// counted per host.
+fn unsent_issue(unsent: &[(String, i64, i64)]) -> Option<HealthIssue> {
+    if unsent.is_empty() {
+        return None;
+    }
+    let hosts = unsent
+        .iter()
+        .map(|(label, failed, expired)| format!("{label}: {failed} failed, {expired} expired"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    Some(issue(
+        "ND-RELAY-002",
+        HealthSeverity::Info,
+        "Messages to another machine did not reach it.",
+        &format!("Each sender got a notice in its thread with the reason. By host: {hosts}."),
+        HealthRepairKind::HumanDecision,
+        "Nothing needs doing. Send again once the other machine can take the message.",
+    ))
+}
+
+/// One notice for the labels whose replies need a look.
+fn relay_conditions_issue(conditions: &[crate::relay::store::Conditions]) -> Option<HealthIssue> {
+    if conditions.is_empty() {
+        return None;
+    }
+    let hosts = conditions
+        .iter()
+        .map(|condition| {
+            let mut found = Vec::new();
+            match condition.other_label {
+                0 => {}
+                1 => found.push(
+                    "1 reply answered a message sent to another host, and was dropped".to_owned(),
+                ),
+                count => found.push(format!(
+                    "{count} replies answered a message sent to another host, and were dropped"
+                )),
+            }
+            if condition.held_full {
+                found.push(
+                    "Namedrop holds as many of its replies as it can for threads the Automatic Reply Limit paused, so it keeps the rest until a person's message or Continue resumes them"
+                        .to_owned(),
+                );
+            }
+            match condition.lost {
+                0 => {}
+                1 => found.push(
+                    "it let go of 1 reply for this machine before this machine acknowledged it"
+                        .to_owned(),
+                ),
+                count => found.push(format!(
+                    "it let go of {count} replies for this machine before this machine acknowledged them"
+                )),
+            }
+            if condition.cannot_reply {
+                found.push(
+                    "it keeps no more replies for this machine, so Namedrop sends it nothing new until this machine collects them"
+                        .to_owned(),
+                );
+            }
+            if let Some(other) = &condition.same_server_as {
+                found.push(format!(
+                    "its server answers as the one {other} reaches, which rex hosts list gives other addresses, so Namedrop relays nothing by {} until the two list the same addresses or one is removed",
+                    condition.label
+                ));
+            }
+            format!("{}: {}", condition.label, found.join(", and "))
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    Some(issue(
+        "ND-RELAY-003",
+        HealthSeverity::Notice,
+        "Replies from another machine need a look.",
+        &format!(
+            "A server can answer only for the messages this machine sent it, and Namedrop holds a limited number of replies while a thread is paused. By host: {hosts}."
+        ),
+        HealthRepairKind::HumanDecision,
+        "Resume each paused thread with a message or Continue, and check that each label in rex hosts list reaches the machine you expect.",
+    ))
+}
+
+/// One notice for the relay databases from unreleased builds that were
+/// set aside.
+fn relay_set_aside_issue(names: &[String]) -> Option<HealthIssue> {
+    if names.is_empty() {
+        return None;
+    }
+    Some(issue(
+        "ND-RELAY-004",
+        HealthSeverity::Info,
+        "Namedrop set aside a relay database from an unreleased build.",
+        &format!(
+            "relay.sqlite3 had tables that no release of Namedrop makes, so Namedrop moved it aside and started a new one. Messages to or from another machine that were in flight then stayed in it. Set aside in the state directory: {}.",
+            names.join(", ")
+        ),
+        HealthRepairKind::HumanDecision,
+        "Nothing needs doing. Delete the file once you no longer need it.",
+    ))
+}
+
 fn stale_runtime_issue(stale: &crate::installed_runtime::StaleRelease) -> HealthIssue {
     let mut outdated = issue(
         "ND-SETUP-004",
@@ -1218,17 +1638,37 @@ fn stale_runtime_issue(stale: &crate::installed_runtime::StaleRelease) -> Health
     outdated
 }
 
+/// The condition of `Place::bind` that refused a bind, in words.
+fn refused_bind_reason(condition: &crate::mux::home::BindRefused) -> String {
+    use crate::mux::home::BindRefused;
+    match condition {
+        BindRefused::NotInGroup => "the hook's agent is not in the block's foreground process group, as for an agent run as a tool or a Codex shared app-server".to_owned(),
+        BindRefused::Launcher => "a program other than a shell runs between the block's program and the hook's agent, or the block's program is the agent's own executable, as for an agent an MCP server started".to_owned(),
+        BindRefused::Runtime => "the block's status record names another agent than the hook's wrapper".to_owned(),
+        BindRefused::NotAlive => "the block's program or the hook's agent could not be read as a live process".to_owned(),
+        BindRefused::AlreadyBound => "the block is already bound to its own program, and the hook ran in an agent behind it".to_owned(),
+        BindRefused::NestedPrintMode => "the hook ran in a Claude Code print-mode agent (CLAUDE_CODE_ENTRYPOINT=sdk-cli) behind the block's program".to_owned(),
+        BindRefused::NoCaller => "the hook could not prove which block it runs in".to_owned(),
+        BindRefused::Io(error) => format!("the binding could not be written: {error}"),
+    }
+}
+
 /// One issue per space, not per pane: the server is shared by every Codex
 /// session under its Codex home. Its fix changes a Codex setting, so it is the
 /// person's decision and carries no command for the Doctor popup to run.
-fn shared_app_server_issue(served: &ServedPanes, space_id: &str) -> HealthIssue {
+fn shared_app_server_issue(
+    served: &ServedPanes,
+    space_id: &str,
+    kind: crate::mux::MuxKind,
+) -> HealthIssue {
+    let advice = served.advice(kind);
     let mut shared = issue(
         "ND-SESSION-003",
         HealthSeverity::Blocked,
-        crate::codex_app_server::SUMMARY,
-        &crate::codex_app_server::explanation(!served.server.auto_start),
+        crate::codex_app_server::summary(kind),
+        &crate::codex_app_server::explanation(!served.server.auto_start, kind),
         HealthRepairKind::HumanDecision,
-        crate::codex_app_server::FIX,
+        advice["fix"].as_str().expect("the advice has a fix"),
     );
     shared.diagnostic = serde_json::json!({
         "auto_start": served.server.auto_start,
@@ -1236,7 +1676,7 @@ fn shared_app_server_issue(served: &ServedPanes, space_id: &str) -> HealthIssue 
         "path": served.server.pid_file,
         "process_id": served.server.pid,
         "runtime": crate::AgentRuntime::Codex,
-        "steps": crate::codex_app_server::STEPS,
+        "steps": advice["steps"],
         "workspace_id": space_id,
     });
     shared
@@ -1266,9 +1706,9 @@ fn issue(
     }
 }
 
-fn add_operation<E, C, I>(
+fn add_operation<M, C, I>(
     issue: &mut HealthIssue,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     space_id: &str,
     operation: &str,
     input: serde_json::Value,
@@ -1292,17 +1732,145 @@ fn add_operation<E, C, I>(
         } else {
             command.extend(["--input-json".into(), input.to_string()]);
         }
+        let name = Name::for_endpoint(runtime.session_socket_id);
         command.extend([
-            "--herdr-socket".into(),
+            Locator::Endpoint.flag_for(name).into(),
             runtime.session_socket_id.to_owned(),
-            "--herdr-workspace".into(),
+            Locator::Space.flag_for(name).into(),
             space_id.to_owned(),
         ]);
         if let Some(pane_id) = pane_id {
-            command.extend(["--herdr-pane".into(), pane_id.to_owned()]);
+            command.extend([Locator::Pane.flag_for(name).into(), pane_id.to_owned()]);
         }
         issue.repair.command = Some(command);
     }
+}
+/// What starts a stopped tailnet server again. Herdr's startup command also
+/// does; nothing in a Rex home runs it.
+fn tailnet_start_repair(kind: crate::mux::MuxKind) -> &'static str {
+    kind.text(
+        "Run `namedrop channels --no-open` to start the server again on the same port. Devices that are signed in stay signed in. Herdr also starts it when Herdr starts.",
+        "Run `namedrop channels --no-open` to start the server again on the same port. Devices that are signed in stay signed in.",
+    )
+}
+
+/// `ND-REX-001`: the module the server loaded, as `rex_ui::inspect` read
+/// it. Only a confirmed module is information; any other is a notice, with a
+/// reload for a module the server loaded before a refresh rewrote it, and a
+/// reinstall otherwise.
+fn rex_module_issue(inspected: Result<serde_json::Value, String>) -> HealthIssue {
+    let (confirmed, mut explanation, diagnostic) = match inspected {
+        Ok(diagnostic) => (
+            diagnostic["confirmed"] == true,
+            rex_module_explanation(&diagnostic),
+            diagnostic,
+        ),
+        Err(error) => (
+            false,
+            error.clone(),
+            serde_json::json!({"confirmed":false,"error":error}),
+        ),
+    };
+    let stale = !confirmed && diagnostic["stale"] == true;
+    if stale {
+        explanation.push_str(
+            " Rex still runs an older namedrop.lua, which it loaded before Namedrop rewrote the file. A reload loads the current one.",
+        );
+    }
+    let repair = if confirmed {
+        "Keys bound later in init.lua override the Namedrop keys.".to_owned()
+    } else if stale {
+        format!(
+            "{} Then check Namedrop Doctor again.",
+            crate::rex_ui::RELOAD_REPAIR
+        )
+    } else {
+        "Run sh scripts/install.sh, then check Namedrop Doctor again.".to_owned()
+    };
+    let mut check = issue(
+        "ND-REX-001",
+        if confirmed {
+            HealthSeverity::Info
+        } else {
+            HealthSeverity::Notice
+        },
+        if confirmed {
+            "The Rex module is confirmed."
+        } else {
+            "The Rex module is not confirmed."
+        },
+        &explanation,
+        HealthRepairKind::ProductAction,
+        &repair,
+    );
+    check.diagnostic = diagnostic;
+    check
+}
+
+/// Doctor's account of the Rex module. An issue's text renders as one line,
+/// because the report escapes control characters, newlines included.
+fn rex_module_explanation(diagnostic: &serde_json::Value) -> String {
+    let text = |value: &serde_json::Value| value.as_str().unwrap_or("none").to_owned();
+    let keys = diagnostic["keys"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|k| {
+            let status = match k["status"].as_str() {
+                Some("in_effect") => "in effect",
+                Some("shadowed") => "shadowed",
+                Some("not_bound") => "not bound to Namedrop",
+                _ => "unknown",
+            };
+            match k["source"].as_str() {
+                Some(source) => format!("{} {status} ({source})", text(&k["key"])),
+                None => format!("{} {status}", text(&k["key"])),
+            }
+        })
+        .collect::<Vec<_>>();
+    let about = &diagnostic["about"];
+    let loaded = match about["module"].as_str() {
+        Some(module) => format!(
+            "Loaded module: {}, launcher {}, state {}.",
+            module.strip_prefix('@').unwrap_or(module),
+            text(&about["launcher"]),
+            text(&about["state"])
+        ),
+        None => "No module answered namedrop_about.".to_owned(),
+    };
+    // Only the variables the server sets, so no JSON reaches the sentence.
+    let environment = diagnostic["env"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(name, value)| value.as_str().map(|value| format!("{name}={value}")))
+        .collect::<Vec<_>>();
+    let mut explanation = format!(
+        "Registered module: {}. {loaded} Server config: {}. Server environment: {}. Keys: {}.",
+        text(&diagnostic["module"]),
+        text(&diagnostic["config"]["path"]),
+        if environment.is_empty() {
+            "none".to_owned()
+        } else {
+            environment.join(", ")
+        },
+        if keys.is_empty() {
+            "none".to_owned()
+        } else {
+            keys.join(", ")
+        }
+    );
+    if diagnostic["line"] == "removed" {
+        explanation.push_str(&format!(
+            " The Namedrop line was removed. To restore it, add {} as its own line in {}.",
+            crate::rex_ui::CONFIG_LINE,
+            text(&diagnostic["config"]["path"])
+        ));
+    }
+    if let Some(error) = diagnostic["error"].as_str() {
+        explanation.push_str(&format!(" Readback error: {error}"));
+    }
+    explanation
 }
 
 #[must_use]
@@ -1389,6 +1957,196 @@ pub fn render_health_report_to_text(report: &HealthReport) -> String {
 mod tests {
     use super::*;
 
+    /// Herdr's repair is main's, word for word. A Rex home is told only what
+    /// it can do itself, since no Herdr startup command runs there.
+    #[test]
+    fn a_stopped_tailnet_server_s_repair_names_herdr_only_on_herdr() {
+        use crate::mux::MuxKind;
+        let person = "Run `namedrop channels --no-open` to start the server again on the same port. Devices that are signed in stay signed in.";
+        assert_eq!(
+            tailnet_start_repair(MuxKind::Herdr),
+            format!("{person} Herdr also starts it when Herdr starts.")
+        );
+        assert_eq!(tailnet_start_repair(MuxKind::Rex), person);
+    }
+
+    #[test]
+    fn rex_module_explanation_is_one_line_with_each_key() {
+        let diagnostic = serde_json::json!({
+            "module": "/cfg/namedrop.lua",
+            "about": {"module": "/cfg/namedrop.lua", "launcher": "/s/runtime/namedrop", "state": "/s"},
+            "config": {"path": "/cfg/init.lua"},
+            "env": {"HOME": "/home", "XDG_CONFIG_HOME": null, "REX_SERVER": "unix:///tmp/r.sock"},
+            "keys": [
+                {"key": "alt+shift+cmd+i", "status": "in_effect", "source": "namedrop.lua:39"},
+                {"key": "alt+shift+cmd+m", "status": "shadowed", "source": "init.lua:4"},
+                {"key": "alt+shift+cmd+h", "status": "not_bound"}
+            ],
+            "error": "no about"
+        });
+        let mut removed = diagnostic.clone();
+        removed["line"] = serde_json::json!("removed");
+        let repair = rex_module_explanation(&removed);
+        assert!(
+            repair.contains(crate::rex_ui::CONFIG_LINE)
+                && repair.contains("The Namedrop line was removed")
+                && repair.contains("/cfg/init.lua")
+        );
+        let explanation = rex_module_explanation(&diagnostic);
+        assert_eq!(terminal_safe_text(&explanation), explanation);
+        assert_eq!(
+            explanation,
+            "Registered module: /cfg/namedrop.lua. Loaded module: /cfg/namedrop.lua, launcher /s/runtime/namedrop, state /s. Server config: /cfg/init.lua. Server environment: HOME=/home, REX_SERVER=unix:///tmp/r.sock. Keys: alt+shift+cmd+i in effect (namedrop.lua:39), alt+shift+cmd+m shadowed (init.lua:4), alt+shift+cmd+h not bound to Namedrop. Readback error: no about"
+        );
+    }
+
+    /// The U6 review's F7: a module the server loaded before a refresh
+    /// rewrote it needs a reload, and only an unconfirmed module whose file
+    /// is current asks for the reinstall.
+    #[test]
+    fn an_unconfirmed_rex_module_names_a_reload_when_stale_and_a_reinstall_otherwise() {
+        let confirmed = rex_module_issue(Ok(serde_json::json!({"confirmed": true, "stale": true})));
+        assert_eq!(confirmed.severity, HealthSeverity::Info);
+        assert_eq!(confirmed.summary, "The Rex module is confirmed.");
+        let stale = rex_module_issue(Ok(serde_json::json!({"confirmed": false, "stale": true})));
+        assert_eq!(stale.severity, HealthSeverity::Notice);
+        assert!(
+            stale
+                .explanation
+                .contains("Rex still runs an older namedrop.lua"),
+            "{}",
+            stale.explanation
+        );
+        assert_eq!(
+            stale.repair.prompt,
+            "Reload Rex's configuration with rex config reload. Then check Namedrop Doctor again."
+        );
+        let unconfirmed = rex_module_issue(Ok(serde_json::json!({"confirmed": false})));
+        assert_eq!(unconfirmed.severity, HealthSeverity::Notice);
+        assert!(
+            unconfirmed
+                .explanation
+                .contains("No module answered namedrop_about.")
+        );
+        assert!(!unconfirmed.explanation.contains("older namedrop.lua"));
+        assert_eq!(
+            unconfirmed.repair.prompt,
+            "Run sh scripts/install.sh, then check Namedrop Doctor again."
+        );
+        let unreachable = rex_module_issue(Err("Rex is not running".into()));
+        assert_eq!(unreachable.severity, HealthSeverity::Notice);
+        assert_eq!(unreachable.explanation, "Rex is not running");
+    }
+
+    #[test]
+    fn expired_relay_replies_are_one_notice_that_counts_each_sender() {
+        assert!(expired_replies_issue(&[]).is_none());
+        let notice =
+            expired_replies_issue(&[("alice@laptop".to_owned(), 2), ("host-c".to_owned(), 1)])
+                .unwrap();
+        assert_eq!(notice.code, "ND-RELAY-001");
+        assert_eq!(notice.severity, HealthSeverity::Info);
+        assert!(
+            notice
+                .explanation
+                .ends_with("These expired: 2 for @alice@laptop, 1 for @host-c."),
+            "{}",
+            notice.explanation
+        );
+    }
+
+    #[test]
+    fn unsent_relay_items_are_one_notice_that_counts_each_host() {
+        assert!(unsent_issue(&[]).is_none());
+        let notice =
+            unsent_issue(&[("devbox".to_owned(), 2, 1), ("studio".to_owned(), 0, 3)]).unwrap();
+        assert_eq!(notice.code, "ND-RELAY-002");
+        assert_eq!(notice.severity, HealthSeverity::Info);
+        assert!(
+            notice
+                .explanation
+                .ends_with("devbox: 2 failed, 1 expired; studio: 0 failed, 3 expired."),
+            "{}",
+            notice.explanation
+        );
+    }
+
+    #[test]
+    fn relay_databases_set_aside_are_one_notice_that_names_each() {
+        assert!(relay_set_aside_issue(&[]).is_none());
+        let notice = relay_set_aside_issue(&[
+            "relay.sqlite3.unreleased-1".to_owned(),
+            "relay.sqlite3.unreleased-2".to_owned(),
+        ])
+        .unwrap();
+        assert_eq!(notice.code, "ND-RELAY-004");
+        assert!(
+            notice
+                .explanation
+                .ends_with("relay.sqlite3.unreleased-1, relay.sqlite3.unreleased-2."),
+            "{}",
+            notice.explanation
+        );
+    }
+
+    #[test]
+    fn relay_conditions_are_one_notice_that_names_each_host() {
+        use crate::relay::store::Conditions;
+        assert!(relay_conditions_issue(&[]).is_none());
+        let notice = relay_conditions_issue(&[
+            Conditions {
+                label: "devbox".to_owned(),
+                other_label: 3,
+                held_full: true,
+                cannot_reply: false,
+                same_server_as: None,
+                lost: 0,
+            },
+            Conditions {
+                label: "studio".to_owned(),
+                held_full: true,
+                ..Conditions::default()
+            },
+            Conditions {
+                label: "lab".to_owned(),
+                cannot_reply: true,
+                ..Conditions::default()
+            },
+            Conditions {
+                label: "pi".to_owned(),
+                other_label: 1,
+                ..Conditions::default()
+            },
+            Conditions {
+                label: "mini".to_owned(),
+                lost: 4,
+                ..Conditions::default()
+            },
+            Conditions {
+                label: "nano".to_owned(),
+                lost: 1,
+                cannot_reply: true,
+                ..Conditions::default()
+            },
+            Conditions {
+                label: "twin".to_owned(),
+                same_server_as: Some("studio".to_owned()),
+                ..Conditions::default()
+            },
+        ])
+        .unwrap();
+        assert_eq!(notice.code, "ND-RELAY-003");
+        assert_eq!(notice.severity, HealthSeverity::Notice);
+        let paused = "Namedrop holds as many of its replies as it can for threads the Automatic Reply Limit paused, so it keeps the rest until a person's message or Continue resumes them";
+        assert!(
+            notice.explanation.ends_with(&format!(
+                "By host: devbox: 3 replies answered a message sent to another host, and were dropped, and {paused}; studio: {paused}; lab: it keeps no more replies for this machine, so Namedrop sends it nothing new until this machine collects them; pi: 1 reply answered a message sent to another host, and was dropped; mini: it let go of 4 replies for this machine before this machine acknowledged them; nano: it let go of 1 reply for this machine before this machine acknowledged it, and it keeps no more replies for this machine, so Namedrop sends it nothing new until this machine collects them; twin: its server answers as the one studio reaches, which rex hosts list gives other addresses, so Namedrop relays nothing by twin until the two list the same addresses or one is removed."
+            )),
+            "{}",
+            notice.explanation
+        );
+    }
+
     #[test]
     fn human_report_escapes_control_characters() {
         let report = HealthReport {
@@ -1410,5 +2168,82 @@ mod tests {
         let rendered = render_health_report_to_text(&report);
         assert!(rendered.contains(r"builder\n\u{1b}[2J is not ready."));
         assert!(!rendered.contains('\u{1b}'));
+    }
+
+    /// A repair line names its location with the flags of the endpoint's
+    /// kind: Herdr's for Herdr, as before, and the neutral ones for Rex.
+    #[test]
+    fn a_repair_line_passes_its_location_with_the_flags_of_the_endpoint_s_kind() {
+        let mux = crate::mux::fake::FakeMux::world().build();
+        let ids = crate::ProcessIds::default();
+        let line = |endpoint: &str| {
+            let runtime = LifecycleRuntime {
+                state_directory: std::path::Path::new("/state"),
+                home_directory: None,
+                agent_config: Default::default(),
+                cwd: std::path::Path::new("/repo"),
+                workspace_id: None,
+                current_pane_id: None,
+                session_socket_id: endpoint,
+                mux: &mux,
+                clock: &crate::SystemClock,
+                ids: &ids,
+            };
+            let mut paused = issue(
+                "ND-SPACE-001",
+                HealthSeverity::Blocked,
+                "",
+                "",
+                HealthRepairKind::ProductAction,
+                "",
+            );
+            add_operation(
+                &mut paused,
+                &runtime,
+                "s1",
+                "worktree.resume",
+                serde_json::json!({}),
+                Some("p1"),
+            );
+            paused.repair.command.unwrap().split_off(1)
+        };
+        let head = [
+            "--plugin-state",
+            "/state",
+            "space",
+            "resume",
+            "--input-json",
+            "{}",
+        ];
+        assert_eq!(
+            line("/tmp/h.sock"),
+            [
+                &head[..],
+                &[
+                    "--herdr-socket",
+                    "/tmp/h.sock",
+                    "--herdr-workspace",
+                    "s1",
+                    "--herdr-pane",
+                    "p1"
+                ]
+            ]
+            .concat()
+        );
+        assert_eq!(
+            line("rex:/tmp/r.sock"),
+            [
+                &head[..],
+                &[
+                    "--endpoint",
+                    "rex:/tmp/r.sock",
+                    "--space",
+                    "s1",
+                    "--pane",
+                    "p1"
+                ]
+            ]
+            .concat()
+        );
     }
 }

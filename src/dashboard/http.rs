@@ -1,11 +1,16 @@
 use super::hub::{Frame, HubCommand, SpaceEvent, Subscription};
 use super::server_files::{ServerFiles, Token, UiSource, open_directory};
 use super::snapshot::{self, SpaceKey};
-use crate::{HerdrCommandExecutor, ProcessHerdr, StateStore, store::dashboard::ScreenPane};
+use crate::{
+    StateStore,
+    locator::Locator,
+    mux::{Budget, Gone, MuxConnector, MuxError, ScreenRequest, Style, Wrap},
+    store::dashboard::ScreenPane,
+};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     ffi::CString,
     fs::File,
     io::{self, BufRead, BufReader, Read, Write},
@@ -15,7 +20,6 @@ use std::{
         unix::fs::MetadataExt,
     },
     path::{Path, PathBuf},
-    process::{Command, Stdio},
     sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -25,6 +29,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "channel_create.rs"]
+mod channel_create;
 #[path = "channels_bundle.rs"]
 mod channels_bundle;
 #[path = "live_peek.rs"]
@@ -42,12 +48,34 @@ const PING_EVERY: Duration = Duration::from_secs(15);
 const MAX_CONNECTIONS: usize = 64;
 // Followers occupy HTTP handlers too. Keep 48 connection slots for other routes.
 const MAX_SCREEN_REQUESTS: usize = 16;
-const SECURITY_HEADERS: &str = "Content-Security-Policy: default-src 'none'; script-src 'self'; \
+macro_rules! protection_headers {
+    () => {
+        "Content-Security-Policy: default-src 'none'; script-src 'self'; \
 style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; \
 base-uri 'none'; form-action 'none'\r\nX-Frame-Options: DENY\r\n\
-X-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nCache-Control: no-store\r\n";
+X-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n"
+    };
+}
+const SECURITY_HEADERS: &str = concat!(protection_headers!(), "Cache-Control: no-store\r\n");
+/// An image's name is the digest of its bytes, so the browser may keep it
+/// for as long as the server does.
+const IMAGE_HEADERS: &str = concat!(
+    protection_headers!(),
+    "Cache-Control: private, max-age=2592000, immutable\r\n"
+);
+/// The built-in app's scripts and styles carry a digest of their bytes in
+/// their names, so a browser may keep one for good. The page that names them
+/// is never kept.
+const HASHED_ASSET_HEADERS: &str = concat!(
+    protection_headers!(),
+    "Cache-Control: private, max-age=31536000, immutable\r\n"
+);
+/// The composer sends a message's images together.
+const MAX_IMAGE_UPLOADS: usize = super::images::MAX_PER_MESSAGE;
 
 pub(crate) struct Front {
+    /// Every multiplexer read the HTTP threads make connects through this.
+    pub mux: Arc<dyn MuxConnector>,
     pub port: u16,
     pub files: ServerFiles,
     pub token: Token,
@@ -59,10 +87,12 @@ pub(crate) struct Front {
     pub mutations: Arc<Mutex<()>>,
     pub channel_wake: super::channel_service::ChannelWake,
     pub control_effects: super::thread_controls::ControlEffects,
+    pub image_uploads: AtomicUsize,
+    pub launches: super::launches::Launches,
 }
 
 impl Front {
-    fn admit_mutation(&self) -> Result<std::sync::MutexGuard<'_, ()>, Status> {
+    pub(super) fn admit_mutation(&self) -> Result<std::sync::MutexGuard<'_, ()>, Status> {
         let guard = self.mutations.lock().map_err(|_| Status::Unavailable)?;
         if self.restarting.load(Ordering::Acquire) || self.files.restarting() {
             return Err(Status::Unavailable);
@@ -183,7 +213,7 @@ impl ScreenReads {
             .map_err(|_| Status::Unavailable)
     }
 
-    fn read(&self, target: ScreenTarget) -> ScreenResult {
+    fn read(&self, mux: &dyn MuxConnector, target: ScreenTarget) -> ScreenResult {
         let (flight, leader) = {
             let mut flights = self.flights.lock().map_err(|_| Status::Unavailable)?;
             match flights.get(&target) {
@@ -202,7 +232,7 @@ impl ScreenReads {
                 flight: &flight,
                 pending: true,
             };
-            let result = read_screen(&target);
+            let result = read_screen(mux, &target);
             completion.publish(result.clone());
             result
         } else {
@@ -278,37 +308,24 @@ fn resolve_screen(
     }
 }
 
-fn read_screen(target: &ScreenTarget) -> ScreenResult {
-    let output = ProcessHerdr::default()
-        .with_socket(Some(target.socket.clone()))
-        .execute_bounded(
-            &[
-                "pane",
-                "read",
-                &target.pane,
-                "--source",
-                "recent-unwrapped",
-                "--lines",
-                "200",
-            ],
-            Duration::from_secs(3),
-            &AtomicBool::new(false),
-            1024 * 1024,
-        )
-        .map_err(|error| {
-            if serde_json::from_str::<serde_json::Value>(&error)
-                .ok()
-                .is_some_and(|value| {
-                    value.pointer("/error/code").and_then(|code| code.as_str())
-                        == Some("pane_not_found")
-                })
-            {
-                Status::Gone
-            } else {
-                Status::Unavailable
-            }
+fn read_screen(mux: &dyn MuxConnector, target: &ScreenTarget) -> ScreenResult {
+    let budget = Budget {
+        timeout: Duration::from_secs(3),
+        max_output_bytes: 1024 * 1024,
+    };
+    let request = ScreenRequest {
+        lines: 200,
+        wrap: Wrap::Joined,
+        style: Style::Plain,
+    };
+    let output = mux
+        .connect(&target.socket, budget, Arc::default())
+        .and_then(|herdr| herdr.screen(&crate::mux::PaneId::new(&target.pane), request))
+        .map_err(|error| match error {
+            MuxError::Gone(Gone::Pane, _) => Status::Gone,
+            _ => Status::Unavailable,
         })?;
-    let clean = strip_terminal_sequences(&output.stdout);
+    let clean = strip_terminal_sequences(&output.text);
     let safe = snapshot::SafeText::from_untrusted(&clean, usize::MAX).text;
     Ok(newest_screen_text(&safe).into())
 }
@@ -427,16 +444,22 @@ impl Request {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum Status {
+pub(super) enum Status {
     NoContent,
     BadRequest,
     Unauthorized,
     Forbidden,
     NotFound,
     Gone,
+    /// Another owner holds the pane's input, so nothing was typed.
+    Busy,
     MethodNotAllowed,
     Unavailable,
+    /// A 503 whose only cause is SQLite busy. It comes before the send, so
+    /// the request sent nothing to the pane.
+    StoreBusy,
     PayloadTooLarge,
+    UnsupportedMedia,
     TooManyRequests,
 }
 
@@ -445,14 +468,16 @@ impl Status {
         match self {
             Self::NoContent => "204 No Content",
             Self::PayloadTooLarge => "413 Payload Too Large",
+            Self::UnsupportedMedia => "415 Unsupported Media Type",
             Self::TooManyRequests => "429 Too Many Requests",
             Self::BadRequest => "400 Bad Request",
             Self::Unauthorized => "401 Unauthorized",
             Self::Forbidden => "403 Forbidden",
             Self::NotFound => "404 Not Found",
             Self::Gone => "410 Gone",
+            Self::Busy => "409 Conflict",
             Self::MethodNotAllowed => "405 Method Not Allowed",
-            Self::Unavailable => "503 Service Unavailable",
+            Self::Unavailable | Self::StoreBusy => "503 Service Unavailable",
         }
     }
 
@@ -463,13 +488,16 @@ impl Status {
                 "This browser isn't signed in to Channels. Your agents and messages are fine.\n\nOn the machine running Channels, run `namedrop channels` in a workspace and open the link it prints. Away from that machine? Run `namedrop channels --tailscale --no-open` there over SSH and open the HTTPS link on this device.\n"
             }
             Self::PayloadTooLarge => "Request body is too large.\n",
+            Self::UnsupportedMedia => "Not a PNG, JPEG, GIF or WebP image.\n",
             Self::TooManyRequests => "Too many input requests.\n",
             Self::BadRequest => "Bad request.\n",
             Self::Forbidden => "Forbidden.\n",
             Self::NotFound => "Not found.\n",
             Self::Gone => "This participant's pane is no longer available.\n",
+            Self::Busy => "Namedrop is typing into this pane right now, so nothing was sent.\n",
             Self::MethodNotAllowed => "Method not allowed.\n",
             Self::Unavailable => "History is temporarily unavailable.\n",
+            Self::StoreBusy => "Namedrop's state is busy, so nothing was sent.\n",
         }
     }
 }
@@ -488,6 +516,8 @@ struct ResolvedAsset {
     body: AssetBody,
     length: u64,
     is_index: bool,
+    /// Its name changes whenever its bytes do.
+    hashed: bool,
 }
 
 impl Assets {
@@ -506,6 +536,7 @@ impl Assets {
                     body: AssetBody::Embedded(bytes),
                     length: bytes.len() as u64,
                     is_index: path == "/index.html",
+                    hashed: path != "/index.html",
                 })
             }
             Self::Directory(path_root) => {
@@ -521,6 +552,8 @@ impl Assets {
                     body: AssetBody::File(file),
                     length: metadata.len(),
                     is_index,
+                    // A custom app's files are read fresh: their names promise nothing.
+                    hashed: false,
                 })
             }
         }
@@ -659,6 +692,10 @@ enum Route {
     },
     Page,
     Session,
+    ImageUpload,
+    Image(super::images::Name),
+    Sounds,
+    ChangeSounds,
     Send(SpaceKey),
     DirectMessages,
     DirectHistory {
@@ -672,6 +709,10 @@ enum Route {
         address_id: String,
     },
     CoordinationReview(SpaceKey),
+    CreateChannel(SpaceKey),
+    AddAgent(SpaceKey),
+    Folders(SpaceKey),
+    ChannelFolder(SpaceKey),
     Deliver {
         key: SpaceKey,
         message_id: String,
@@ -681,10 +722,7 @@ enum Route {
         thread_id: String,
         action: super::thread_controls::Action,
     },
-    Dismiss {
-        key: SpaceKey,
-        attempt_id: String,
-    },
+    DismissItems(SpaceKey),
     Skills {
         key: SpaceKey,
         address_id: String,
@@ -794,6 +832,33 @@ fn route(
     {
         return Err(Status::MethodNotAllowed);
     }
+    if path == "/api/images" {
+        if request.method != "POST" {
+            return Err(Status::MethodNotAllowed);
+        }
+        authenticate_session(request, port, session)?;
+        authenticate_mutation(request, session, &origin)?;
+        return Ok(Route::ImageUpload);
+    }
+    if let Some(name) = path.strip_prefix("/api/images/") {
+        if request.method != "GET" {
+            return Err(Status::MethodNotAllowed);
+        }
+        authenticate_session(request, port, session)?;
+        authenticate_provenance(request, &origin)?;
+        return super::images::Name::parse(name)
+            .map(Route::Image)
+            .ok_or(Status::NotFound);
+    }
+    if path == "/api/sounds" {
+        authenticate_session(request, port, session)?;
+        if request.method == "POST" {
+            authenticate_mutation(request, session, &origin)?;
+            return Ok(Route::ChangeSounds);
+        }
+        authenticate_provenance(request, &origin)?;
+        return Ok(Route::Sounds);
+    }
     if path == "/api/direct-messages" && request.method == "GET" {
         authenticate_session(request, port, session)?;
         authenticate_provenance(request, &origin)?;
@@ -893,17 +958,21 @@ fn route(
                 }
                 return Ok(Route::Deliver { key, message_id });
             }
-            if let [key, "attempts", attempt, "dismiss"] = segments.as_slice() {
+            if let [key, "attention", "dismiss"] = segments.as_slice() {
                 let key = SpaceKey::parse(key).ok_or(Status::NotFound)?;
-                let attempt_id = decode_asset_path(attempt).ok_or(Status::NotFound)?;
-                if attempt_id.is_empty() || attempt_id.contains('/') {
-                    return Err(Status::NotFound);
-                }
-                return Ok(Route::Dismiss { key, attempt_id });
+                return Ok(Route::DismissItems(key));
             }
             if let [key, "coordinations", "review"] = segments.as_slice() {
                 let key = SpaceKey::parse(key).ok_or(Status::NotFound)?;
                 return Ok(Route::CoordinationReview(key));
+            }
+            if let [key, action @ ("channels" | "agents")] = segments.as_slice() {
+                let key = SpaceKey::parse(key).ok_or(Status::NotFound)?;
+                return Ok(if *action == "channels" {
+                    Route::CreateChannel(key)
+                } else {
+                    Route::AddAgent(key)
+                });
             }
             if let [key, "threads", thread, action] = segments.as_slice() {
                 let action = match *action {
@@ -955,6 +1024,16 @@ fn route(
                 }
             } else {
                 Route::MessageContext { key, message_id }
+            });
+        }
+        if let [key, listing @ ("folders" | "folder")] = segments.as_slice() {
+            authenticate_session(request, port, session)?;
+            authenticate_provenance(request, &origin)?;
+            let key = SpaceKey::parse(key).ok_or(Status::NotFound)?;
+            return Ok(if *listing == "folders" {
+                Route::Folders(key)
+            } else {
+                Route::ChannelFolder(key)
             });
         }
         if segments.get(1) == Some(&"participants") {
@@ -1212,6 +1291,11 @@ impl DeliverPost {
     }
 }
 
+fn too_many_images(source: &str, state: &Path) -> bool {
+    let directory = super::images::directory(state);
+    super::images::split(source, Some(&directory)).1.len() > super::images::MAX_PER_MESSAGE
+}
+
 fn read_json_body<T: serde::de::DeserializeOwned>(
     reader: &mut impl Read,
     request: &Request,
@@ -1284,6 +1368,7 @@ fn serve_connection(
         Ok(request) => request,
         Err(status) => return respond_status(&mut writer, status),
     };
+    let image_directory = super::images::directory(front.files.state());
     let ownership = super::tailscale::read(front.files.state()).ok().flatten();
     let tailnet = match &ownership {
         Some(super::tailscale::Ownership::Enabled(handler)) => Some(handler),
@@ -1333,12 +1418,20 @@ fn serve_connection(
                 .to_string()
                 .as_bytes(),
         ),
+        Ok(Route::ImageUpload) => upload_image(&mut reader, &mut writer, front, &request),
+        Ok(Route::Image(name)) => serve_image(&mut writer, front, &name),
+        Ok(Route::Sounds) => {
+            respond_sounds(&mut writer, "200 OK", &super::sounds::read(&front.files))
+        }
+        Ok(Route::ChangeSounds) => {
+            change_sounds(&mut reader, &mut writer, front, history_store, &request)
+        }
         Ok(Route::DirectMessages) => {
             let result = (|| {
                 let mut guard = history_store.lock().map_err(|_| Status::Unavailable)?;
                 match guard.store(front.files.state()) {
                     Ok(store) => store
-                        .direct_message_peers()
+                        .direct_message_peers(crate::Clock::now_unix_ms(&crate::SystemClock))
                         .map_err(|_| Status::Unavailable),
                     Err(Status::NotFound) => Ok(Vec::new()),
                     Err(status) => Err(status),
@@ -1361,11 +1454,16 @@ fn serve_connection(
                             live_spaces
                                 .entry(peer.space_key.clone())
                                 .or_insert_with(|| {
-                                    let herdr = ProcessHerdr::default().with_socket(Some(
-                                        peer.namespace.session_socket_id.clone(),
-                                    ));
+                                    let herdr = front
+                                        .mux
+                                        .connect(
+                                            &peer.namespace.session_socket_id,
+                                            Budget::ADAPTER_DEFAULT,
+                                            Arc::default(),
+                                        )
+                                        .ok()?;
                                     crate::discover_worktree_for_workspace(
-                                        &herdr,
+                                        &*herdr,
                                         peer.namespace.space_id.as_str(),
                                     )
                                     .ok()
@@ -1390,10 +1488,7 @@ fn serve_connection(
                                 {
                                     peer.runtime = runtime.as_str().to_owned();
                                 }
-                                peer.presence = if matches!(
-                                    pane.agent_status.as_deref(),
-                                    Some("idle" | "done")
-                                ) {
+                                peer.presence = if pane.accepts_prompt() {
                                     "idle"
                                 } else {
                                     "working"
@@ -1470,7 +1565,9 @@ fn serve_connection(
                         .history
                         .messages
                         .iter()
-                        .map(|row| snapshot::message(row, &rows.history.legs))
+                        .map(|row| {
+                            snapshot::message(row, &rows.history.legs, Some(&image_directory))
+                        })
                         .collect();
                     let body=serde_json::to_vec(&serde_json::json!({"thread_id":rows.thread_id,"messages":messages,"earlier_omitted":rows.earlier_omitted})).map_err(io::Error::other)?;
                     respond(&mut writer, "200 OK", "application/json", "", &body)
@@ -1488,6 +1585,7 @@ fn serve_connection(
                 || post.request_id.chars().any(char::is_control)
                 || post.source.trim().is_empty()
                 || post.source.len() > BODY_LIMIT
+                || too_many_images(&post.source, front.files.state())
             {
                 return respond_status(&mut writer, Status::BadRequest);
             }
@@ -1498,6 +1596,9 @@ fn serve_connection(
                 Ok(post) => post,
                 Err(status) => return respond_status(&mut writer, status),
             };
+            if too_many_images(&post.source, front.files.state()) {
+                return respond_status(&mut writer, Status::BadRequest);
+            }
             send_operator_post(&mut writer, front, key, post)
         }
         Ok(Route::CoordinationReview(key)) => {
@@ -1506,6 +1607,16 @@ fn serve_connection(
                 Err(status) => return respond_status(&mut writer, status),
             };
             send_coordination_review(&mut writer, front, &key, &post)
+        }
+        Ok(Route::CreateChannel(key)) => {
+            channel_create::create_channel(&mut reader, &mut writer, front, &request, &key)
+        }
+        Ok(Route::AddAgent(key)) => {
+            channel_create::add_agent(&mut reader, &mut writer, front, &request, &key)
+        }
+        Ok(Route::Folders(key)) => channel_create::folders(&mut writer, front, &key),
+        Ok(Route::ChannelFolder(key)) => {
+            channel_create::channel_folder(&mut writer, front, &key)
         }
         Ok(Route::Deliver { key, message_id }) => {
             let post = match DeliverPost::read(&mut reader, &request) {
@@ -1527,7 +1638,7 @@ fn serve_connection(
                         receipt.to_string().as_bytes(),
                     );
                     drop(admitted);
-                    super::channel_service::drain(front.files.state(), &namespace);
+                    super::channel_service::drain(front.files.state(), &*front.mux, &namespace);
                     response
                 }
                 Err(error) => {
@@ -1563,55 +1674,24 @@ fn serve_connection(
                 }
             }
         }
-        Ok(Route::Dismiss { key, attempt_id }) => {
-            let post: super::acknowledge::DismissPost = match read_json_body(&mut reader, &request)
-            {
-                Ok(post) => post,
-                Err(status) => return respond_status(&mut writer, status),
-            };
+        Ok(Route::DismissItems(key)) => {
+            let post: super::acknowledge::DismissItemsPost =
+                match read_json_body(&mut reader, &request) {
+                    Ok(post) => post,
+                    Err(status) => return respond_status(&mut writer, status),
+                };
             let admitted = match front.admit_mutation() {
                 Ok(guard) => guard,
                 Err(status) => return respond_status(&mut writer, status),
             };
-            let result = super::acknowledge::dismiss(
+            let result = super::acknowledge::dismiss_items(
                 front.files.state(),
                 &key,
-                &attempt_id,
                 &post,
                 crate::Clock::now_unix_ms(&crate::SystemClock),
             );
             drop(admitted);
-            match result {
-                Ok(receipt) => respond(
-                    &mut writer,
-                    "200 OK",
-                    "application/json",
-                    "",
-                    receipt.to_string().as_bytes(),
-                ),
-                Err(super::acknowledge::Error::NotFound) => {
-                    respond_status(&mut writer, Status::NotFound)
-                }
-                Err(super::acknowledge::Error::NothingToDismiss) => respond(
-                    &mut writer,
-                    "410 Gone",
-                    "application/json",
-                    "",
-                    serde_json::json!({"error": "This request has no warning to dismiss anymore."})
-                        .to_string()
-                        .as_bytes(),
-                ),
-                Err(super::acknowledge::Error::Refused(message)) => respond(
-                    &mut writer,
-                    "409 Conflict",
-                    "application/json",
-                    "",
-                    serde_json::json!({"error": message}).to_string().as_bytes(),
-                ),
-                Err(super::acknowledge::Error::Unavailable) => {
-                    respond_status(&mut writer, Status::Unavailable)
-                }
-            }
+            respond_dismissed(&mut writer, result)
         }
         Ok(Route::Reminders {
             key,
@@ -1666,6 +1746,7 @@ fn serve_connection(
                     drop(admitted);
                     committed.respond(
                         front.files.state(),
+                        &*front.mux,
                         completion,
                         |receipt| {
                             respond(
@@ -1676,7 +1757,9 @@ fn serve_connection(
                                 receipt.to_string().as_bytes(),
                             )
                         },
-                        |namespace| super::channel_service::drain(front.files.state(), namespace),
+                        |namespace| {
+                            super::channel_service::drain(front.files.state(), &*front.mux, namespace)
+                        },
                     )
                 }
                 Err(super::thread_controls::ControlError::NotFound) => {
@@ -1720,6 +1803,7 @@ fn serve_connection(
         }
         Ok(Route::Skills { key, address_id }) => {
             match skills_api::read(
+                &*front.mux,
                 history_store,
                 front.files.state(),
                 &key,
@@ -1754,7 +1838,7 @@ fn serve_connection(
                     let mut guard = history_store.lock().map_err(|_| Status::Unavailable)?;
                     resolve_screen(&mut guard, front.files.state(), &key, &address_id)?
                 };
-                screens.read(target)
+                screens.read(&*front.mux, target)
             })();
             match result {
                 Ok(text) => respond(
@@ -1841,7 +1925,7 @@ fn serve_connection(
                     let mut messages: Vec<_> = rows
                         .messages
                         .iter()
-                        .map(|row| snapshot::message(row, &rows.legs))
+                        .map(|row| snapshot::message(row, &rows.legs, Some(&image_directory)))
                         .collect();
                     snapshot::channel_routing::merge(
                         front.files.state(),
@@ -1877,7 +1961,9 @@ fn serve_connection(
                         .history
                         .messages
                         .iter()
-                        .map(|row| snapshot::message(row, &context.history.legs))
+                        .map(|row| {
+                            snapshot::message(row, &context.history.legs, Some(&image_directory))
+                        })
                         .collect();
                     snapshot::channel_routing::merge(
                         front.files.state(),
@@ -1929,7 +2015,13 @@ fn serve_connection(
             })();
             match result {
                 Ok(body) => {
-                    let mut safe = snapshot::SafeText::from_untrusted(&body.text, BODY_LIMIT);
+                    // The row already lists the images; a cut body has lost their lines.
+                    let text = if body.cut {
+                        body.text.as_str()
+                    } else {
+                        super::images::split(&body.text, Some(&image_directory)).0
+                    };
+                    let mut safe = snapshot::SafeText::from_untrusted(text, BODY_LIMIT);
                     safe.truncated |= body.cut;
                     let body = serde_json::to_vec(&serde_json::json!({
                         "message_id": message_id,
@@ -1983,7 +2075,13 @@ fn send_direct_post(
     let Some(namespace) = namespace else {
         return respond_status(writer, Status::NotFound);
     };
-    let herdr = ProcessHerdr::default().with_socket(Some(namespace.session_socket_id.clone()));
+    let Ok(herdr) = front.mux.connect(
+        &namespace.session_socket_id,
+        Budget::ADAPTER_DEFAULT,
+        Arc::default(),
+    ) else {
+        return respond_status(writer, Status::Unavailable);
+    };
     let ids = crate::ProcessIds::default();
     let runtime = crate::LifecycleRuntime {
         state_directory: front.files.state(),
@@ -1993,7 +2091,7 @@ fn send_direct_post(
         workspace_id: Some(namespace.space_id.as_str()),
         current_pane_id: None,
         session_socket_id: &namespace.session_socket_id,
-        herdr: &herdr,
+        mux: &herdr,
         clock: &crate::SystemClock,
         ids: &ids,
     };
@@ -2063,8 +2161,13 @@ fn send_operator_post(
     let Some(namespace) = namespace else {
         return respond_status(writer, Status::NotFound);
     };
-    let herdr =
-        crate::ProcessHerdr::default().with_socket(Some(namespace.session_socket_id.clone()));
+    let Ok(herdr) = front.mux.connect(
+        &namespace.session_socket_id,
+        Budget::ADAPTER_DEFAULT,
+        Arc::default(),
+    ) else {
+        return respond_status(writer, Status::Unavailable);
+    };
     let ids = crate::ProcessIds::default();
     let runtime = crate::LifecycleRuntime {
         state_directory: front.files.state(),
@@ -2074,7 +2177,7 @@ fn send_operator_post(
         workspace_id: Some(namespace.space_id.as_str()),
         current_pane_id: None,
         session_socket_id: &namespace.session_socket_id,
-        herdr: &herdr,
+        mux: &herdr,
         clock: &crate::SystemClock,
         ids: &ids,
     };
@@ -2166,8 +2269,13 @@ fn send_coordination_review(
         }
     };
     let namespace = &draft.namespace;
-    let herdr =
-        crate::ProcessHerdr::default().with_socket(Some(namespace.session_socket_id.clone()));
+    let Ok(herdr) = front.mux.connect(
+        &namespace.session_socket_id,
+        Budget::ADAPTER_DEFAULT,
+        Arc::default(),
+    ) else {
+        return respond_status(writer, Status::Unavailable);
+    };
     let ids = crate::ProcessIds::default();
     let runtime = crate::LifecycleRuntime {
         state_directory: front.files.state(),
@@ -2177,7 +2285,7 @@ fn send_coordination_review(
         workspace_id: Some(namespace.space_id.as_str()),
         current_pane_id: None,
         session_socket_id: &namespace.session_socket_id,
-        herdr: &herdr,
+        mux: &herdr,
         clock: &crate::SystemClock,
         ids: &ids,
     };
@@ -2236,8 +2344,6 @@ pub(super) fn wake_mailboxes_after_send(
     namespace: &crate::StateNamespace,
     receipt: &serde_json::Value,
 ) -> Result<(), String> {
-    use std::os::unix::process::CommandExt;
-
     let pending = crate::drain_reports(receipt)
         .filter(|(_, report)| report.needs_mailbox_worker())
         .map(|(workspace, _)| workspace)
@@ -2262,18 +2368,17 @@ pub(super) fn wake_mailboxes_after_send(
                 .then_some(copy.space)
         }));
     }
+    let endpoint = crate::mux::Endpoint::parse(&namespace.session_socket_id);
     for space in spaces {
-        let mut child = Command::new(crate::runtime_executable()?)
+        let mut command = crate::daemon::command(
+            &crate::runtime_executable()?,
+            crate::daemon::Scope::Space(&endpoint, &space),
+            crate::daemon::Starter::Caller,
+        );
+        Locator::StateDir.pass(&mut command, crate::locator::Name::of(endpoint.kind), state);
+        let mut child = command
             .args(["hook", "mailbox-wake", "--state-directory"])
             .arg(state)
-            .env("HERDR_PLUGIN_STATE_DIR", state)
-            .env("HERDR_SOCKET_PATH", &namespace.session_socket_id)
-            .env("HERDR_WORKSPACE_ID", space.as_str())
-            .env_remove("HERDR_PANE_ID")
-            .process_group(0)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
             .spawn()
             .map_err(|error| error.to_string())?;
         thread::spawn(move || {
@@ -2283,6 +2388,169 @@ pub(super) fn wake_mailboxes_after_send(
         });
     }
     Ok(())
+}
+
+struct UploadPermit<'a>(&'a AtomicUsize);
+
+impl Drop for UploadPermit<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+fn change_sounds(
+    reader: &mut impl Read,
+    writer: &mut TcpStream,
+    front: &Front,
+    history_store: &Mutex<HistoryStore>,
+    request: &Request,
+) -> io::Result<()> {
+    let change = match read_json_body::<super::sounds::Change>(reader, request) {
+        Ok(change) => change,
+        Err(status) => return respond_status(writer, status),
+    };
+    let known = known_agents(front, history_store);
+    let _admitted = match front.admit_mutation() {
+        Ok(guard) => guard,
+        Err(status) => return respond_status(writer, status),
+    };
+    let stored = super::sounds::read(&front.files);
+    let settings = match stored.clone().change(change, known.as_ref()) {
+        Ok(changed) => changed,
+        Err(super::sounds::Rejected::TooManyAgents) => {
+            return respond_status(writer, Status::BadRequest);
+        }
+        Err(super::sounds::Rejected::Stale) => {
+            return respond_sounds(writer, "409 Conflict", &stored);
+        }
+    };
+    if super::sounds::write(&front.files, &settings).is_err() {
+        return respond_status(writer, Status::Unavailable);
+    }
+    respond_sounds(writer, "200 OK", &settings)
+}
+
+/// The pane addresses of the agents the person can message today, or `None`
+/// when the listing fails, so no pick is dropped on a guess.
+fn known_agents(front: &Front, history_store: &Mutex<HistoryStore>) -> Option<HashSet<String>> {
+    let mut guard = history_store.lock().ok()?;
+    let peers = guard
+        .store(front.files.state())
+        .ok()?
+        .direct_message_peers(crate::Clock::now_unix_ms(&crate::SystemClock))
+        .ok()?;
+    Some(peers.into_iter().map(|peer| peer.address_id).collect())
+}
+
+fn respond_dismissed(
+    writer: &mut TcpStream,
+    result: Result<serde_json::Value, super::acknowledge::Error>,
+) -> io::Result<()> {
+    use super::acknowledge::Error;
+    let (status, body) = match result {
+        Ok(receipt) => ("200 OK", receipt),
+        Err(Error::NotFound) => return respond_status(writer, Status::NotFound),
+        Err(Error::Unavailable) => return respond_status(writer, Status::Unavailable),
+        Err(Error::NothingToDismiss) => (
+            "410 Gone",
+            serde_json::json!({"error": "There is no warning to dismiss here anymore."}),
+        ),
+        Err(Error::Refused(message)) => ("409 Conflict", serde_json::json!({"error": message})),
+    };
+    respond(
+        writer,
+        status,
+        "application/json",
+        "",
+        body.to_string().as_bytes(),
+    )
+}
+
+fn respond_sounds(
+    writer: &mut TcpStream,
+    status: &str,
+    settings: &super::sounds::Settings,
+) -> io::Result<()> {
+    respond(
+        writer,
+        status,
+        "application/json",
+        "",
+        &serde_json::to_vec(settings).expect("sound settings serialize"),
+    )
+}
+
+/// Stores the posted bytes when they are one of the four image types, and
+/// answers with the line a message carries for the image.
+fn upload_image(
+    reader: &mut impl Read,
+    writer: &mut TcpStream,
+    front: &Front,
+    request: &Request,
+) -> io::Result<()> {
+    let length = match request
+        .header("content-length")
+        .filter(|length| !length.is_empty() && length.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        Some(length) => length.parse::<usize>().unwrap_or(usize::MAX),
+        None => return respond_status(writer, Status::BadRequest),
+    };
+    if length > super::images::MAX_BYTES {
+        return respond_status(writer, Status::PayloadTooLarge);
+    }
+    if front.image_uploads.fetch_add(1, Ordering::AcqRel) >= MAX_IMAGE_UPLOADS {
+        front.image_uploads.fetch_sub(1, Ordering::AcqRel);
+        return respond_status(writer, Status::TooManyRequests);
+    }
+    let _upload = UploadPermit(&front.image_uploads);
+    let mut bytes = vec![0; length];
+    if reader.read_exact(&mut bytes).is_err() {
+        return respond_status(writer, Status::BadRequest);
+    }
+    let state = front.files.state();
+    let now = std::time::SystemTime::now();
+    match super::images::save(state, &bytes, now) {
+        Ok(name) => {
+            super::images::prune(state, now);
+            respond(
+                writer,
+                "200 OK",
+                "application/json",
+                "",
+                serde_json::json!({
+                    "name": name.as_str(),
+                    "line": super::images::line(state, &name),
+                })
+                .to_string()
+                .as_bytes(),
+            )
+        }
+        Err(super::images::SaveError::NotAnImage) => {
+            respond_status(writer, Status::UnsupportedMedia)
+        }
+        Err(super::images::SaveError::Io(error)) => {
+            eprintln!("Could not store an image: {error}");
+            respond_status(writer, Status::Unavailable)
+        }
+    }
+}
+
+fn serve_image(
+    writer: &mut TcpStream,
+    front: &Front,
+    name: &super::images::Name,
+) -> io::Result<()> {
+    writer.set_write_timeout(Some(Duration::from_secs(5)))?;
+    let Some((file, length)) = super::images::open(front.files.state(), name) else {
+        return respond_status(writer, Status::NotFound);
+    };
+    write!(
+        writer,
+        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {length}\r\n{IMAGE_HEADERS}Connection: close\r\n\r\n",
+        name.kind().content_type(),
+    )?;
+    io::copy(&mut file.take(length), writer)?;
+    writer.flush()
 }
 
 fn serve_asset(
@@ -2305,9 +2573,14 @@ fn serve_asset(
     }
     write!(
         writer,
-        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\n{SECURITY_HEADERS}{}{extra_headers}Connection: close\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\n{}{}{extra_headers}Connection: close\r\n\r\n",
         content_type(path),
         asset.length,
+        if asset.hashed {
+            HASHED_ASSET_HEADERS
+        } else {
+            SECURITY_HEADERS
+        },
         if asset.is_index {
             format!("X-Namedrop-Csrf: {}\r\n", csrf_token(&front.session))
         } else {
@@ -2715,7 +2988,14 @@ mod screen_regression_tests {
         let follower = {
             let reads = reads.clone();
             let target = target.clone();
-            thread::spawn(move || sender.send(reads.read(target)).unwrap())
+            thread::spawn(move || {
+                sender
+                    .send(reads.read(
+                        &crate::mux::Connector::new(std::path::Path::new("")),
+                        target,
+                    ))
+                    .unwrap()
+            })
         };
         let outcome = receiver.recv_timeout(Duration::from_secs(5));
         let elapsed = started.elapsed();
@@ -2782,6 +3062,133 @@ mod skill_route_tests {
         request.path = "/w/0123456789abcdef0123/participants/member/skills".into();
         request.method = "POST".into();
         assert!(matches!(routes(&request), Err(Status::MethodNotAllowed)));
+        std::fs::remove_dir_all(state).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod channel_create_route_tests {
+    use super::*;
+
+    #[test]
+    fn folders_is_a_session_get_and_channels_and_agents_are_csrf_posts() {
+        let state = std::env::temp_dir().join(crate::IdGenerator::next_id(
+            &crate::ProcessIds::default(),
+            "channel-create-route",
+        ));
+        let files = ServerFiles::at(&state).unwrap();
+        let token = files.token().unwrap();
+        let session = files.session().unwrap();
+        let routes = |method: &str, path: &str, csrf: bool| {
+            let mut headers = vec![
+                ("host".into(), "127.0.0.1:1234".into()),
+                (
+                    "cookie".into(),
+                    format!("{}={}", cookie_name(1234), session.as_str()),
+                ),
+            ];
+            if csrf {
+                headers.push(("x-namedrop-csrf".into(), csrf_token(&session)));
+            }
+            let request = Request {
+                method: method.into(),
+                path: path.into(),
+                query: None,
+                headers,
+            };
+            route(&request, 1234, &token, &session, false, None)
+        };
+        let key = "0123456789abcdef0123";
+        assert!(matches!(
+            routes("GET", &format!("/w/{key}/folders"), false),
+            Ok(Route::Folders(_))
+        ));
+        assert!(matches!(
+            routes("GET", &format!("/w/{key}/folder"), false),
+            Ok(Route::ChannelFolder(_))
+        ));
+        assert!(matches!(
+            routes("POST", &format!("/w/{key}/channels"), false),
+            Err(Status::Forbidden)
+        ));
+        assert!(matches!(
+            routes("POST", &format!("/w/{key}/channels"), true),
+            Ok(Route::CreateChannel(_))
+        ));
+        assert!(matches!(
+            routes("POST", &format!("/w/{key}/agents"), true),
+            Ok(Route::AddAgent(_))
+        ));
+        for (method, path) in [
+            ("GET", format!("/w/{key}/channels")),
+            ("GET", format!("/w/{key}/agents")),
+            ("POST", format!("/w/{key}/folders")),
+            ("POST", format!("/w/{key}/folder")),
+            ("GET", "/w/not-a-key/folders".to_owned()),
+            ("POST", "/w/not-a-key/agents".to_owned()),
+            ("POST", format!("/w/{key}/agents/extra")),
+        ] {
+            assert!(
+                matches!(routes(method, &path, true), Err(Status::NotFound)),
+                "{method} {path}"
+            );
+        }
+        std::fs::remove_dir_all(state).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod sound_route_tests {
+    use super::*;
+
+    #[test]
+    fn sounds_need_session_and_provenance_and_changes_also_need_csrf() {
+        let state = std::env::temp_dir().join(format!(
+            "namedrop-sound-route-{}",
+            super::super::server_files::random_hex(12).unwrap()
+        ));
+        let files = ServerFiles::at(&state).unwrap();
+        let token = files.token().unwrap();
+        let session = files.session().unwrap();
+        let routes = |request: &Request| route(request, 1234, &token, &session, false, None);
+        let mut request = Request {
+            method: "GET".into(),
+            path: "/api/sounds".into(),
+            query: None,
+            headers: vec![("host".into(), "127.0.0.1:1234".into())],
+        };
+        assert!(matches!(routes(&request), Err(Status::Unauthorized)));
+        request.headers.push((
+            "cookie".into(),
+            format!("{}={}", cookie_name(1234), session.as_str()),
+        ));
+        for (name, value) in [
+            ("origin", "https://other.invalid"),
+            ("sec-fetch-site", "same-site"),
+        ] {
+            request.headers.push((name.into(), value.into()));
+            assert!(matches!(routes(&request), Err(Status::Forbidden)), "{name}");
+            request.headers.pop();
+        }
+        assert!(matches!(routes(&request), Ok(Route::Sounds)));
+        request.method = "POST".into();
+        assert!(matches!(routes(&request), Err(Status::Forbidden)));
+        request
+            .headers
+            .push(("x-namedrop-csrf".into(), csrf_token(&session)));
+        assert!(matches!(routes(&request), Ok(Route::ChangeSounds)));
+        request
+            .headers
+            .push(("origin".into(), "https://other.invalid".into()));
+        assert!(matches!(routes(&request), Err(Status::Forbidden)));
+        request.headers.pop();
+        for method in ["PUT", "DELETE", "PATCH"] {
+            request.method = method.into();
+            assert!(
+                matches!(routes(&request), Err(Status::MethodNotAllowed)),
+                "{method}"
+            );
+        }
         std::fs::remove_dir_all(state).unwrap();
     }
 }
@@ -2984,11 +3391,15 @@ mod tailnet_route_tests {
             "/api/events",
             "/api/spaces",
             "/api/direct-messages",
+            "/api/sounds",
+            "/api/images/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.png",
             "/w/0123456789abcdef0123",
             "/w/0123456789abcdef0123/events",
             "/w/0123456789abcdef0123/participants/agent/live",
             "/w/0123456789abcdef0123/participants/agent/skills",
             "/w/0123456789abcdef0123/threads/thread/reminders",
+            "/w/0123456789abcdef0123/folders",
+            "/w/0123456789abcdef0123/folder",
         ];
         for path in paths {
             let mut request = request(
@@ -3072,46 +3483,64 @@ mod tailnet_route_tests {
                 None,
             ),
         ] {
-            let mut request = request(&host, login, Some(&origin));
-            request.method = "POST".into();
-            request.path = "/w/0123456789abcdef0123/messages".into();
-            assert!(matches!(
-                route(&request, 1234, &token, &session, false, policy),
-                Err(Status::Unauthorized)
-            ));
-            request.headers.push((
-                "cookie".into(),
-                format!("{}={}", cookie_name(1234), session.as_str()),
-            ));
-            assert!(matches!(
-                route(&request, 1234, &token, &session, false, policy),
-                Err(Status::Forbidden)
-            ));
-            request
-                .headers
-                .push(("x-namedrop-csrf".into(), csrf_token(&session)));
-            assert!(matches!(
-                route(&request, 1234, &token, &session, false, policy),
-                Ok(Route::Send(_))
-            ));
-            request
-                .headers
-                .push(("sec-fetch-site".into(), "same-site".into()));
-            assert!(matches!(
-                route(&request, 1234, &token, &session, false, policy),
-                Err(Status::Forbidden)
-            ));
-            request.headers.pop();
-            request
-                .headers
-                .iter_mut()
-                .find(|(name, _)| name == "origin")
-                .unwrap()
-                .1 = "https://evil.example".into();
-            assert!(matches!(
-                route(&request, 1234, &token, &session, false, policy),
-                Err(Status::Forbidden)
-            ));
+            for path in [
+                "/w/0123456789abcdef0123/messages",
+                "/api/images",
+                "/w/0123456789abcdef0123/channels",
+                "/w/0123456789abcdef0123/agents",
+                "/api/sounds",
+            ] {
+                let mut request = request(&host, login, Some(&origin));
+                request.method = "POST".into();
+                request.path = path.into();
+                assert!(matches!(
+                    route(&request, 1234, &token, &session, false, policy),
+                    Err(Status::Unauthorized)
+                ));
+                request.headers.push((
+                    "cookie".into(),
+                    format!("{}={}", cookie_name(1234), session.as_str()),
+                ));
+                assert!(matches!(
+                    route(&request, 1234, &token, &session, false, policy),
+                    Err(Status::Forbidden)
+                ));
+                request
+                    .headers
+                    .push(("x-namedrop-csrf".into(), csrf_token(&session)));
+                let routed = route(&request, 1234, &token, &session, false, policy);
+                assert!(
+                    match path {
+                        "/api/images" => matches!(routed, Ok(Route::ImageUpload)),
+                        "/api/sounds" => matches!(routed, Ok(Route::ChangeSounds)),
+                        path if path.ends_with("/channels") => {
+                            matches!(routed, Ok(Route::CreateChannel(_)))
+                        }
+                        path if path.ends_with("/agents") =>
+                            matches!(routed, Ok(Route::AddAgent(_))),
+                        _ => matches!(routed, Ok(Route::Send(_))),
+                    },
+                    "{path}"
+                );
+                request
+                    .headers
+                    .push(("sec-fetch-site".into(), "same-site".into()));
+                assert!(matches!(
+                    route(&request, 1234, &token, &session, false, policy),
+                    Err(Status::Forbidden)
+                ));
+                request.headers.pop();
+                request
+                    .headers
+                    .iter_mut()
+                    .find(|(name, _)| name == "origin")
+                    .unwrap()
+                    .1 = "https://evil.example".into();
+                assert!(matches!(
+                    route(&request, 1234, &token, &session, false, policy),
+                    Err(Status::Forbidden)
+                ));
+            }
         }
         std::fs::remove_dir_all(state).unwrap();
     }

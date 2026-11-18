@@ -1,11 +1,11 @@
 use crate::lifecycle::PaneLabel;
+use crate::mux::{AgentState, Badge, Effect, InputOutcome, PaneId, Retry};
 use crate::store::LostSettle;
 use crate::{
     ActorKind, Clock, DeliveryAttemptId, DeliveryState, DiscoveredPane, DispatchCandidate,
-    HerdrCommandExecutor, IdGenerator, InflightDeliveryAttempt, IntegrationToolInvocation,
-    LeaseDraft, LifecycleRuntime, MutationAttribution, PromptFailureKind, StateNamespace,
-    StateStore, StateTransaction, StoreError, collaboration_executable, discover_worktree,
-    store::WakeReadiness, tool_environment,
+    IdGenerator, InflightDeliveryAttempt, IntegrationToolInvocation, LeaseDraft, LifecycleRuntime,
+    MutationAttribution, StateNamespace, StateStore, StateTransaction, StoreError,
+    collaboration_executable, discover_worktree, store::WakeReadiness, tool_environment,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -211,9 +211,9 @@ pub fn mail_waits_for_session(
         .unwrap_or(false)
 }
 
-pub fn drain_receipt<E, C, I>(runtime: &LifecycleRuntime<'_, E, C, I>) -> Value
+pub fn drain_receipt<M, C, I>(runtime: &LifecycleRuntime<'_, M, C, I>) -> Value
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
@@ -265,7 +265,7 @@ pub(crate) fn reconcile_delivery_state(
                 && pane.is_some_and(|p| {
                     p.terminal_id == terminal_id
                         && p.agent.is_none()
-                        && p.agent_session_id.is_none()
+                        && p.agent_session_id().is_none()
                 });
             if !same
                 || (started.is_none()
@@ -319,10 +319,7 @@ pub(crate) fn reconcile_delivery_state(
             Observation::Unchanged => {}
         }
     }
-    for session in panes
-        .iter()
-        .filter_map(|pane| pane.agent_session_id.as_ref())
-    {
+    for session in panes.iter().filter_map(|pane| pane.agent_session_id()) {
         for attempt in crate::final_reply::open_claims(state_directory, namespace, session) {
             if let Some(due_at_ms) =
                 transaction.judge_awaiting_stop(namespace, &attempt, attribution)?
@@ -358,10 +355,8 @@ fn observe_agent_attempt(
     now_ms: u64,
 ) -> Observation {
     let same_session = attempt.binding_active
-        && pane.and_then(|pane| pane.agent_session_id.as_ref()) == Some(&attempt.agent_session_id);
-    let session_is_settled = pane
-        .and_then(|pane| pane.agent_status.as_deref())
-        .is_some_and(|status| matches!(status, "idle" | "done"));
+        && pane.and_then(|pane| pane.agent_session_id()) == Some(&attempt.agent_session_id);
+    let session_is_settled = pane.is_some_and(DiscoveredPane::accepts_prompt);
     let grace_due_at_ms = attempt
         .created_at_ms
         .saturating_add(ACKNOWLEDGEMENT_GRACE_MS);
@@ -383,12 +378,12 @@ fn observe_agent_attempt(
     }
 }
 
-pub(crate) fn publish_status_metadata<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub(crate) fn publish_status_metadata<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     discovered: &crate::DiscoveredWorktree,
 ) -> Result<(), String>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux,
 {
     let namespace = discovered.namespace(runtime.session_socket_id);
     let mut store = StateStore::open(runtime.state_directory).map_err(|error| error.to_string())?;
@@ -397,15 +392,15 @@ where
             let (waiting, _) = transaction.delivery_health(&namespace)?;
             Ok((
                 waiting,
-                transaction.unresolved_attention_items(&namespace)?.len() as u64,
+                transaction
+                    .attention_items_needing_the_person(&namespace)?
+                    .len() as u64,
                 transaction.active_pane_bindings(&namespace)?,
                 transaction.list_pane_addresses(&namespace)?,
             ))
         })
         .map_err(|error| error.to_string())?;
     let served = crate::codex_app_server::served_codex_panes(runtime, &discovered.panes);
-    let awaiting_token = format!("namedrop-awaiting={waiting}");
-    let attention_token = format!("namedrop-attention={attention}");
     for binding in bindings {
         if let Some(pane) = discovered
             .panes
@@ -426,27 +421,36 @@ where
                     )?;
                 }
             }
-            runtime.herdr.execute(&[
-                "pane",
-                "report-metadata",
-                &binding.pane_id,
-                "--source",
-                "namedrop",
-                "--token",
-                &awaiting_token,
-                "--token",
-                &attention_token,
-            ])?;
+            runtime
+                .mux
+                .apply(&Effect::Badges {
+                    pane: PaneId::new(&binding.pane_id),
+                    badges: vec![Badge::Awaiting(waiting), Badge::Attention(attention)],
+                })
+                .map_err(|error| error.to_string())?;
         }
     }
     Ok(())
 }
 
-pub fn drain_mailboxes<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub fn drain_mailboxes<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<DrainReport, String>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux,
+    C: Clock,
+    I: IdGenerator,
+{
+    let drained = drain_mailboxes_here(runtime);
+    crate::relay::capture_after_drain(runtime.state_directory, runtime.session_socket_id);
+    drained
+}
+
+fn drain_mailboxes_here<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
+) -> Result<DrainReport, String>
+where
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
@@ -483,7 +487,7 @@ where
                 .transaction(|tx| tx.terminal_result(&namespace, &attempt.attempt_id))
                 .map_err(|e| e.to_string())?
                 .is_none()
-            && crate::terminal::shell_is_available(runtime.herdr, &attempt.pane_id)
+            && crate::terminal::shell_is_available(runtime.mux, &attempt.pane_id)
         {
             store
                 .transaction(|tx| {
@@ -523,8 +527,7 @@ where
     let remote_seats = store
         .transaction(|transaction| transaction.remote_seat_spaces(&namespace))
         .map_err(|error| error.to_string())?;
-    let live =
-        crate::spaces::LiveSpaces::load(runtime.herdr, first_discovery.clone(), &remote_seats);
+    let live = crate::spaces::LiveSpaces::load(runtime.mux, first_discovery.clone(), &remote_seats);
     let check_in_due_ms = store
         .transaction(|transaction| {
             transaction.complete_ready_result_sets(
@@ -562,7 +565,7 @@ where
         // lock, once this candidate is confirmed.
         if !matches!(reach, Reach::Now | Reach::Waits(AgentWait::SentPrompt))
             || (first.pane_type == crate::PaneType::Terminal
-                && !crate::terminal::shell_is_available(runtime.herdr, &first.pane_id))
+                && !crate::terminal::shell_is_available(runtime.mux, &first.pane_id))
         {
             report.note_draft(&reach, &address_id, &first);
             continue;
@@ -622,7 +625,7 @@ where
                         .iter()
                         .find(|p| p.pane_id == second.pane_id)
                         .map(|p| &p.terminal_id)
-                    || !crate::terminal::shell_is_available(runtime.herdr, &second.pane_id)))
+                    || !crate::terminal::shell_is_available(runtime.mux, &second.pane_id)))
         {
             report.note_draft(&reach, &address_id, &second);
             continue;
@@ -773,10 +776,23 @@ where
             &second.binding_id,
             &leased.agent_session_id,
         );
-        let prompt_result = if second.pane_type == crate::PaneType::Terminal {
-            effects.run_terminal(runtime.herdr, &owner, &prompt)
+        let outcome = if second.pane_type == crate::PaneType::Terminal {
+            effects.run_terminal(runtime.mux, &owner, &prompt)
         } else {
-            effects.prompt(runtime.herdr, &owner, &prompt)
+            let pane = second_discovery
+                .panes
+                .iter()
+                .find(|p| p.pane_id == second.pane_id)
+                .expect("live candidate checked");
+            let expect = pane.agent.as_ref().expect("live candidate checked");
+            effects.prompt(
+                runtime.mux,
+                &owner,
+                crate::mux::PromptRequest {
+                    expect,
+                    text: &prompt,
+                },
+            )
         };
         let attribution = MutationAttribution::new(
             ActorKind::Plugin,
@@ -784,7 +800,7 @@ where
             runtime.clock.now_unix_ms(),
         );
         if second.pane_type == crate::PaneType::Terminal
-            && prompt_result.is_err()
+            && outcome != InputOutcome::Delivered
             && !matches!(
                 store
                     .transaction(|tx| tx.delivery_attempt_state(&namespace, &leased.attempt_id))
@@ -795,10 +811,8 @@ where
             // A runner's durable claim/result outranks a late transport error.
             continue;
         }
-        let prompt_result =
-            prompt_result.map_err(|error| runtime.herdr.classify_prompt_failure(&error));
-        match prompt_result {
-            Ok(_) => {
+        match outcome {
+            InputOutcome::Delivered => {
                 store
                     .transaction(|transaction| {
                         if second.pane_type == crate::PaneType::Terminal {
@@ -830,7 +844,7 @@ where
                     .map_err(|error| error.to_string())?;
                 report.submitted.push(leased.attempt_id);
             }
-            Err(kind) if kind.is_temporary_pre_invocation() => {
+            InputOutcome::Declined(retry, _) => {
                 store
                     .transaction(|transaction| {
                         transaction.return_delivery_attempt_to_queue(
@@ -841,10 +855,9 @@ where
                     })
                     .map_err(|error| error.to_string())?;
                 report.requeued.push(leased.attempt_id);
-                report.retry_without_event |=
-                    kind == PromptFailureKind::TemporaryPreInvocationWithoutEvent;
+                report.retry_without_event |= retry == Retry::AfterDelay;
             }
-            Err(PromptFailureKind::DefinitiveNonRetryable) => {
+            InputOutcome::Refused(_) => {
                 store
                     .transaction(|transaction| {
                         transaction.transition_delivery_attempt(
@@ -858,7 +871,7 @@ where
                     .map_err(|error| error.to_string())?;
                 report.failed.push(leased.attempt_id);
             }
-            Err(_) => {
+            InputOutcome::Ambiguous(_) => {
                 store
                     .transaction(|transaction| {
                         transaction.transition_delivery_attempt(
@@ -911,19 +924,19 @@ where
     Ok(report)
 }
 
-fn discover<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+fn discover<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<crate::DiscoveredWorktree, String>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux,
 {
     match runtime.workspace_id {
         Some(workspace_id) => crate::lifecycle::discover_reminder_workspace(
             runtime.state_directory,
             &StateNamespace::for_space(runtime.session_socket_id, workspace_id),
-            runtime.herdr,
+            runtime.mux,
         ),
-        None => discover_worktree(runtime.herdr, runtime.cwd),
+        None => discover_worktree(runtime.mux, runtime.cwd),
     }
 }
 
@@ -939,13 +952,13 @@ enum Reach {
     Waits(AgentWait),
 }
 
-fn candidate_reach<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+fn candidate_reach<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     candidate: &DispatchCandidate,
     discovered: &crate::DiscoveredWorktree,
 ) -> Reach
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
 {
     let Some(pane) = discovered
@@ -956,9 +969,9 @@ where
         return Reach::Gone;
     };
     let present = if candidate.pane_type == crate::PaneType::Terminal {
-        pane.agent.is_none() && pane.agent_session_id.is_none()
+        pane.agent.is_none()
     } else {
-        pane.agent_session_id.as_ref() == Some(&candidate.agent_session_id)
+        pane.agent_session_id() == Some(&candidate.agent_session_id)
     };
     if !present {
         return Reach::Gone;
@@ -985,14 +998,14 @@ const CLEAR_REDRAW_MS: u64 = 150;
 /// it has already emptied. A box the keys leave as it was holds the mail: the
 /// session may not take the keys as Claude Code 2.1.322 does, or has not
 /// drawn the box again yet.
-fn clear_sent_prompt<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+fn clear_sent_prompt<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     effects: &crate::pane_effects::PaneEffects,
     pane_id: &str,
     session: &str,
 ) -> Reach
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
 {
     let held = Reach::Waits(AgentWait::SentPrompt);
@@ -1004,7 +1017,7 @@ where
     let forget = || crate::turn_phase::forget_restored(state, socket, session);
     let mut left: Option<usize> = None;
     for batch in 0..=CLEAR_BATCHES {
-        let Some(screen) = read_screen(runtime, pane_id) else {
+        let Ok(screen) = read_screen(runtime, pane_id) else {
             break;
         };
         match prompt_box(&screen, crate::AgentRuntime::ClaudeCode) {
@@ -1030,9 +1043,7 @@ where
             return held;
         }
         if batch == CLEAR_BATCHES
-            || effects
-                .delete_claude_code_input(runtime.herdr, rows)
-                .is_err()
+            || effects.delete_claude_code_input(runtime.mux, rows) != InputOutcome::Delivered
         {
             break;
         }
@@ -1060,6 +1071,10 @@ impl DrainReport {
             // reads the box as a draft, so the key is not sent again until
             // the box changes.
             Reach::Waits(AgentWait::SentPrompt) => (crate::AgentRuntime::ClaudeCode, None),
+            // Read again until a read succeeds.
+            Reach::Waits(AgentWait::ScreenUnread(agent, _)) => {
+                (*agent, Some(candidate.agent_session_id.as_str().to_owned()))
+            }
             _ => return,
         };
         {
@@ -1091,9 +1106,9 @@ fn opening(
     pane: &DiscoveredPane,
     phase: impl FnOnce() -> Option<crate::turn_phase::TurnPhase>,
 ) -> Opening {
-    match pane.agent_status.as_deref() {
-        Some("idle" | "done") => Opening::Settled,
-        Some("working")
+    match &pane.agent_status {
+        Some(status) if status.accepts_prompt() => Opening::Settled,
+        Some(AgentState::Working)
             if crate::integration::pane_agent_runtime(pane)
                 == Some(crate::AgentRuntime::ClaudeCode)
                 && matches!(phase(), Some(crate::turn_phase::TurnPhase::Stopped { .. })) =>
@@ -1108,13 +1123,17 @@ fn opening(
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum AgentWait {
     /// Herdr's status for the pane, which is not idle or done.
-    Status(Option<String>),
+    Status(Option<AgentState>),
     /// The agent's prompt box holds a draft the person hasn't sent. Herdr
     /// types at the cursor, so a prompt typed now would be sent inside it.
     Draft(crate::AgentRuntime),
     /// Herdr reports the session working between turns, and Namedrop found no
     /// prompt box to see that it is empty.
     PromptBoxUnseen,
+    /// A Rex screen could not be read, or held an escape sequence Namedrop
+    /// does not read, so the box was never seen. Herdr's idle stands in for
+    /// that read, and Rex's does not: the mail waits for a read that works.
+    ScreenUnread(crate::AgentRuntime, String),
     /// Claude Code's prompt box holds only the prompt Namedrop's hook sent as
     /// a message, which Claude Code put back after the hook blocked it. The
     /// drain clears it before it types.
@@ -1122,16 +1141,16 @@ pub(crate) enum AgentWait {
 }
 
 /// Why an agent pane's mail waits, or `None` when a prompt may be typed now.
-pub(crate) fn agent_wait<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub(crate) fn agent_wait<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     pane: &DiscoveredPane,
 ) -> Option<AgentWait>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
 {
     let phase = || {
-        pane.agent_session_id.as_ref().and_then(|session| {
+        pane.agent_session_id().and_then(|session| {
             crate::turn_phase::read(
                 runtime.state_directory,
                 runtime.session_socket_id,
@@ -1144,10 +1163,7 @@ where
         return Some(AgentWait::Status(pane.agent_status.clone()));
     }
     let agent = crate::integration::pane_agent_runtime(pane)?;
-    let session = pane
-        .agent_session_id
-        .as_ref()
-        .map(|session| session.as_str());
+    let session = pane.agent_session_id().map(|session| session.as_str());
     match read_prompt_box(runtime, &pane.pane_id, agent, session) {
         PromptBox::Empty => None,
         PromptBox::Draft => Some(AgentWait::Draft(agent)),
@@ -1157,18 +1173,19 @@ where
         // strands the mail. Between turns the empty box is the only proof.
         PromptBox::Unseen if opening == Opening::Settled => None,
         PromptBox::Unseen => Some(AgentWait::PromptBoxUnseen),
+        PromptBox::Unread(why) => Some(AgentWait::ScreenUnread(agent, why)),
     }
 }
 
 /// Reads the prompt boxes again whose drafts held mail, one pane read each,
 /// and drains the space once one of them no longer holds a draft. Until then
 /// it reports the holds whose mail still waits.
-pub fn recheck_drafts<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub fn recheck_drafts<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     held: Vec<DraftHold>,
 ) -> Result<DrainReport, String>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
@@ -1188,8 +1205,7 @@ where
         .filter(|hold| waiting.contains(&hold.address_id))
         .collect();
     if held.iter().all(|hold| {
-        read_prompt_box(runtime, &hold.pane_id, hold.agent, hold.session.as_deref())
-            == PromptBox::Draft
+        read_prompt_box(runtime, &hold.pane_id, hold.agent, hold.session.as_deref()).holds()
     }) {
         return Ok(DrainReport {
             draft_held: held,
@@ -1200,7 +1216,7 @@ where
 }
 
 /// What an agent pane's prompt box holds.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum PromptBox {
     Empty,
     /// Text the person typed and has not sent, or a box they switched to shell
@@ -1212,23 +1228,38 @@ enum PromptBox {
     Restored,
     /// The screen shows no prompt box Namedrop recognizes.
     Unseen,
+    /// A Rex screen fault: the read failed, or the screen holds what the box
+    /// reader would misread.
+    Unread(String),
+}
+
+impl PromptBox {
+    /// Whether a recheck keeps the mail waiting: the draft is still there,
+    /// or the screen still cannot be read.
+    fn holds(&self) -> bool {
+        matches!(self, Self::Draft | Self::Unread(_))
+    }
 }
 
 /// Enough of the screen's end for the box and whatever the agent draws under it.
-const PROMPT_BOX_LINES: &str = "60";
+const PROMPT_BOX_LINES: usize = 60;
 
-fn read_prompt_box<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+fn read_prompt_box<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     pane_id: &str,
     agent: crate::AgentRuntime,
     session: Option<&str>,
 ) -> PromptBox
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::MuxRead,
     C: Clock,
 {
-    let Some(screen) = read_screen(runtime, pane_id) else {
-        return PromptBox::Unseen;
+    let screen = match read_screen(runtime, pane_id) {
+        Ok(screen) => screen,
+        Err(error) if runtime.mux.endpoint().kind == crate::mux::MuxKind::Rex => {
+            return PromptBox::Unread(error.to_string());
+        }
+        Err(_) => return PromptBox::Unseen,
     };
     let held = prompt_box(&screen, agent);
     let (Some(session), crate::AgentRuntime::ClaudeCode) = (session, agent) else {
@@ -1254,27 +1285,23 @@ where
     }
 }
 
-/// The end of the pane's screen as Herdr renders it, or `None` when the pane
-/// could not be read.
-fn read_screen<E, C, I>(runtime: &LifecycleRuntime<'_, E, C, I>, pane_id: &str) -> Option<String>
+/// The end of the pane's screen as the multiplexer renders it.
+fn read_screen<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
+    pane_id: &str,
+) -> Result<String, crate::mux::MuxError>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::MuxRead,
 {
+    let request = crate::mux::ScreenRequest {
+        lines: PROMPT_BOX_LINES,
+        wrap: crate::mux::Wrap::AsDrawn,
+        style: crate::mux::Style::Ansi,
+    };
     runtime
-        .herdr
-        .execute(&[
-            "pane",
-            "read",
-            pane_id,
-            "--source",
-            "recent",
-            "--lines",
-            PROMPT_BOX_LINES,
-            "--format",
-            "ansi",
-        ])
-        .ok()
-        .map(|output| output.stdout)
+        .mux
+        .screen(&crate::mux::PaneId::new(pane_id), request)
+        .map(|screen| screen.text)
 }
 
 /// The person's text in a Claude Code box whose first row is on screen,
@@ -1639,6 +1666,54 @@ mod prompt_box_tests {
         assert_eq!(prompt_box(CODEX_EMPTY, CLAUDE), PromptBox::Unseen);
     }
 
+    /// Rex's `vt` format writes a run of blank cells as `ESC[nC`, which
+    /// `cells` drops, so the adapter hands the port `port_ansi`'s shape.
+    #[test]
+    fn rex_screens_show_their_boxes_in_the_ports_shape() {
+        let codex = crate::AgentRuntime::Codex;
+        for (name, vt, agent, held) in [
+            (
+                "claude-empty",
+                include_str!("mux/rex/fixtures/vt/claude-empty.vt"),
+                CLAUDE,
+                PromptBox::Empty,
+            ),
+            (
+                "claude-placeholder",
+                include_str!("mux/rex/fixtures/vt/claude-placeholder.vt"),
+                CLAUDE,
+                PromptBox::Empty,
+            ),
+            (
+                "claude-draft",
+                include_str!("mux/rex/fixtures/vt/claude-draft.vt"),
+                CLAUDE,
+                PromptBox::Draft,
+            ),
+            (
+                "codex-empty",
+                include_str!("mux/rex/fixtures/vt/codex-empty.vt"),
+                codex,
+                PromptBox::Empty,
+            ),
+            (
+                "codex-draft",
+                include_str!("mux/rex/fixtures/vt/codex-draft.vt"),
+                codex,
+                PromptBox::Draft,
+            ),
+            (
+                "codex-draft-fresh",
+                include_str!("mux/rex/fixtures/vt/codex-draft-fresh.vt"),
+                codex,
+                PromptBox::Draft,
+            ),
+        ] {
+            let screen = crate::mux::rex::wire::port_ansi(vt).unwrap();
+            assert_eq!(prompt_box(&screen, agent), held, "{name}");
+        }
+    }
+
     #[test]
     fn a_box_in_shell_mode_is_the_persons_even_when_empty() {
         assert_eq!(prompt_box(SHELL_MODE, CLAUDE), PromptBox::Draft);
@@ -1698,10 +1773,12 @@ mod observation_tests {
             workspace_id: "workspace-1".to_owned(),
             cwd: None,
             pane_label: None,
-            agent_session_id: Some(AgentSessionId::new(session)),
-            agent: None,
-            occupant_label: None,
-            agent_status: Some(status.to_owned()),
+            agent: Some(crate::mux::AgentIdentity {
+                kind: crate::mux::AgentKind::Unreported,
+                label: None,
+                session: crate::mux::SessionClaim::Reported(AgentSessionId::new(session)),
+            }),
+            agent_status: Some(AgentState::parse(status)),
             idle_state_label: None,
         }
     }

@@ -78,8 +78,16 @@ the `w1` below stands for that workspace.
 
 ## Claude Code
 
+- The profile's `claude` (`PROFILE/bin/claude`) is a wrapper that reads the testbed's
+  token file and starts Claude Code with `CLAUDE_CODE_OAUTH_TOKEN`. The `env -i` line in
+  `env.sh` does not hold the token, and the profile has no link to the default login or
+  the login keychain. Start Claude Code by that full path, `PROFILE/bin/claude`. A pane's
+  login shell can put `/usr/local/bin` and the system directories ahead of `PROFILE/bin`,
+  so a bare `claude` may start another Claude Code without the token, and Claude Code run
+  outside the profile's environment uses this machine's default login. Never put the token
+  on a command line.
 - The trust prompt highlights "No, exit"; send `down` then `enter`, or Claude exits and the
-  pane returns to its shell. Relaunch with `herdr pane run w1:p2 claude`.
+  pane returns to its shell. Relaunch with `herdr pane run w1:p2 PROFILE/bin/claude`.
 - Seeding `home/.claude.json` (`hasCompletedOnboarding`, `lastOnboardingVersion`,
   `projects[<repo>].hasTrustDialogAccepted`) and `theme` in `home/.claude/settings.json`
   skips the first-run screens; the harness does this.

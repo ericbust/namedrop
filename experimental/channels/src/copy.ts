@@ -36,15 +36,20 @@ export type IconName =
   | "clock"
   | "done"
   | "hash"
+  | "image"
   | "inbox"
   | "menu"
   | "pause"
+  | "play"
+  | "plus"
   | "plug"
   | "prompt"
   | "pulse"
   | "refresh"
   | "reply"
   | "report"
+  | "speaker"
+  | "speakerOff"
   | "unknown"
   | "working"
   | "x";
@@ -177,6 +182,13 @@ const attentionTable: Record<Attention["source"], AttentionRow> = {
     named: (alias) => `${alias} isn't set up yet`,
     hint: "Start a new session in that pane.",
   },
+  // The server's summary says what to do, which differs for Claude Code and
+  // Codex, and is the title. These stand in when it sends none.
+  agent_start: {
+    title: "Finish a new agent's setup in its pane",
+    named: (alias) => `Finish ${alias}'s setup in its pane`,
+    hint: "Open its pane. It may first ask you to trust the folder or to log in.",
+  },
   unknown: { ...needsYou, hint: "Open Details for the full message." },
 };
 // An unanswered-request item whose held answer can never arrive, by cause.
@@ -275,10 +287,12 @@ function responseHint(
     return { hint: pausedHint, hintTitle: null };
   const who = responder?.alias ?? item.subjectAlias;
   const pane = item.response?.kind === "pane";
-  // A context grant that failed is shared again by its sender, not fixed in the pane.
+  // A context grant that failed is shared again by its sender, not fixed in the
+  // pane, and a new agent's own hint already says what its pane may be asking.
   if (
     who === null ||
     item.source === "context_grant" ||
+    item.source === "agent_start" ||
     !(pane || item.source === "agent_status")
   )
     return null;
@@ -303,17 +317,21 @@ export const threadControlCopy = {
   dismiss: {
     label: "Dismiss",
     pending: "Dismissing…",
-    title: "Removes this card. The request stays in the thread as ended.",
+    title: "Removes this card. Nothing is sent.",
     failed: "Couldn't dismiss it. Try again.",
   },
   confirm: "Stop this thread for good?",
   confirmStop: "Stop",
   confirmDismissQuestion: "Dismiss this? Its answer can't arrive.",
+  confirmDismissWarning: "Dismiss this? Nothing else changes.",
   confirmDismiss: "Dismiss",
+  dismissAll: "Dismiss all",
+  dismissCount: (count: number) => `Dismiss ${count}`,
+  confirmDismissAll: (count: number) =>
+    `Dismiss these ${count}? Nothing else changes.`,
   cancel: "Cancel",
   gone: "This thread is no longer in this workspace.",
-  requestGone: "This request is no longer in this workspace.",
-  stillAnswerable: "The agent can still answer this, so it stays.",
+  requestGone: "This is no longer in this workspace.",
   nothingToDismiss:
     "This was already cleared. The card goes away on the next update.",
   status: (code: number) => `HTTP ${code}`,
@@ -342,7 +360,7 @@ export function attentionCopy(
       : { hint: absenceCopy(absent), hintTitle: null };
   const hintTitle = response?.hintTitle ?? null;
   if (
-    item.source === "agent_status" &&
+    (item.source === "agent_status" || item.source === "agent_start") &&
     !truncated &&
     text.trim() &&
     text.length <= SHORT_SUMMARY
@@ -499,6 +517,27 @@ function shortList(names: readonly string[]): string {
     ? `${shown} ${overflowCopy(names.length - SHOWN_RECIPIENTS)}`
     : shown;
 }
+export const imageCopy = {
+  sent: (position: number, total: number) =>
+    total === 1 ? "Image" : `Image ${position} of ${total}`,
+  open: "Open the image in a new tab",
+  gone: "Image no longer stored",
+};
+export const diagramCopy = {
+  label: "Diagram",
+  alt: "Diagram",
+  open: "Open the diagram full size",
+  close: "Close the diagram",
+  showSource: "Show source",
+  hideSource: "Hide source",
+  copy: "Copy",
+  copied: "Copied",
+  failed: "Diagram could not be drawn",
+  refused: {
+    size: "Diagram is too large to draw",
+    count: "Only the first 8 diagrams in a message are drawn",
+  },
+};
 export const bodyCopy = {
   shortened: "Shortened by Namedrop.",
   unavailable: "Couldn't load the rest of this message. Try again.",
@@ -529,6 +568,19 @@ export const composerCopy = {
     `Pick who gets this: ${names.join(" or ")}`,
   needsMessage: (names: readonly string[]) =>
     `Add a message after ${shortList(names)}.`,
+  attachImage: "Attach an image",
+  attachedImages: "Attached images",
+  uploadingImage: "Uploading image…",
+  removeImage: (position: number) => `Remove image ${position}`,
+  attachedImage: (position: number) => `Attached image ${position}`,
+  needsWords: "Add a message to send with the image.",
+  dropImages: "Drop images to attach them",
+  imageRefused: {
+    type: "Only PNG, JPEG, GIF and WebP images can be attached.",
+    size: "That image is over 10 MB.",
+    count: "A message takes up to 4 images.",
+    failed: "Couldn't upload the image. Try again.",
+  },
   postNotSent: "A post wasn't sent",
   replyNotSent: "Reply not sent · Open thread",
 };
@@ -732,6 +784,56 @@ export const sidebarCopy = {
   ) =>
     `Moved ${name} to position ${position} of ${total}${group === null ? "" : ` in ${group}`}`,
 };
+// The refusal sentences match the server's word for word, so a check the page
+// makes first reads the same as the one the server would make.
+export const createCopy = {
+  newChannel: "New channel",
+  noChannelYet: "Activate Namedrop in one Herdr workspace first.",
+  name: "Name",
+  folder: "Folder",
+  folderPlaceholder: "~/projects/app",
+  recentFolders: "Recent folders",
+  create: "Create",
+  creating: "Creating…",
+  cancel: "Cancel",
+  addAgent: "Add agent",
+  kind: "Kind",
+  kinds: { claude: "Claude Code", codex: "Codex", terminal: "Terminal" },
+  agentName: "Name",
+  persona: "Persona",
+  optional: "optional",
+  personaPlaceholder: "Reviews changes before they merge",
+  add: "Add",
+  adding: "Adding…",
+  opensIn: "Opens in",
+  channelNameMissing: "Give the channel a name.",
+  channelNameLong: "A channel name can be up to 64 characters.",
+  channelNameHidden:
+    "A channel name can't contain control or invisible characters.",
+  channelNameUnusable:
+    'A channel name needs a letter or a digit, and it can\'t be "all".',
+  folderNotPath: "Type the folder's full path, starting with / or ~.",
+  agentNameRule:
+    "A name uses lowercase letters, digits and single hyphens, like code-reviewer.",
+  agentNameTaken: (name: string) =>
+    `@${name} is already in use in this channel. Pick a different name.`,
+  personaLong: "A persona can be up to 1,000 characters.",
+  personaInvisible: "A persona can't contain control or invisible characters.",
+  failed: "Namedrop couldn't do that. Try again.",
+};
+const createSays = new Set([400, 404, 409, 500, 503]);
+// The server words each refusal for the person, so the page shows it as is.
+export function createFailureCopy({
+  status,
+  message,
+}: {
+  status: number;
+  message: string;
+}): string {
+  if (status === 401 || status === 403) return sessionExpired();
+  const text = message.trim();
+  return createSays.has(status) && text ? text : createCopy.failed;
+}
 export const peekCopy = {
   label: (alias: string) => `Screen of ${alias}`,
   where: (channel: string) => `in ${channel}`,
@@ -760,6 +862,12 @@ export const peekCopy = {
   liveUnavailable:
     "Live view isn’t available. Try again or choose Text snapshot.",
   liveUnsupported: "Live view isn’t available. Showing a text snapshot.",
+};
+// Type to agent adds ". Try again." after each of these.
+export const peekInputCopy = {
+  busy: (alias: string) =>
+    `Namedrop is typing into ${alias} right now, so nothing was sent`,
+  refused: (status: number) => `Input refused (${status})`,
 };
 export const peekFailureCopy = {
   closed: (who) => ({

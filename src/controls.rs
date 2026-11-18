@@ -46,19 +46,33 @@ struct AcknowledgeDeliveryInput {
     confirmed: bool,
 }
 
-pub fn execute_control_operation<E, C, I>(
+pub fn execute_control_operation<M, C, I>(
     operation: &str,
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
+    C: crate::Clock,
+    I: crate::IdGenerator,
+{
+    execute_control_operation_inner(operation, input, runtime)
+        .map_err(|error| runtime.mux.endpoint().kind.authored_error(error))
+}
+
+fn execute_control_operation_inner<M, C, I>(
+    operation: &str,
+    input: Value,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
+) -> Result<Value, String>
+where
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
     let discovered = match runtime.workspace_id {
-        Some(workspace_id) => discover_worktree_for_workspace(runtime.herdr, workspace_id)?,
-        None => discover_worktree(runtime.herdr, runtime.cwd)?,
+        Some(workspace_id) => discover_worktree_for_workspace(runtime.mux, workspace_id)?,
+        None => discover_worktree(runtime.mux, runtime.cwd)?,
     };
     let namespace = discovered.namespace(runtime.session_socket_id);
     let attribution =
@@ -157,7 +171,10 @@ where
             let invoker = runtime
                 .current_pane_id
                 .and_then(|id| discovered.panes.iter().find(|pane| pane.pane_id == id))
-                .ok_or("allow-remote must run from a Herdr pane in this workspace")?;
+                .ok_or(runtime.mux.endpoint().kind.text(
+                    "allow-remote must run from a Herdr pane in this workspace",
+                    "allow-remote must run from a Rex pane in this Rex session",
+                ))?;
             let record = store
                 .transaction(|transaction| {
                     transaction.allow_remote_commands(
@@ -212,7 +229,7 @@ where
                 runtime.state_directory,
                 &namespace,
                 &stopped.active_responses,
-                runtime.herdr,
+                runtime.mux,
                 runtime.workspace_id.is_none().then_some(runtime.cwd),
             );
             let mut value = serde_json::to_value(stopped).map_err(|error| error.to_string())?;

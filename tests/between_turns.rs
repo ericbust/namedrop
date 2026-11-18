@@ -2,25 +2,34 @@
 //! for a Claude Code session that finished its turn while its background
 //! agents run on. Herdr reads that screen as working; the session's own turn
 //! edges say a prompt typed now starts its next turn.
+#![cfg(feature = "test-support")]
 #[path = "support/cleanup.rs"]
 mod cleanup;
 
 use namedrop::{
     ActorKind, AgentRuntime, AgentSessionId, Clock, DeliveryId, DrainReport, HealthSeverity,
-    HerdrCommandExecutor, HerdrCommandOutput, IdGenerator, LifecycleRuntime, MessageDraft,
-    MessageId, MessageRecipientDraft, MutationAttribution, PaneAddressDraft, PaneAddressId,
-    PaneBindingId, PaneRoleId, PromptFailureKind, StateNamespace, StateStore, ThreadId,
-    complete_capability_profile, diagnose_collaboration, drain_mailboxes,
-    execute_integration_operation, issue_registration_challenge, recheck_drafts,
+    IdGenerator, LifecycleRuntime, MessageDraft, MessageId, MessageRecipientDraft,
+    MutationAttribution, PaneAddressDraft, PaneAddressId, PaneBindingId, PaneRoleId,
+    StateNamespace, StateStore, ThreadId, complete_capability_profile, diagnose_collaboration,
+    drain_mailboxes, execute_integration_operation, issue_registration_challenge,
+    mux::{
+        AgentState, Depth, Effect, InputOutcome, Key, MuxError, Recipient as KeysFor, Style, Wrap,
+        fake::{
+            CHECKOUT_LISTINGS, FakeMux, Listing, Op, ScopeKind, ScreenShape, SentInput,
+            StrictSpace, Takes, runs,
+        },
+    },
+    recheck_drafts,
     turn_phase::{TurnEdge, record, record_restored},
 };
 use serde_json::json;
 use std::{
+    collections::VecDeque,
     fs,
     path::{Path, PathBuf},
     sync::{
-        Mutex,
-        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -43,93 +52,142 @@ const CODEX_DRAFT: &str = include_str!("fixtures/between-turns/codex-0.167.0-idl
 const SESSION: &str = "session-1";
 const QUEUED_AT_MS: u64 = 1_000;
 
+/// @recipient's pane, `pane-recipient` in `workspace-1`, which holds `/repo`.
+/// Herdr lists `workspace-1` with no checkout stamp. The space answers
+/// `workspace list`, `worktree list`, and `pane list --workspace`, and reads
+/// the screen only as `pane read --source recent --format ansi`, with any
+/// line count. It takes `agent prompt` and `agent send-keys` to
+/// `pane-recipient` whatever the agent's status, and any `pane
+/// report-metadata`. The observer keeps what each input carried, as the old
+/// fake did, and redraws the screen after a batch of ctrl+u.
 struct Recipient {
-    host: &'static str,
-    status: Mutex<String>,
-    screen: Mutex<Option<String>>,
-    screen_reads: AtomicU64,
-    pane_lists: AtomicU64,
-    prompts: Mutex<Vec<String>>,
+    space: StrictSpace,
+    prompts: Arc<Mutex<Vec<String>>>,
     /// The keys each `send-keys` call pressed in the pane.
-    keys: Mutex<Vec<Vec<String>>>,
+    keys: Arc<Mutex<Vec<Vec<String>>>>,
     /// Whether the delete key empties the box, as it does in Claude Code
     /// 2.1.322.
-    delete_empties: std::sync::atomic::AtomicBool,
+    delete_empties: Arc<AtomicBool>,
     /// The screens the next batches of the delete key leave, first first.
     /// Once they are used up, `delete_empties` decides.
-    after_delete: Mutex<std::collections::VecDeque<String>>,
+    after_delete: Arc<Mutex<VecDeque<String>>>,
 }
 
-impl HerdrCommandExecutor for Recipient {
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        let stdout = match args {
-            ["workspace", "list"] => {
-                r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#.to_owned()
-            }
-            ["worktree", "list", "--cwd", "/repo", "--json"]
-            | ["worktree", "list", "--json"]
-            | ["worktree", "list", "--workspace", "workspace-1", "--json"] => {
-                r#"{"result":{"worktrees":[{"path":"/repo","open_workspace_id":"workspace-1"}]}}"#
-                    .to_owned()
-            }
-            ["pane", "list", "--workspace", "workspace-1"] => {
-                self.pane_lists.fetch_add(1, Ordering::Relaxed);
-                json!({"result": {"panes": [{
-                "pane_id": "pane-recipient",
-                "terminal_id": "terminal-recipient",
-                "tab_id": "tab-1",
-                "workspace_id": "workspace-1",
-                "agent": self.host,
-                "agent_session": {"value": SESSION},
-                "agent_status": self.status.lock().unwrap().clone(),
-                }]}})
-                .to_string()
-            }
-            [
-                "pane",
-                "read",
-                "pane-recipient",
-                "--source",
-                "recent",
-                "--lines",
-                _,
-                "--format",
-                "ansi",
-            ] => {
-                self.screen_reads.fetch_add(1, Ordering::Relaxed);
-                self.screen
-                    .lock()
-                    .unwrap()
-                    .clone()
-                    .ok_or("the pane could not be read")?
-            }
-            ["agent", "send-keys", "pane-recipient", keys @ ..] => {
-                self.keys
-                    .lock()
-                    .unwrap()
-                    .push(keys.iter().map(|key| (*key).to_owned()).collect());
-                if keys.iter().all(|key| *key == "ctrl+u") {
-                    if let Some(next) = self.after_delete.lock().unwrap().pop_front() {
-                        *self.screen.lock().unwrap() = Some(next);
-                    } else if self.delete_empties.load(Ordering::Relaxed) {
-                        *self.screen.lock().unwrap() = Some(EMPTY_BOX.to_owned());
+/// Herdr's word for a key, as `agent send-keys` takes it.
+fn key_word(key: Key) -> &'static str {
+    match key {
+        Key::Enter => "enter",
+        Key::Escape => "esc",
+        Key::CtrlC => "ctrl+c",
+        Key::CtrlU => "ctrl+u",
+        Key::Up => "up",
+        Key::Down => "down",
+    }
+}
+
+impl Recipient {
+    fn new(endpoint: &str, host: AgentRuntime, status: &str) -> Self {
+        let world = FakeMux::world()
+            .endpoint(endpoint)
+            .space("workspace-1")
+            .checkout("/repo")
+            .unstamped()
+            .pane("pane-recipient")
+            .terminal("terminal-recipient")
+            .tab("tab-1");
+        let world = match host {
+            AgentRuntime::ClaudeCode => world.claude().screen(EMPTY_BOX),
+            AgentRuntime::Codex => world.codex().screen(CODEX_EMPTY),
+        };
+        let mux = world
+            .session(SESSION)
+            .state(AgentState::parse(status))
+            .screen_shape(ScreenShape {
+                wrap: Wrap::AsDrawn,
+                style: Style::Ansi,
+                lines: None,
+            })
+            .build();
+        mux.answer("pane-recipient", InputOutcome::Delivered);
+        let recipient = Self {
+            space: StrictSpace::new(
+                mux,
+                &listings(),
+                Takes::nothing()
+                    .input(|attempt| {
+                        attempt.pane.as_str() == "pane-recipient"
+                            && matches!(
+                                attempt.input,
+                                SentInput::Prompt(_)
+                                    | SentInput::Keys {
+                                        recipient: KeysFor::Agent,
+                                        ..
+                                    }
+                            )
+                    })
+                    .effect(|effect| {
+                        matches!(effect, Effect::Identify { .. } | Effect::Badges { .. })
+                    }),
+            ),
+            prompts: Arc::default(),
+            keys: Arc::default(),
+            delete_empties: Arc::new(AtomicBool::new(true)),
+            after_delete: Arc::default(),
+        };
+        let (prompts, keys, delete_empties, after_delete) = (
+            Arc::clone(&recipient.prompts),
+            Arc::clone(&recipient.keys),
+            Arc::clone(&recipient.delete_empties),
+            Arc::clone(&recipient.after_delete),
+        );
+        recipient
+            .space
+            .on_input(move |mux, attempt| match &attempt.input {
+                SentInput::Prompt(prompt) => prompts.lock().unwrap().push(prompt.clone()),
+                SentInput::Keys { keys: pressed, .. } => {
+                    keys.lock().unwrap().push(
+                        pressed
+                            .iter()
+                            .map(|key| key_word(*key).to_owned())
+                            .collect(),
+                    );
+                    if attempt.outcome == InputOutcome::Delivered
+                        && pressed.iter().all(|key| *key == Key::CtrlU)
+                    {
+                        if let Some(next) = after_delete.lock().unwrap().pop_front() {
+                            mux.set_screen("pane-recipient", Some(&next));
+                        } else if delete_empties.load(Ordering::Relaxed) {
+                            mux.set_screen("pane-recipient", Some(EMPTY_BOX));
+                        }
                     }
                 }
-                "{}".to_owned()
-            }
-            ["agent", "prompt", "pane-recipient", prompt] => {
-                self.prompts.lock().unwrap().push((*prompt).to_owned());
-                "{}".to_owned()
-            }
-            ["pane", "report-metadata", ..] => "{}".to_owned(),
-            _ => return Err(format!("unexpected Herdr command: {args:?}")),
-        };
-        Ok(HerdrCommandOutput { stdout })
+                SentInput::Line(_) => {}
+            });
+        recipient
     }
 
-    fn classify_prompt_failure(&self, _: &str) -> PromptFailureKind {
-        PromptFailureKind::AmbiguousInvocation
+    /// How many times the code read the pane's screen.
+    fn screen_reads(&self) -> usize {
+        self.space.screen_reads("pane-recipient")
     }
+
+    /// How many `pane list --workspace` the code ran.
+    fn pane_lists(&self) -> usize {
+        self.space
+            .reads()
+            .iter()
+            .filter(|read| runs(read, Listing::PanesOf))
+            .count()
+    }
+}
+
+/// `workspace list`, `worktree list --cwd /repo`, `worktree list
+/// --workspace workspace-1`, and `pane list --workspace workspace-1`: every
+/// listing but `pane list` and `workspace get`.
+fn listings() -> Vec<(ScopeKind, Depth)> {
+    let mut listings = CHECKOUT_LISTINGS.to_vec();
+    listings.push((ScopeKind::Space, Depth::Panes));
+    listings
 }
 
 #[derive(Default)]
@@ -152,6 +210,8 @@ impl IdGenerator for SequenceIds {
 }
 
 struct Fixture {
+    /// The runtime's `session_socket_id`: Herdr's socket, or a `rex:` endpoint.
+    endpoint: &'static str,
     root: PathBuf,
     home: PathBuf,
     herdr: Recipient,
@@ -179,6 +239,11 @@ impl Fixture {
     /// @recipient, a `host` agent Herdr reads as `status`, with one message
     /// from the person queued for it.
     fn new(host: AgentRuntime, status: &str) -> Self {
+        Self::on("socket-a", host, status)
+    }
+
+    /// `new` on the multiplexer `endpoint` names.
+    fn on(endpoint: &'static str, host: AgentRuntime, status: &str) -> Self {
         let root = std::env::temp_dir().join(format!(
             "namedrop-between-turns-{}-{}",
             std::process::id(),
@@ -186,32 +251,14 @@ impl Fixture {
         ));
         fs::create_dir_all(root.join("home")).unwrap();
         let fixture = Self {
-            herdr: Recipient {
-                host: match host {
-                    AgentRuntime::ClaudeCode => "claude",
-                    AgentRuntime::Codex => "codex",
-                },
-                status: Mutex::new(status.to_owned()),
-                screen: Mutex::new(Some(
-                    match host {
-                        AgentRuntime::ClaudeCode => EMPTY_BOX,
-                        AgentRuntime::Codex => CODEX_EMPTY,
-                    }
-                    .to_owned(),
-                )),
-                screen_reads: AtomicU64::new(0),
-                pane_lists: AtomicU64::new(0),
-                prompts: Mutex::new(Vec::new()),
-                keys: Mutex::new(Vec::new()),
-                delete_empties: std::sync::atomic::AtomicBool::new(true),
-                after_delete: Mutex::new(std::collections::VecDeque::new()),
-            },
+            endpoint,
+            herdr: Recipient::new(endpoint, host, status),
             clock: TestClock::default(),
             ids: SequenceIds(AtomicU64::new(1)),
             home: root.join("home"),
             root,
         };
-        let namespace = StateNamespace::for_space("socket-a", "workspace-1");
+        let namespace = StateNamespace::for_space(endpoint, "workspace-1");
         let attribution = MutationAttribution::new(ActorKind::Plugin, "test", 10);
         let author = address("address-author", "author");
         let recipient = address("address-recipient", "recipient");
@@ -288,7 +335,7 @@ impl Fixture {
         &self.root
     }
 
-    fn runtime(&self) -> LifecycleRuntime<'_, Recipient, TestClock, SequenceIds> {
+    fn runtime(&self) -> LifecycleRuntime<'_, FakeMux, TestClock, SequenceIds> {
         LifecycleRuntime {
             state_directory: self.state(),
             home_directory: Some(&self.home),
@@ -296,19 +343,19 @@ impl Fixture {
             cwd: Path::new("/repo"),
             workspace_id: None,
             current_pane_id: Some("pane-recipient"),
-            session_socket_id: "socket-a",
-            herdr: &self.herdr,
+            session_socket_id: self.endpoint,
+            mux: &self.herdr.space,
             clock: &self.clock,
             ids: &self.ids,
         }
     }
 
     fn edge(&self, edge: TurnEdge, at_ms: u64) {
-        record(self.state(), "socket-a", SESSION, edge, at_ms);
+        record(self.state(), self.endpoint, SESSION, edge, at_ms);
     }
 
     fn screen(&self, screen: Option<&str>) {
-        *self.herdr.screen.lock().unwrap() = screen.map(str::to_owned);
+        self.herdr.space.set_screen("pane-recipient", screen);
     }
 
     /// The bodies one drain typed into the pane.
@@ -341,7 +388,9 @@ impl Fixture {
     }
 
     fn set_status(&self, status: &str) {
-        *self.herdr.status.lock().unwrap() = status.to_owned();
+        self.herdr
+            .space
+            .set_state("pane-recipient", AgentState::parse(status));
     }
 
     fn long_wait(&self) -> Option<namedrop::HealthIssue> {
@@ -373,7 +422,7 @@ fn a_turn_still_running_gets_nothing_until_it_ends() {
     // A session whose hooks never recorded an edge is read as Herdr reads it.
     let unrecorded = Fixture::new(AgentRuntime::ClaudeCode, "working");
     assert_eq!(unrecorded.drain(), Vec::<String>::new());
-    assert_eq!(unrecorded.herdr.screen_reads.load(Ordering::Relaxed), 0);
+    assert_eq!(unrecorded.herdr.screen_reads(), 0);
     // The same turn's Stop takes the mail.
     fixture.edge(TurnEdge::Stop, 4_000);
     assert_eq!(fixture.drain().len(), 1);
@@ -405,8 +454,8 @@ fn codex_mail_still_waits_for_herdr_to_read_the_session_idle() {
     let fixture = Fixture::new(AgentRuntime::Codex, "working");
     fixture.edge(TurnEdge::Stop, 2_000);
     assert_eq!(fixture.drain(), Vec::<String>::new());
-    assert_eq!(fixture.herdr.screen_reads.load(Ordering::Relaxed), 0);
-    *fixture.herdr.status.lock().unwrap() = "idle".to_owned();
+    assert_eq!(fixture.herdr.screen_reads(), 0);
+    fixture.set_status("idle");
     assert_eq!(fixture.drain().len(), 1);
 }
 
@@ -550,19 +599,13 @@ fn draft_held_mail_goes_in_once_the_box_empties_with_no_stop_or_status_event() {
 
         // While the draft stays, a recheck reads the box and nothing else.
         for _ in 0..3 {
-            let (reads, lists) = (
-                fixture.herdr.screen_reads.load(Ordering::Relaxed),
-                fixture.herdr.pane_lists.load(Ordering::Relaxed),
-            );
+            let (reads, lists) = (fixture.herdr.screen_reads(), fixture.herdr.pane_lists());
             let typed;
             (held, typed) = fixture.recheck(&held);
             assert_eq!(typed, Vec::<String>::new(), "{status}");
             assert_eq!(held.draft_held.len(), 1, "{status}: {held:?}");
-            assert_eq!(
-                fixture.herdr.screen_reads.load(Ordering::Relaxed),
-                reads + 1
-            );
-            assert_eq!(fixture.herdr.pane_lists.load(Ordering::Relaxed), lists);
+            assert_eq!(fixture.herdr.screen_reads(), reads + 1);
+            assert_eq!(fixture.herdr.pane_lists(), lists);
         }
 
         // The person clears the draft; Herdr's status does not change.
@@ -583,7 +626,7 @@ impl Fixture {
     fn sent_mention(&self, at_ms: u64, prompt: &str) {
         self.edge(TurnEdge::Prompt, at_ms);
         self.edge(TurnEdge::Blocked, at_ms);
-        record_restored(self.state(), "socket-a", SESSION, at_ms, prompt);
+        record_restored(self.state(), self.endpoint, SESSION, at_ms, prompt);
     }
 
     /// The keys each call pressed in the pane since the last call.
@@ -863,11 +906,11 @@ fn the_recheck_stops_once_no_draft_holds_mail() {
             )
         })
         .unwrap();
-    let reads = cancelled.herdr.screen_reads.load(Ordering::Relaxed);
+    let reads = cancelled.herdr.screen_reads();
     let (report, typed) = cancelled.recheck(&held);
     assert_eq!(typed, Vec::<String>::new());
     assert!(report.draft_held.is_empty(), "{report:?}");
-    assert_eq!(cancelled.herdr.screen_reads.load(Ordering::Relaxed), reads);
+    assert_eq!(cancelled.herdr.screen_reads(), reads);
 
     // Delivered mail leaves nothing to recheck.
     let delivered = Fixture::new(AgentRuntime::ClaudeCode, "idle");
@@ -880,4 +923,69 @@ fn the_recheck_stops_once_no_draft_holds_mail() {
     delivered.set_status("working");
     let (report, _) = delivered.drain_report();
     assert!(report.draft_held.is_empty(), "{report:?}");
+}
+
+const REX: &str = "rex:/tmp/nd-test-rex.sock";
+
+/// On Rex, a screen fault is no proof that the box is empty: the read
+/// failed, or the screen held an escape sequence the box reader would
+/// misread. So mail to an idle agent waits, Doctor names the fault, and the
+/// draft recheck reads the screen again until a read works.
+#[test]
+fn a_rex_screen_fault_holds_mail_to_an_idle_agent_until_a_read_works() {
+    let refused = "Rex's screen holds an escape sequence Namedrop does not read: \"\\u{1b}[2J\"";
+    for fault in [None, Some(refused)] {
+        let fixture = Fixture::on(REX, AgentRuntime::ClaudeCode, "idle");
+        let fail = || match fault {
+            None => fixture.screen(None),
+            Some(why) => fixture
+                .herdr
+                .space
+                .fail(Op::Screen, MuxError::Unavailable(why.into())),
+        };
+        fail();
+        let (held, typed) = fixture.drain_report();
+        assert_eq!(typed, Vec::<String>::new(), "{fault:?}");
+        assert_eq!(held.draft_held.len(), 1, "{fault:?}: {held:?}");
+
+        fail();
+        let waiting = fixture.long_wait().expect("Doctor lists the pane");
+        assert_eq!(waiting.diagnostic["held_by"], "screen_unread", "{fault:?}");
+        assert_eq!(waiting.diagnostic["pane_id"], "pane-recipient");
+        if let Some(why) = fault {
+            assert_eq!(waiting.diagnostic["screen_fault"], why);
+            assert!(waiting.explanation.contains(why), "{}", waiting.explanation);
+        }
+
+        fail();
+        let (still, typed) = fixture.recheck(&held);
+        assert_eq!(typed, Vec::<String>::new(), "{fault:?}");
+        assert_eq!(still.draft_held.len(), 1, "{fault:?}: {still:?}");
+
+        fixture.screen(Some(EMPTY_BOX));
+        let (delivered, typed) = fixture.recheck(&still);
+        assert_eq!(typed.len(), 1, "{fault:?}: {typed:?}");
+        assert!(delivered.draft_held.is_empty(), "{fault:?}: {delivered:?}");
+        assert!(
+            typed[0].contains(" --endpoint 'rex:/tmp/nd-test-rex.sock' --space ")
+                && !typed[0].contains("--herdr-"),
+            "the pointer's line names the Rex endpoint with the neutral flags: {typed:?}"
+        );
+    }
+}
+
+/// Herdr's idle stays the proof a prompt may go in, as before Namedrop read
+/// the box, so a failed read on a Herdr endpoint still delivers, and Doctor's
+/// diagnostic for Herdr holds no screen fault.
+#[test]
+fn a_herdr_screen_read_that_fails_still_delivers_to_an_idle_agent() {
+    let fixture = Fixture::new(AgentRuntime::ClaudeCode, "idle");
+    fixture.screen(None);
+    let (report, typed) = fixture.drain_report();
+    assert_eq!(typed.len(), 1, "{typed:?}");
+    assert!(report.draft_held.is_empty(), "{report:?}");
+    assert!(
+        typed[0].contains(" --herdr-socket 'socket-a' --herdr-workspace "),
+        "{typed:?}"
+    );
 }

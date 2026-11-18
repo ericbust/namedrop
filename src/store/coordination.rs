@@ -1,4 +1,5 @@
 use super::*;
+use crate::mux::AgentState;
 use crate::{
     AssignmentId, CoordinationId, CoordinationLink, CoordinationOutcome, ReconciledAssignment,
 };
@@ -597,7 +598,7 @@ impl StateTransaction<'_> {
                     let owner_live = owner_binding.as_ref().is_some_and(|b| {
                         discovered.panes.iter().any(|p| {
                             p.pane_id == b.pane_id
-                                && p.agent_session_id.as_ref().map(|s| s.as_str())
+                                && p.agent_session_id().map(|s| s.as_str())
                                     == Some(owner_session.as_str())
                         })
                     });
@@ -644,8 +645,7 @@ impl StateTransaction<'_> {
             if !binding.as_ref().is_some_and(|b| {
                 discovered.panes.iter().any(|p| {
                     p.pane_id == b.pane_id
-                        && p.agent_session_id.as_ref().map(|s| s.as_str())
-                            == Some(owner_session.as_str())
+                        && p.agent_session_id().map(|s| s.as_str()) == Some(owner_session.as_str())
                 })
             }) {
                 self.coordination_attention(ns,&id,"The original lead Agent Session is absent from its live pane. Review the saved coordination; a replacement session cannot mutate it.",by)?;
@@ -654,8 +654,13 @@ impl StateTransaction<'_> {
             let live_status = binding
                 .as_ref()
                 .and_then(|b| discovered.panes.iter().find(|p| p.pane_id == b.pane_id))
-                .and_then(|p| p.agent_status.as_deref());
-            if matches!(live_status, None | Some("unknown" | "blocked")) {
+                .and_then(|p| p.agent_status.as_ref());
+            let lead_unsettled = match live_status {
+                None | Some(AgentState::Blocked) => true,
+                Some(AgentState::Unknown(status)) => status == "unknown",
+                Some(_) => false,
+            };
+            if lead_unsettled {
                 self.coordination_attention(ns,&id,"The original lead is blocked or its live status is unknown. Wait for a settled idle observation or review the saved coordination.",by)?;
                 continue;
             }
@@ -682,7 +687,7 @@ impl StateTransaction<'_> {
                 continue;
             }
             let has_assignments=self.transaction.query_row("SELECT EXISTS(SELECT 1 FROM coordination_assignments WHERE session_socket_id=?1 AND worktree_id=?2 AND coordination_id=?3)",params![ns.session_socket_id,ns.space_id.as_str(),id.as_str()],|r|r.get::<_,bool>(0))?;
-            if !has_assignments && matches!(live_status, Some("idle" | "done")) {
+            if !has_assignments && live_status.is_some_and(AgentState::accepts_prompt) {
                 self.coordination_attention(ns,&id,"The lead is idle with an open coordination and no assignment or saved report. Review the deliverable, assign work, or resolve an explicit blocker.",by)?;
                 continue;
             }
@@ -809,8 +814,8 @@ impl StateTransaction<'_> {
         };
         if !discovered.panes.iter().any(|p| {
             p.pane_id == binding.pane_id
-                && p.agent_session_id.as_ref().map(|s| s.as_str()) == Some(session.as_str())
-                && matches!(p.agent_status.as_deref(), Some("idle" | "done"))
+                && p.agent_session_id().map(|s| s.as_str()) == Some(session.as_str())
+                && p.accepts_prompt()
         }) {
             return Ok(NotNow);
         }
@@ -867,8 +872,8 @@ impl StateTransaction<'_> {
                 .as_ref()
                 .and_then(|b| discovered.panes.iter().find(|p| p.pane_id == b.pane_id));
             let worker_working = pane.is_some_and(|p| {
-                p.agent_session_id.as_ref().map(|s| s.as_str()) == Some(session.as_str())
-                    && p.agent_status.as_deref() == Some("working")
+                p.agent_session_id().map(|s| s.as_str()) == Some(session.as_str())
+                    && p.agent_status == Some(AgentState::Working)
             });
             if matches!(
                 outcome.as_str(),
@@ -889,8 +894,8 @@ impl StateTransaction<'_> {
             }
             if delivery == DeliveryState::Queued
                 && pane.is_some_and(|p| {
-                    p.agent_session_id.as_ref().map(|s| s.as_str()) == Some(session.as_str())
-                        && matches!(p.agent_status.as_deref(), Some("working" | "idle" | "done"))
+                    p.agent_session_id().map(|s| s.as_str()) == Some(session.as_str())
+                        && (p.agent_status == Some(AgentState::Working) || p.accepts_prompt())
                 })
             {
                 let (retired,disabled):(bool,bool)=self.transaction.query_row("SELECT retired,collaboration_disabled FROM pane_addresses WHERE session_socket_id=?1 AND worktree_id=?2 AND address_id=?3",params![seat_ns.session_socket_id,seat_ns.space_id.as_str(),address],|r|Ok((r.get(0)?,r.get(1)?)))?;

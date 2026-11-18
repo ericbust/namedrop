@@ -1,7 +1,48 @@
+use namedrop::mux::MuxKind;
 use std::{
-    io::{self, IsTerminal},
+    io::{self, IsTerminal, Read, Write},
     process::{Command, Stdio},
+    sync::OnceLock,
 };
+
+/// The host this process draws its one screen for, whose words the screen
+/// uses: a Herdr popup or a Rex layer. Decided once, by the first caller.
+static HOST: OnceLock<MuxKind> = OnceLock::new();
+
+pub(crate) fn host_for(
+    options: &namedrop::cli::RuntimeOptions,
+    inherited: &dyn namedrop::mux::home::Inherited,
+) -> MuxKind {
+    set_host(
+        namedrop::mux::home::resolve(&options.flags(), inherited)
+            .map_or(MuxKind::Herdr, |home| home.kind()),
+    )
+}
+
+/// Records `kind` as the screen's host unless one was recorded already, and
+/// returns the one recorded.
+pub(crate) fn set_host(kind: MuxKind) -> MuxKind {
+    *HOST.get_or_init(|| kind)
+}
+
+/// [`host_for`]'s answer, or Herdr before any screen asked.
+pub(crate) fn host() -> MuxKind {
+    HOST.get().copied().unwrap_or(MuxKind::Herdr)
+}
+
+pub(crate) fn is_rex(
+    options: &namedrop::cli::RuntimeOptions,
+    inherited: &dyn namedrop::mux::home::Inherited,
+) -> bool {
+    host_for(options, inherited) == MuxKind::Rex
+}
+
+pub(crate) fn wait_for_key() -> Result<(), String> {
+    eprint!("\nPress any key to close: ");
+    io::stderr().flush().map_err(|e| e.to_string())?;
+    let _mode = InputMode::enter()?;
+    io::stdin().read_exact(&mut [0]).map_err(|e| e.to_string())
+}
 
 /// Restore the popup's terminal settings on every normal or error return.
 pub(crate) struct InputMode(Option<String>);
@@ -35,7 +76,12 @@ impl InputMode {
             .map_err(|error| error.to_string())?
             .success()
         {
-            return Err("Could not enable interactive popup input".to_owned());
+            return Err(host()
+                .text(
+                    "Could not enable interactive popup input",
+                    "Could not enable interactive screen input",
+                )
+                .to_owned());
         }
         Ok(guard)
     }

@@ -48,7 +48,7 @@ npm run bundle:check
 
 Commit the generated files in `src/dashboard/channels` and
 `src/dashboard/channels_bundle.rs` with your frontend change. The optional **Channels experiment (optional)** workflow checks that the
-bundle is current. See the [Channels app guide](experimental/channels/README.md)
+bundle is current. See the [Channels app guide](https://github.com/ericbust/namedrop/blob/main/experimental/channels/README.md)
 for browser tests, custom UI serving, and the isolated testbed procedure.
 Changes to documentation alone do not require rebuilding the embedded app.
 

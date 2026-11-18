@@ -1,5 +1,10 @@
 //! A delivery settled from the agent's final message: the prompt hook arms a
 //! claim and says so, and the Stop runs the bound operation the CLI runs.
+#![cfg(feature = "test-support")]
+
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/delivered.rs"]
@@ -10,13 +15,20 @@ mod dispatch;
 mod executable;
 
 use namedrop::{
-    ActorKind, AgentRuntime, AgentSessionId, Clock, HerdrCommandExecutor, HerdrCommandOutput,
-    IdGenerator, LifecycleRuntime, MutationAttribution, PaneAddressDraft, PaneAddressId,
-    PaneBindingId, PaneRoleId, StateNamespace, StateStore, complete_capability_profile,
-    execute_integration_operation, execute_lifecycle_operation, execute_message_operation,
-    execute_session_start_hook, execute_user_prompt_submit_hook, expand_attempt_reply,
+    ActorKind, AgentRuntime, AgentSessionId, Clock, IdGenerator, LifecycleRuntime,
+    MutationAttribution, PaneAddressDraft, PaneAddressId, PaneBindingId, PaneRoleId,
+    StateNamespace, StateStore, complete_capability_profile, execute_integration_operation,
+    execute_lifecycle_operation, execute_message_operation, execute_session_start_hook,
+    execute_user_prompt_submit_hook, expand_attempt_reply,
     final_reply::{BoundOperation, FinalText, HostTurn, StopFacts, mark_stopped, settle_at_stop},
-    issue_registration_challenge, send_operator_message,
+    issue_registration_challenge,
+    mux::{
+        AgentKind, AgentState, Depth, Effect, InputOutcome, MuxError,
+        fake::{
+            CHECKOUT_LISTINGS, FakeMux, Read, ScopeKind, SentInput, StrictSpace, Surveyed, Takes,
+        },
+    },
+    send_operator_message,
 };
 use serde_json::{Value, json};
 use std::{
@@ -25,7 +37,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
@@ -46,6 +58,11 @@ impl TestDirectory {
             std::process::id(),
             NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
         ));
+        fs::create_dir_all(&root).unwrap();
+        // The script Herdr reports the repository by this path, and a binary
+        // run there reads its directory as the system spells it: under
+        // `/private` on macOS, where the temporary directory is a symlink.
+        let root = fs::canonicalize(root).unwrap();
         let (repo, state, home) = (root.join("repo"), root.join("state"), root.join("home"));
         for path in [&repo, &state, &home] {
             fs::create_dir_all(path).unwrap();
@@ -65,18 +82,142 @@ impl Drop for TestDirectory {
     }
 }
 
-struct FakeHerdr {
-    worktree: String,
-    reviewer_host: Mutex<&'static str>,
+/// `workspace-1`, which holds the test's repository, with the lead's Codex
+/// pane and the reviewer's pane, and `workspace-2`, which `workspace list`
+/// leaves out and which holds `{repo}-2`. The reviewer's session shows up
+/// there as `pane-elsewhere` while the reviewer's pane is moved. The space
+/// answers `workspace list` (no checkout stamp), `worktree list --cwd` for
+/// the repository only, `worktree list --workspace`, and `pane list
+/// --workspace`. It takes `agent prompt` to any pane, any `pane
+/// report-metadata`, and any `notification show`.
+///
+/// The switches are the old executor's, and a read hook applies them to
+/// the world before every read.
+struct FinalSpace {
+    space: StrictSpace,
+    reviewer_host: Arc<Mutex<&'static str>>,
     /// Herdr no longer lists the reviewer's pane, as after it was closed.
-    reviewer_gone: AtomicBool,
+    reviewer_gone: Arc<AtomicBool>,
     /// Herdr lists the reviewer's session in `pane-elsewhere` of workspace-2.
-    reviewer_elsewhere: AtomicBool,
-    prompts: Mutex<Vec<(String, String)>>,
-    notifications: Mutex<Vec<String>>,
+    reviewer_elsewhere: Arc<AtomicBool>,
+    prompts: Arc<Mutex<Vec<(String, String)>>>,
+    notifications: Arc<Mutex<Vec<String>>>,
 }
 
-impl FakeHerdr {
+/// The agent kind Herdr's word names.
+fn agent_kind(word: &str) -> AgentKind {
+    match word {
+        "claude" => AgentKind::Known(AgentRuntime::ClaudeCode),
+        "codex" => AgentKind::Known(AgentRuntime::Codex),
+        other => AgentKind::Other(other.to_owned()),
+    }
+}
+
+impl FinalSpace {
+    fn new(worktree: &Path) -> Self {
+        let mux = FakeMux::world()
+            .endpoint("socket-a")
+            .space("workspace-1")
+            .checkout(worktree)
+            .unstamped()
+            .pane("pane-lead")
+            .terminal("t1")
+            .tab("tab-1")
+            .codex()
+            .session("session-lead")
+            .idle()
+            .pane("pane-reviewer")
+            .terminal("t2")
+            .tab("tab-2")
+            .claude()
+            .session("session-reviewer")
+            .idle()
+            .space("workspace-2")
+            .checkout(format!("{}-2", worktree.display()))
+            .unlisted()
+            .pane("pane-elsewhere")
+            .terminal("t2")
+            .tab("tab-9")
+            .claude()
+            .session("session-reviewer")
+            .working()
+            .hidden()
+            .build();
+        for pane in ["pane-lead", "pane-reviewer", "pane-elsewhere"] {
+            mux.answer(pane, InputOutcome::Delivered);
+        }
+        let reviewer_host = Arc::new(Mutex::new("claude"));
+        let reviewer_gone = Arc::new(AtomicBool::new(false));
+        let reviewer_elsewhere = Arc::new(AtomicBool::new(false));
+        let (host, gone, elsewhere) = (
+            Arc::clone(&reviewer_host),
+            Arc::clone(&reviewer_gone),
+            Arc::clone(&reviewer_elsewhere),
+        );
+        let repository = worktree.to_path_buf();
+        mux.on_read(move |mux, read| {
+            if let Read::Survey {
+                scope: Surveyed::CheckoutOf(path),
+                ..
+            } = read
+                && *path != repository
+            {
+                return Err(MuxError::Unavailable(format!(
+                    "unexpected Herdr command: worktree list --cwd {}",
+                    path.display()
+                )));
+            }
+            mux.set_agent("pane-reviewer", Some(agent_kind(*host.lock().unwrap())));
+            if gone.load(Ordering::Relaxed) {
+                mux.hide_pane("pane-reviewer");
+            } else {
+                mux.show_pane("pane-reviewer");
+            }
+            if elsewhere.load(Ordering::Relaxed) {
+                mux.show_pane("pane-elsewhere");
+            } else {
+                mux.hide_pane("pane-elsewhere");
+            }
+            Ok(())
+        });
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let typed = Arc::clone(&prompts);
+        mux.on_input(move |_, attempt| {
+            if let SentInput::Prompt(envelope) = &attempt.input {
+                typed
+                    .lock()
+                    .unwrap()
+                    .push((attempt.pane.as_str().to_owned(), envelope.clone()));
+            }
+        });
+        let notifications = Arc::new(Mutex::new(Vec::new()));
+        let shown = Arc::clone(&notifications);
+        mux.on_apply(move |_, effect| {
+            if let Effect::Notify { body, .. } = effect {
+                shown.lock().unwrap().push(body.clone());
+            }
+            Ok(())
+        });
+        let takes = Takes::nothing()
+            .input(|attempt| matches!(attempt.input, SentInput::Prompt(_)))
+            .effect(|effect| {
+                matches!(
+                    effect,
+                    Effect::Identify { .. } | Effect::Badges { .. } | Effect::Notify { .. }
+                )
+            });
+        let mut listings = CHECKOUT_LISTINGS.to_vec();
+        listings.push((ScopeKind::Space, Depth::Panes));
+        Self {
+            space: StrictSpace::new(mux, &listings, takes),
+            reviewer_host,
+            reviewer_gone,
+            reviewer_elsewhere,
+            prompts,
+            notifications,
+        }
+    }
+
     fn envelope_for(&self, pane_id: &str) -> Value {
         let prompts = self.prompts.lock().unwrap();
         let (_, envelope) = prompts
@@ -90,66 +231,6 @@ impl FakeHerdr {
     fn prompt_count(&self, pane_id: &str) -> usize {
         let prompts = self.prompts.lock().unwrap();
         prompts.iter().filter(|(pane, _)| pane == pane_id).count()
-    }
-}
-
-impl HerdrCommandExecutor for FakeHerdr {
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        let stdout = match args {
-            ["workspace", "list"] => {
-                json!({"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}).to_string()
-            }
-            ["worktree", "list", "--cwd", cwd, "--json"] if *cwd == self.worktree => json!({
-                "result": {"worktrees": [{"path": self.worktree, "open_workspace_id": "workspace-1"}]}
-            })
-            .to_string(),
-            ["worktree", "list", "--workspace", "workspace-1", "--json"] => json!({
-                "result": {"worktrees": [{"path": self.worktree, "open_workspace_id": "workspace-1"}]}
-            })
-            .to_string(),
-            ["pane", "list", "--workspace", "workspace-1"] => {
-                let mut panes = vec![json!(
-                    {"pane_id":"pane-lead","terminal_id":"t1","tab_id":"tab-1","workspace_id":"workspace-1",
-                     "agent":"codex","agent_session":{"value":"session-lead"},"agent_status":"idle"}
-                )];
-                if !self.reviewer_gone.load(Ordering::Relaxed) {
-                    panes.push(json!(
-                        {"pane_id":"pane-reviewer","terminal_id":"t2","tab_id":"tab-2","workspace_id":"workspace-1",
-                         "agent":*self.reviewer_host.lock().unwrap(),"agent_session":{"value":"session-reviewer"},"agent_status":"idle"}
-                    ));
-                }
-                json!({"result": {"panes": panes}}).to_string()
-            }
-            ["worktree", "list", "--workspace", "workspace-2", "--json"] => json!({
-                "result": {"worktrees": [{"path": format!("{}-2", self.worktree), "open_workspace_id": "workspace-2"}]}
-            })
-            .to_string(),
-            ["pane", "list", "--workspace", "workspace-2"] => {
-                let panes = if self.reviewer_elsewhere.load(Ordering::Relaxed) {
-                    vec![json!(
-                        {"pane_id":"pane-elsewhere","terminal_id":"t2","tab_id":"tab-9","workspace_id":"workspace-2",
-                         "agent":"claude","agent_session":{"value":"session-reviewer"},"agent_status":"working"}
-                    )]
-                } else {
-                    Vec::new()
-                };
-                json!({"result": {"panes": panes}}).to_string()
-            }
-            ["agent", "prompt", pane_id, envelope] => {
-                self.prompts
-                    .lock()
-                    .unwrap()
-                    .push(((*pane_id).to_owned(), (*envelope).to_owned()));
-                "{}".to_owned()
-            }
-            ["pane", "report-metadata", ..] => "{}".to_owned(),
-            ["notification", "show", _, "--body", body, ..] => {
-                self.notifications.lock().unwrap().push((*body).to_owned());
-                "{}".to_owned()
-            }
-            _ => return Err(format!("unexpected Herdr command: {args:?}")),
-        };
-        Ok(HerdrCommandOutput { stdout })
     }
 }
 
@@ -174,7 +255,7 @@ fn namespace() -> StateNamespace {
 
 struct Space {
     directory: TestDirectory,
-    herdr: FakeHerdr,
+    herdr: FinalSpace,
     ids: SequenceIds,
 }
 
@@ -221,14 +302,7 @@ impl Space {
             .unwrap()
             .transaction(|transaction| transaction.complete_reconciliation(&namespace()))
             .unwrap();
-        let herdr = FakeHerdr {
-            reviewer_host: Mutex::new("claude"),
-            reviewer_gone: AtomicBool::new(false),
-            reviewer_elsewhere: AtomicBool::new(false),
-            worktree: directory.repo.display().to_string(),
-            prompts: Mutex::new(Vec::new()),
-            notifications: Mutex::new(Vec::new()),
-        };
+        let herdr = FinalSpace::new(&directory.repo);
         let space = Self {
             directory,
             herdr,
@@ -261,7 +335,7 @@ impl Space {
     fn runtime<'a>(
         &'a self,
         pane: &'a str,
-    ) -> LifecycleRuntime<'a, FakeHerdr, FixedClock, SequenceIds> {
+    ) -> LifecycleRuntime<'a, FakeMux, FixedClock, SequenceIds> {
         LifecycleRuntime {
             state_directory: &self.directory.state,
             home_directory: Some(&self.directory.home),
@@ -270,7 +344,7 @@ impl Space {
             workspace_id: None,
             current_pane_id: Some(pane),
             session_socket_id: "socket-a",
-            herdr: &self.herdr,
+            mux: &self.herdr.space,
             clock: &FixedClock,
             ids: &self.ids,
         }
@@ -472,7 +546,7 @@ fn an_ask_and_its_answer_settle_from_final_messages_with_no_settle_command() {
     );
     assert!(
         context.contains(
-            "Namedrop commands: your final message is your reply to @lead. Namedrop sends it when your turn ends, so run no settle command and write no status line. If your turn ends while you wait on a helper, Namedrop sends nothing and you reply later. If it ends while background work you started this turn runs, Namedrop holds your final message, and your final message in the turn that work's notice starts is the reply. If the notice arrives during another turn, or another delivery reaches the turn it starts, answer with the line Namedrop shows. For no reply, run this line first."
+            "Namedrop commands: your final message is your reply to @lead. Namedrop sends it when your turn ends, so run no settle command and write no status line. If your turn ends while you wait on a helper, Namedrop sends nothing, and your final message in the turn that the helper's answer starts is the reply. If it ends while background work you started this turn runs, Namedrop holds your final message, and your final message in the turn that work's notice starts is the reply. Whenever a later turn shows a line to answer this delivery, answer with that line. For no reply, run this line first."
         ),
         "{context}"
     );
@@ -866,8 +940,11 @@ panes = {{'result': {{'panes': [
     {{'pane_id':'pane-lead','terminal_id':'t1','tab_id':'tab-1','workspace_id':'workspace-1','agent':'codex','agent_session':{{'value':'session-lead'}},'agent_status':'idle'}},
     {{'pane_id':'pane-reviewer','terminal_id':'t2','tab_id':'tab-2','workspace_id':'workspace-1','agent':'claude','agent_session':{{'value':'session-reviewer'}},'agent_status':reviewer.read_text() if reviewer.exists() else 'idle'}}]}}}}
 if args[:2] == ['workspace','list']: print(json.dumps({{'result':{{'workspaces':[{{'workspace_id':'workspace-1'}}]}}}}))
+elif args[:2] == ['worktree','list'] and '--cwd' in args and (here / 'no-checkout').exists(): print(json.dumps({{'result':{{'worktrees':[]}}}}))
 elif args[:2] == ['worktree','list']: print(json.dumps({{'result':{{'worktrees':[{{'path':{repo:?},'open_workspace_id':'workspace-1'}}]}}}}))
 elif args[:2] == ['pane','list']: print(json.dumps(panes))
+elif args[:2] == ['status','server'] and (here / 'default-socket').exists(): print('socket: ' + (here / 'default-socket').read_text())
+elif args[:3] == ['pane','process-info','--pane'] and (here / 'default-socket').exists(): print(json.dumps({{'result':{{'process_info':{{'shell_pid':999999,'foreground_process_group_id':999999,'foreground_processes':[]}}}}}}))
 elif args[:3] == ['pane','read','pane-reviewer'] and (here / 'reviewer-screen').exists(): print((here / 'reviewer-screen').read_text(), end='')
 elif args[:2] == ['agent','send-keys']:
     with (here / 'herdr-keys').open('a') as log: log.write(json.dumps(args[2:]) + '\n')
@@ -887,13 +964,13 @@ else:
 
     /// The binary as a host runs it, against the script Herdr.
     fn command(&self) -> Command {
-        self.hosted(env!("CARGO_BIN_EXE_namedrop"))
+        self.hosted(crate::binary::namedrop_path())
     }
 
     /// `program` in the environment a host gives the binary.
     fn hosted(&self, program: &str) -> Command {
         let root = &self.directory.root;
-        let mut command = Command::new(program);
+        let mut command = crate::binary::command(program);
         command
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -1010,6 +1087,49 @@ fn the_installed_stop_hook_settles_through_the_cli_pipeline() {
     assert_eq!(space.claims()[0]["state"], json!({"done":"replied"}));
 }
 
+/// The binary as a host with no Herdr names runs it, the space and pane given
+/// under the neutral names instead.
+fn neutral(space: &Space, pane: &str) -> Command {
+    let mut command = space.command();
+    command
+        .env_remove("HERDR_SOCKET_PATH")
+        .env("NAMEDROP_ENDPOINT", "socket-a")
+        .env("NAMEDROP_SPACE_ID", "workspace-1")
+        .env("NAMEDROP_PANE_ID", pane);
+    command
+}
+
+/// The Stop hook finds its claim under `NAMEDROP_ENDPOINT` alone and settles
+/// the delivery from the final answer.
+#[test]
+fn the_installed_stop_hook_settles_under_neutral_names() {
+    let space = Space::new();
+    dispatch::message(
+        "send",
+        json!({"request_id":"ask","source":"@reviewer Reply with the single word pong.",
+               "author_kind":"agent_session"}),
+        &space.runtime("pane-lead"),
+    )
+    .unwrap();
+    let ask = space.herdr.envelope_for("pane-reviewer");
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
+    space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        CLAUDE,
+        &ask.to_string(),
+    );
+    space
+        .start_installed_stop_in(
+            neutral(&space, "pane-reviewer"),
+            json!({"hook_event_name":"Stop","session_id":"session-reviewer",
+                   "prompt_id":CLAUDE.1,"last_assistant_message":"pong","background_tasks":[]}),
+        )
+        .wait();
+    assert_eq!(space.dispositions(), [vec![attempt, "reply".to_owned()]]);
+    assert_eq!(space.claims()[0]["state"], json!({"done":"replied"}));
+}
+
 /// The bound reply of `envelope` with `source` as its text, as the agent
 /// runs it.
 fn bound_reply(space: &Space, envelope: &Value, source: &str) -> Value {
@@ -1123,7 +1243,7 @@ fn a_message_from_the_person_is_answered_in_its_thread_by_the_final_message() {
     );
     assert!(
         context.ends_with(
-            "\n\nNamedrop commands: your final message goes to the person when your turn ends, so run no settle command and write no status line. If your turn ends while you wait on a helper, Namedrop sends nothing and you reply later. If it ends while background work you started this turn runs, Namedrop holds your final message, and your final message in the turn that work's notice starts is the reply. If the notice arrives during another turn, or another delivery reaches the turn it starts, answer with the line Namedrop shows."
+            "\n\nNamedrop commands: your final message goes to the person when your turn ends, so run no settle command and write no status line. If your turn ends while you wait on a helper, Namedrop sends nothing, and your final message in the turn that the helper's answer starts is the reply. If it ends while background work you started this turn runs, Namedrop holds your final message, and your final message in the turn that work's notice starts is the reply. Whenever a later turn shows a line to answer this delivery, answer with that line."
         ),
         "{context}"
     );
@@ -1317,8 +1437,8 @@ fn a_turn_that_ends_waiting_on_a_helper_holds_the_delivery() {
             "a held delivery left the inbox"
         );
 
-        // Every later turn says how to answer it: the helper's answer, and
-        // a prompt typed into the pane alike.
+        // A later turn the person starts says how to answer it. The turn the
+        // helper's answer starts answers it by its final message instead.
         let way_back = |context: &str| {
             let (head, line) = context.rsplit_once('\n').unwrap();
             head.ends_with(&format!(
@@ -1326,37 +1446,6 @@ fn a_turn_that_ends_waiting_on_a_helper_holds_the_delivery() {
             )) && line.starts_with("reply: ")
                 && line.contains(&format!(r#""attempt_id":"{attempt}""#))
         };
-        // The agent going idle settles the attempt's state without a
-        // disposition, as reconciliation does, so the mailbox moves on.
-        StateStore::open(&space.directory.state)
-            .unwrap()
-            .transaction(|transaction| {
-                transaction.transition_delivery_attempt(
-                    &namespace(),
-                    &namedrop::DeliveryAttemptId::new(&attempt),
-                    namedrop::DeliveryState::Settled,
-                    &MutationAttribution::new(ActorKind::Plugin, "test", 42),
-                )
-            })
-            .unwrap();
-        let helper = space.herdr.envelope_for("pane-lead");
-        dispatch::message(
-            "reply",
-            bound_reply(&space, &helper, "@reviewer Yes, it is safe."),
-            &space.runtime("pane-lead"),
-        )
-        .unwrap();
-        let answer = space.herdr.envelope_for("pane-reviewer");
-        assert_eq!(answer["untrusted_body"], "Yes, it is safe.");
-        let turn = ("prompt_id", "answer-turn");
-        let context = space.prompt(
-            "pane-reviewer",
-            "session-reviewer",
-            turn,
-            &answer.to_string(),
-        );
-        assert!(way_back(&context), "{context}");
-        space.stop("session-reviewer", turn, "The lead says option B is safe.");
         let typed = space.prompt(
             "pane-reviewer",
             "session-reviewer",
@@ -1401,6 +1490,949 @@ fn a_turn_that_ends_waiting_on_a_helper_holds_the_delivery() {
     space.stop_with("session-reviewer", CLAUDE, "The build is running.", true);
     assert!(space.relayed().is_empty());
     assert_eq!(space.claims()[0]["state"], json!({"left":"held"}));
+}
+
+impl Space {
+    /// The person asks the reviewer, the reviewer asks the lead, and its turn
+    /// ends with a status: the person's delivery is held. Then the lead
+    /// answers. Returns the person's message, its delivery, and the lead's
+    /// answer as the reviewer's next delivery.
+    fn held_on_the_lead(&self) -> (Value, Value, Value) {
+        let question = self.send_as_person(
+            "question",
+            "@reviewer Is option B safe? Ask the lead.",
+            None,
+        );
+        let ask = self.herdr.envelope_for("pane-reviewer");
+        let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
+        self.prompt(
+            "pane-reviewer",
+            "session-reviewer",
+            CLAUDE,
+            &ask.to_string(),
+        );
+        dispatch::message(
+            "send",
+            json!({"request_id":"helper","source":"@lead Is option B safe?",
+                   "author_kind":"agent_session"}),
+            &self.runtime("pane-reviewer"),
+        )
+        .unwrap();
+        self.stop(
+            "session-reviewer",
+            CLAUDE,
+            "I asked @lead and will answer when it replies.",
+        );
+        assert_eq!(self.claims()[0]["state"], json!({"left":"held"}));
+        // The agent going idle settles the attempt without a disposition, as
+        // reconciliation does, so the mailbox moves on to the lead's answer.
+        StateStore::open(&self.directory.state)
+            .unwrap()
+            .transaction(|transaction| {
+                transaction.transition_delivery_attempt(
+                    &namespace(),
+                    &namedrop::DeliveryAttemptId::new(&attempt),
+                    namedrop::DeliveryState::Settled,
+                    &MutationAttribution::new(ActorKind::Plugin, "test", 42),
+                )
+            })
+            .unwrap();
+        let helper = self.herdr.envelope_for("pane-lead");
+        dispatch::message(
+            "reply",
+            bound_reply(self, &helper, "@reviewer Yes, it is safe."),
+            &self.runtime("pane-lead"),
+        )
+        .unwrap();
+        let answer = self.herdr.envelope_for("pane-reviewer");
+        assert_eq!(answer["untrusted_body"], "Yes, it is safe.");
+        (question, ask, answer)
+    }
+
+    /// The person's thread as the reviewer answered it, without its notes.
+    fn reviewer_posts(&self, question: &Value) -> Vec<Vec<String>> {
+        self.rows(&format!(
+            "SELECT message_id, in_reply_to, body FROM collaboration_messages
+             WHERE thread_id = '{}' AND author_address_id = 'address-reviewer'
+               AND message_id NOT LIKE 'progress-note:%' ORDER BY created_at_ms, rowid",
+            question["thread_id"].as_str().unwrap()
+        ))
+    }
+
+    /// The context of a prompt the person types into the reviewer's pane.
+    fn typed_context(&self, turn: &str, prompt: &str) -> String {
+        execute_user_prompt_submit_hook(
+            &json!({"hook_event_name":"UserPromptSubmit","session_id":"session-reviewer",
+                    "prompt_id":turn,"prompt":prompt})
+            .to_string(),
+            &self.runtime("pane-reviewer"),
+        )
+        .and_then(|output| {
+            output["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .map(str::to_owned)
+        })
+        .unwrap_or_default()
+    }
+}
+
+/// The helper's answer starts the turn whose final message is the held
+/// answer, as a background task's notice does: Namedrop sends that final
+/// message to the person's thread and closes the helper's answer without a
+/// reply. An agent that runs the reply line instead still answers once. A
+/// turn that ends with no final message warns the person, and the way back
+/// shows again. Nothing ends held and silent once the helper has answered.
+#[test]
+fn the_turn_a_helpers_answer_starts_answers_the_held_delivery() {
+    for runs_the_line in [false, true] {
+        let space = Space::new();
+        let (question, ask, answer) = space.held_on_the_lead();
+        let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
+        let answer_attempt = answer["control"]["attempt_id"].as_str().unwrap();
+        let turn = ("prompt_id", "answer-turn");
+        let context = space.prompt(
+            "pane-reviewer",
+            "session-reviewer",
+            turn,
+            &answer.to_string(),
+        );
+        assert!(!context.contains("is still open"), "{context}");
+        assert!(
+            context.contains(&format!(
+                "your final message is your answer to delivery {attempt}"
+            )),
+            "{context}"
+        );
+        if runs_the_line {
+            dispatch::message(
+                "reply",
+                bound_reply(&space, &ask, "@operator The lead says option B is safe."),
+                &space.runtime("pane-reviewer"),
+            )
+            .unwrap();
+        }
+        space.stop("session-reviewer", turn, "The lead says option B is safe.");
+        let posts = space.reviewer_posts(&question);
+        assert_eq!(posts.len(), 1, "{runs_the_line}: {posts:?}");
+        assert_eq!(posts[0][1], question["message_id"].as_str().unwrap());
+        assert_eq!(posts[0][2], "The lead says option B is safe.");
+        let held_and_answer: Vec<_> = space
+            .dispositions()
+            .into_iter()
+            .filter(|row| row[0] == attempt || row[0] == answer_attempt)
+            .collect();
+        let held_kind = if runs_the_line { "reply" } else { "no_reply" };
+        assert_eq!(
+            held_and_answer,
+            [
+                vec![attempt.clone(), held_kind.to_owned()],
+                vec![answer_attempt.to_owned(), "no_reply".to_owned()],
+            ],
+            "{runs_the_line}"
+        );
+        assert!(space.unresolved_disposition_warnings().is_empty());
+        let typed = space.typed_context("typed-turn", "Thanks.");
+        assert!(!typed.contains("is still open"), "{typed}");
+    }
+
+    // The answer's turn ends with no final message, or is interrupted and
+    // never stops: the person is warned, and the way back shows again.
+    for stops in [true, false] {
+        let space = Space::new();
+        let (question, ask, answer) = space.held_on_the_lead();
+        let attempt = ask["control"]["attempt_id"].as_str().unwrap();
+        let turn = ("prompt_id", "answer-turn");
+        space.prompt(
+            "pane-reviewer",
+            "session-reviewer",
+            turn,
+            &answer.to_string(),
+        );
+        if stops {
+            space.stop("session-reviewer", turn, "  ");
+        }
+        let typed = space.typed_context("typed-turn", "Did you hear back?");
+        assert!(space.reviewer_posts(&question).is_empty());
+        let warned = space.rows(&format!(
+            "SELECT summary FROM attention_items WHERE source_kind = 'agent_disposition'
+               AND source_id = '{attempt}' AND resolved_at_ms IS NULL"
+        ));
+        assert_eq!(
+            warned.len(),
+            1,
+            "{stops}: a held answer whose turn came and went without it warns"
+        );
+        assert!(
+            typed.contains(&format!(
+                "Namedrop: delivery {attempt} from an earlier turn is still open"
+            )),
+            "{stops}: {typed}"
+        );
+    }
+}
+
+impl Space {
+    /// `pane`'s runtime at `now_ms`, for a test in which the order of the
+    /// messages matters.
+    fn pane_at<'a>(
+        &'a self,
+        pane: &'a str,
+        clock: &'a At,
+    ) -> LifecycleRuntime<'a, FakeMux, At, SequenceIds> {
+        LifecycleRuntime {
+            current_pane_id: Some(pane),
+            ..self.runtime_at(clock)
+        }
+    }
+
+    /// The person asks the reviewer at `now_ms`, and the reviewer's turn asks
+    /// the lead and ends with a status: the person's delivery is held, and
+    /// its attempt settles as the pane goes idle. Returns the person's message
+    /// and the held attempt.
+    fn held_at(&self, now_ms: u64, question: &str) -> (Value, String) {
+        self.held_on_at(now_ms, question, &[question])
+    }
+
+    /// As `held_at`, with the turn asking the lead each of `requests`.
+    fn held_on_at(&self, now_ms: u64, question: &str, requests: &[&str]) -> (Value, String) {
+        let clock = At(now_ms);
+        let mut runtime = self.pane_at("pane-lead", &clock);
+        runtime.current_pane_id = None;
+        runtime.workspace_id = Some("workspace-1");
+        let asked = send_operator_message(
+            &format!("person-{now_ms}"),
+            &format!("@reviewer {question} Ask the lead."),
+            None,
+            &runtime,
+        )
+        .unwrap();
+        dispatch::wake(&runtime);
+        let ask = self.herdr.envelope_for("pane-reviewer");
+        let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
+        let turn = format!("turn-{now_ms}");
+        self.reviewer_prompt_at(now_ms + 10, &turn, &ask.to_string());
+        for (at, request) in (now_ms + 20..).zip(requests) {
+            self.reviewer_sends_at(at, &format!("@lead {request}"));
+        }
+        self.reviewer_stop_at(
+            now_ms + 30,
+            &turn,
+            "I asked @lead and will answer when it replies.",
+        );
+        self.settle_attempt_at(&attempt, now_ms + 31);
+        (asked, attempt)
+    }
+
+    /// The context of a reviewer's prompt at `now_ms`.
+    fn reviewer_prompt_at(&self, now_ms: u64, turn: &str, prompt: &str) -> String {
+        let input = json!({"hook_event_name":"UserPromptSubmit","prompt":self.as_typed(prompt),
+                           "session_id":"session-reviewer","prompt_id":turn});
+        execute_user_prompt_submit_hook(
+            &input.to_string(),
+            &self.pane_at("pane-reviewer", &At(now_ms)),
+        )
+        .and_then(|output| {
+            output["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .map(str::to_owned)
+        })
+        .unwrap_or_default()
+    }
+
+    fn reviewer_stop_at(&self, now_ms: u64, turn: &str, text: &str) {
+        let stop = stop_facts("session-reviewer", ("prompt_id", turn), text, false);
+        settle_at_stop(
+            &self.directory.state,
+            "socket-a",
+            &stop,
+            now_ms,
+            &mut |bound| self.run(bound),
+        );
+    }
+
+    /// A request the reviewer sends at `now_ms`, with a new `send`.
+    fn reviewer_sends_at(&self, now_ms: u64, source: &str) {
+        dispatch::message(
+            "send",
+            json!({"request_id":format!("reviewer-{now_ms}"),"source":source,
+                   "author_kind":"agent_session"}),
+            &self.pane_at("pane-reviewer", &At(now_ms)),
+        )
+        .unwrap();
+    }
+
+    fn settle_attempt_at(&self, attempt: &str, now_ms: u64) {
+        StateStore::open(&self.directory.state)
+            .unwrap()
+            .transaction(|transaction| {
+                transaction.transition_delivery_attempt(
+                    &namespace(),
+                    &namedrop::DeliveryAttemptId::new(attempt),
+                    namedrop::DeliveryState::Settled,
+                    &MutationAttribution::new(ActorKind::Plugin, "test", now_ms),
+                )
+            })
+            .unwrap();
+    }
+
+    /// The lead answers the request its pane holds now, which asked `asked`.
+    /// Returns that answer as the reviewer's next delivery.
+    fn lead_answers_at(&self, now_ms: u64, asked: &str, answer: &str) -> Value {
+        let helper = self.herdr.envelope_for("pane-lead");
+        assert_eq!(
+            helper["untrusted_body"], asked,
+            "the lead's current request"
+        );
+        dispatch::message(
+            "reply",
+            bound_reply(self, &helper, &format!("@reviewer {answer}")),
+            &self.pane_at("pane-lead", &At(now_ms)),
+        )
+        .unwrap();
+        let delivered = self.herdr.envelope_for("pane-reviewer");
+        assert_eq!(delivered["untrusted_body"], answer);
+        delivered
+    }
+
+    /// Herdr shows the reviewer's agent working on a turn, or idle again.
+    fn reviewer_working(&self, working: bool) {
+        let state = if working {
+            AgentState::Working
+        } else {
+            AgentState::Idle
+        };
+        self.herdr.space.set_state("pane-reviewer", state);
+    }
+
+    /// The summaries of the open ND-DELIVERY-003 warnings on `attempt`.
+    fn warnings_on(&self, attempt: &str) -> Vec<String> {
+        self.rows(&format!(
+            "SELECT summary FROM attention_items WHERE source_kind = 'agent_disposition'
+               AND source_id = '{attempt}' AND resolved_at_ms IS NULL"
+        ))
+        .into_iter()
+        .map(|row| row[0].clone())
+        .collect()
+    }
+
+    /// Rewrites the claims on `attempts` as an older build left them: with
+    /// no requests recorded.
+    fn as_older_build(&self, attempts: &[&str]) {
+        let mut claims: Value =
+            serde_json::from_slice(&fs::read(self.claims_file()).unwrap()).unwrap();
+        for claim in claims.as_array_mut().unwrap() {
+            if attempts.contains(&claim["attempt_id"].as_str().unwrap()) {
+                let claim = claim.as_object_mut().unwrap();
+                claim.remove("helpers");
+                claim.remove("answered_turn");
+            }
+        }
+        fs::write(self.claims_file(), claims.to_string()).unwrap();
+    }
+
+    /// The answers in the person's thread, without the progress notes.
+    fn answers_to(&self, question: &Value) -> Vec<String> {
+        self.reviewer_posts(question)
+            .into_iter()
+            .map(|row| row[2].clone())
+            .collect()
+    }
+
+    /// The stage Channels draws on the reviewer's arrow of `question`.
+    fn question_leg(&self, question: &Value) -> String {
+        let rows = StateStore::open(&self.directory.state)
+            .unwrap()
+            .dashboard_rows(&namespace())
+            .unwrap();
+        let snapshot = serde_json::to_value(namedrop::dashboard::snapshot::build(
+            &rows,
+            Some("namedrop/dashboard"),
+            1,
+        ))
+        .unwrap();
+        snapshot["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["message_id"] == question["message_id"])
+            .unwrap()["legs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|leg| leg["to"] == "address-reviewer")
+            .unwrap()["stage"]["stage"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+}
+
+fn woken_for(attempt: &str) -> String {
+    format!("your final message is your answer to delivery {attempt}")
+}
+
+/// The person asks two questions, and the reviewer holds each on its own
+/// request to the lead. Each of the lead's answers wakes the delivery that
+/// waited on it, and lands once, in that delivery's thread: a request the
+/// later question's turn sent is not one the earlier question waits on.
+#[test]
+fn two_holds_on_one_helper_each_take_their_own_answer() {
+    let space = Space::new();
+    let (first, first_attempt) = space.held_at(100, "Question one?");
+    let (second, second_attempt) = space.held_at(200, "Question two?");
+    assert_ne!(first["thread_id"], second["thread_id"]);
+
+    let answer = space.lead_answers_at(300, "Question one?", "One is yes.");
+    let context = space.reviewer_prompt_at(310, "answer-1", &answer.to_string());
+    assert!(context.contains(&woken_for(&first_attempt)), "{context}");
+    space.reviewer_stop_at(320, "answer-1", "ANSWER-ONE: yes.");
+    assert_eq!(space.answers_to(&first), ["ANSWER-ONE: yes."]);
+
+    let answer = space.lead_answers_at(400, "Question two?", "Two is no.");
+    let context = space.reviewer_prompt_at(410, "answer-2", &answer.to_string());
+    assert!(context.contains(&woken_for(&second_attempt)), "{context}");
+    assert!(!context.contains("is still open"), "{context}");
+    space.reviewer_stop_at(420, "answer-2", "ANSWER-TWO: no.");
+    assert_eq!(space.answers_to(&first), ["ANSWER-ONE: yes."]);
+    assert_eq!(space.answers_to(&second), ["ANSWER-TWO: no."]);
+    assert!(
+        space
+            .claims()
+            .iter()
+            .all(|claim| claim["state"] != json!({"left":"held"})),
+        "{:?}",
+        space.claims()
+    );
+    assert!(space.unresolved_disposition_warnings().is_empty());
+}
+
+/// The person types a task into the held pane, and its turn asks the lead
+/// something else. That request is the typed turn's: it neither holds the
+/// delivery again when the held question's answer arrives, nor answers it
+/// when its own answer does.
+#[test]
+fn a_request_a_typed_turn_sent_is_not_the_held_deliverys() {
+    let space = Space::new();
+    let (question, attempt) = space.held_at(100, "Question one?");
+    space.reviewer_prompt_at(200, "typed-task", "Also check the deploy with the lead.");
+    space.reviewer_sends_at(210, "@lead Is the deploy green?");
+    space.reviewer_stop_at(220, "typed-task", "Asked the lead about the deploy.");
+
+    let answer = space.lead_answers_at(300, "Question one?", "One is yes.");
+    let context = space.reviewer_prompt_at(310, "answer-1", &answer.to_string());
+    assert!(context.contains(&woken_for(&attempt)), "{context}");
+    space.reviewer_stop_at(320, "answer-1", "ANSWER-ONE: yes.");
+    assert_eq!(space.answers_to(&question), ["ANSWER-ONE: yes."]);
+
+    let answer = space.lead_answers_at(400, "Is the deploy green?", "Deploy is green.");
+    let context = space.reviewer_prompt_at(410, "answer-2", &answer.to_string());
+    assert!(!context.contains(&woken_for(&attempt)), "{context}");
+    space.reviewer_stop_at(420, "answer-2", "DEPLOY: green.");
+    assert_eq!(space.answers_to(&question), ["ANSWER-ONE: yes."]);
+    assert!(space.unresolved_disposition_warnings().is_empty());
+}
+
+/// The turn the lead's answer starts asks it a follow-up and ends waiting
+/// again: the delivery is held again on that request, and its answer wakes
+/// it. A request the person's typed turn sent in between changes neither.
+#[test]
+fn a_turn_the_answer_starts_can_ask_again_and_hold_until_that_is_answered() {
+    for typed_request_between in [false, true] {
+        let space = Space::new();
+        let (question, attempt) = space.held_at(100, "Question one?");
+        if typed_request_between {
+            space.reviewer_prompt_at(200, "typed-task", "Also check the deploy with the lead.");
+            space.reviewer_sends_at(210, "@lead Is the deploy green?");
+            space.reviewer_stop_at(220, "typed-task", "Asked the lead about the deploy.");
+        }
+        let answer = space.lead_answers_at(300, "Question one?", "It depends on X.");
+        let context = space.reviewer_prompt_at(310, "answer-1", &answer.to_string());
+        assert!(
+            context.contains(&woken_for(&attempt)),
+            "{typed_request_between}: {context}"
+        );
+        space.reviewer_sends_at(315, "@lead And what is X?");
+        space.reviewer_stop_at(320, "answer-1", "Asked a follow-up.");
+        assert_eq!(
+            space.claims()[0]["state"],
+            json!({"left":"held"}),
+            "{typed_request_between}"
+        );
+        assert!(
+            space.answers_to(&question).is_empty(),
+            "{typed_request_between}"
+        );
+        if typed_request_between {
+            let answer = space.lead_answers_at(350, "Is the deploy green?", "Deploy is green.");
+            let context = space.reviewer_prompt_at(355, "deploy", &answer.to_string());
+            assert!(!context.contains(&woken_for(&attempt)), "{context}");
+            assert!(
+                context.contains(&format!(
+                    "delivery {attempt} from an earlier turn is still open"
+                )),
+                "{context}"
+            );
+            space.reviewer_stop_at(360, "deploy", "DEPLOY: green.");
+            assert!(space.answers_to(&question).is_empty());
+        }
+        let answer = space.lead_answers_at(400, "And what is X?", "X is 4.");
+        let context = space.reviewer_prompt_at(410, "answer-2", &answer.to_string());
+        assert!(
+            context.contains(&woken_for(&attempt)),
+            "{typed_request_between}: {context}"
+        );
+        space.reviewer_stop_at(420, "answer-2", "FINAL: yes, since X is 4.");
+        assert_eq!(
+            space.answers_to(&question),
+            ["FINAL: yes, since X is 4."],
+            "{typed_request_between}"
+        );
+        assert!(space.unresolved_disposition_warnings().is_empty());
+    }
+}
+
+/// A delivery an older build held on a helper records no requests. After
+/// the update, the helper's answer still starts the turn whose final
+/// message answers it.
+#[test]
+fn a_hold_an_older_build_left_takes_its_helpers_answer_after_the_update() {
+    let space = Space::new();
+    let (question, ask, answer) = space.held_on_the_lead();
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap();
+    space.as_older_build(&[attempt]);
+    let turn = ("prompt_id", "answer-turn");
+    let context = space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        turn,
+        &answer.to_string(),
+    );
+    assert!(context.contains(&woken_for(attempt)), "{context}");
+    assert!(!context.contains("is still open"), "{context}");
+    space.stop("session-reviewer", turn, "The lead says option B is safe.");
+    assert_eq!(
+        space.answers_to(&question),
+        ["The lead says option B is safe."]
+    );
+    assert!(space.unresolved_disposition_warnings().is_empty());
+}
+
+/// An older build's hold takes only the answer to a request its own turn
+/// sent. The lead first answers a request the session sent before the hold:
+/// that answer's turn is for the person, and the hold's own answer still
+/// lands in its thread.
+#[test]
+fn an_older_hold_ignores_the_answer_to_a_request_sent_before_it() {
+    let space = Space::new();
+    space.reviewer_prompt_at(50, "typed-task", "Check the deploy with the lead.");
+    space.reviewer_sends_at(60, "@lead Is the deploy green?");
+    space.reviewer_stop_at(70, "typed-task", "Asked the lead about the deploy.");
+    let (question, attempt) = space.held_at(100, "Question one?");
+    space.as_older_build(&[&attempt]);
+
+    let answer = space.lead_answers_at(300, "Is the deploy green?", "Deploy is green.");
+    let context = space.reviewer_prompt_at(310, "answer-deploy", &answer.to_string());
+    assert!(!context.contains(&woken_for(&attempt)), "{context}");
+    assert!(
+        context.contains(&format!(
+            "delivery {attempt} from an earlier turn is still open"
+        )),
+        "{context}"
+    );
+    space.reviewer_stop_at(320, "answer-deploy", "DEPLOY: green.");
+    assert!(space.answers_to(&question).is_empty());
+
+    let answer = space.lead_answers_at(400, "Question one?", "One is yes.");
+    let context = space.reviewer_prompt_at(410, "answer-one", &answer.to_string());
+    assert!(context.contains(&woken_for(&attempt)), "{context}");
+    space.reviewer_stop_at(420, "answer-one", "ANSWER-ONE: yes.");
+    assert_eq!(space.answers_to(&question), ["ANSWER-ONE: yes."]);
+}
+
+/// A hold 1.11 left behind: its helper answered under that build, which
+/// dropped the answer's final message and kept the delivery held. Hours
+/// after the update, a turn the person types asks the lead something else:
+/// that answer is not the stale hold's, and its thread gets nothing.
+#[test]
+fn a_hold_an_older_build_left_stale_ignores_a_later_turns_request() {
+    let space = Space::new();
+    let (question, attempt) = space.held_at(100, "Question one?");
+    // The older build's turn for the answer saw no hold of this build's, so
+    // its final message reached only the pane.
+    let file = space.claims_file();
+    let stale = fs::read(&file).unwrap();
+    fs::remove_file(&file).unwrap();
+    let answer = space.lead_answers_at(200, "Question one?", "One is yes.");
+    space.reviewer_prompt_at(210, "old-answer", &answer.to_string());
+    space.reviewer_stop_at(220, "old-answer", "ANSWER-ONE: yes.");
+    assert!(space.answers_to(&question).is_empty());
+    let mut claims: Value = serde_json::from_slice(&stale).unwrap();
+    let later: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    claims
+        .as_array_mut()
+        .unwrap()
+        .extend(later.as_array().unwrap().iter().cloned());
+    fs::write(&file, claims.to_string()).unwrap();
+    space.as_older_build(&[&attempt]);
+
+    let hours = 3 * 3_600_000;
+    space.reviewer_prompt_at(hours, "typed-task", "Check the deploy with the lead.");
+    space.reviewer_sends_at(hours + 10, "@lead Is the deploy green?");
+    space.reviewer_stop_at(hours + 20, "typed-task", "Asked the lead about the deploy.");
+    let answer = space.lead_answers_at(hours + 100, "Is the deploy green?", "Deploy is green.");
+    let context = space.reviewer_prompt_at(hours + 110, "answer-deploy", &answer.to_string());
+    assert!(!context.contains(&woken_for(&attempt)), "{context}");
+    space.reviewer_stop_at(hours + 120, "answer-deploy", "DEPLOY: green.");
+    assert!(
+        space.answers_to(&question).is_empty(),
+        "{:?}",
+        space.answers_to(&question)
+    );
+}
+
+/// Two holds an older build left, each on its own request to the lead,
+/// answered in the other order: each answer lands in its own question's
+/// thread.
+#[test]
+fn two_older_holds_each_take_their_own_answer_in_either_order() {
+    let space = Space::new();
+    let (first, first_attempt) = space.held_at(100, "Question one?");
+    let (second, second_attempt) = space.held_at(200, "Question two?");
+    space.as_older_build(&[&first_attempt, &second_attempt]);
+    // The lead's turn on the first request ends with no reply yet, and its
+    // mailbox moves on to the second.
+    let asked_first = space.herdr.envelope_for("pane-lead");
+    assert_eq!(asked_first["untrusted_body"], "Question one?");
+    space.settle_attempt_at(asked_first["control"]["attempt_id"].as_str().unwrap(), 250);
+    dispatch::wake(&space.pane_at("pane-lead", &At(260)));
+
+    let answer = space.lead_answers_at(300, "Question two?", "Two is no.");
+    let context = space.reviewer_prompt_at(310, "answer-2", &answer.to_string());
+    assert!(context.contains(&woken_for(&second_attempt)), "{context}");
+    space.reviewer_stop_at(320, "answer-2", "ANSWER-TWO: no.");
+    assert!(space.answers_to(&first).is_empty());
+    assert_eq!(space.answers_to(&second), ["ANSWER-TWO: no."]);
+
+    dispatch::message(
+        "reply",
+        bound_reply(&space, &asked_first, "@reviewer One is yes."),
+        &space.pane_at("pane-lead", &At(400)),
+    )
+    .unwrap();
+    let answer = space.herdr.envelope_for("pane-reviewer");
+    assert_eq!(answer["untrusted_body"], "One is yes.");
+    let context = space.reviewer_prompt_at(410, "answer-1", &answer.to_string());
+    assert!(context.contains(&woken_for(&first_attempt)), "{context}");
+    space.reviewer_stop_at(420, "answer-1", "ANSWER-ONE: yes.");
+    assert_eq!(space.answers_to(&first), ["ANSWER-ONE: yes."]);
+    assert_eq!(space.answers_to(&second), ["ANSWER-TWO: no."]);
+}
+
+/// The turn that held the delivery asked the lead two things. The first
+/// answer's turn ends with the second still unanswered, so it holds the
+/// delivery again, and the second answer's turn answers it.
+#[test]
+fn a_hold_on_two_requests_waits_for_both_answers() {
+    let space = Space::new();
+    let (question, attempt) = space.held_on_at(100, "Two questions?", &["First?", "Second?"]);
+    let answer = space.lead_answers_at(300, "First?", "One is yes.");
+    let context = space.reviewer_prompt_at(310, "answer-1", &answer.to_string());
+    assert!(context.contains(&woken_for(&attempt)), "{context}");
+    space.reviewer_stop_at(320, "answer-1", "One is yes; still waiting on the second.");
+    assert_eq!(space.claims()[0]["state"], json!({"left":"held"}));
+    assert!(space.answers_to(&question).is_empty());
+    let answer = space.lead_answers_at(400, "Second?", "Two is no.");
+    let context = space.reviewer_prompt_at(410, "answer-2", &answer.to_string());
+    assert!(context.contains(&woken_for(&attempt)), "{context}");
+    space.reviewer_stop_at(420, "answer-2", "BOTH: yes, then no.");
+    assert_eq!(space.answers_to(&question), ["BOTH: yes, then no."]);
+    assert!(space.unresolved_disposition_warnings().is_empty());
+}
+
+/// A delivery held on background work records its task, not a request, so
+/// the answer to a request the session sends later is not its answer: only
+/// that work's notice wakes it, and the answer's prompt shows its way back.
+#[test]
+fn an_answer_wakes_no_hold_on_background_work() {
+    let space = Space::new();
+    let ask = space.held_on_first_task();
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap();
+    space.settle_attempt(&ask);
+    dispatch::message(
+        "send",
+        json!({"request_id":"later","source":"@lead Is the deploy green?",
+               "author_kind":"agent_session"}),
+        &space.runtime("pane-reviewer"),
+    )
+    .unwrap();
+    let helper = space.herdr.envelope_for("pane-lead");
+    assert_eq!(helper["untrusted_body"], "Is the deploy green?");
+    dispatch::message(
+        "reply",
+        bound_reply(&space, &helper, "@reviewer Deploy is green."),
+        &space.runtime("pane-lead"),
+    )
+    .unwrap();
+    let answer = space.herdr.envelope_for("pane-reviewer");
+    assert_eq!(answer["untrusted_body"], "Deploy is green.");
+    let context = space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        ("prompt_id", "answer-turn"),
+        &answer.to_string(),
+    );
+    assert!(!context.contains(&woken_for(attempt)), "{context}");
+    assert!(
+        context.contains(&format!(
+            "delivery {attempt} from an earlier turn is still open"
+        )),
+        "{context}"
+    );
+    space.stop(
+        "session-reviewer",
+        ("prompt_id", "answer-turn"),
+        "Deploy is green.",
+    );
+    assert_eq!(space.claims()[0]["state"], json!({"left":"held"}));
+}
+
+/// The lead's answer reaches a turn that is about another delivery, so its
+/// final message can't also be the held one's answer: that delivery's way
+/// back shows, and it stays held.
+#[test]
+fn an_answer_queued_into_a_turn_about_another_delivery_wakes_nothing() {
+    let space = Space::new();
+    let (question, attempt) = space.held_at(100, "Question one?");
+    let clock = At(200);
+    let mut runtime = space.pane_at("pane-lead", &clock);
+    runtime.current_pane_id = None;
+    runtime.workspace_id = Some("workspace-1");
+    let other =
+        send_operator_message("person-other", "@reviewer Question two?", None, &runtime).unwrap();
+    dispatch::wake(&runtime);
+    let ask = space.herdr.envelope_for("pane-reviewer");
+    space.reviewer_prompt_at(210, "turn-b", &ask.to_string());
+    space.settle_attempt_at(ask["control"]["attempt_id"].as_str().unwrap(), 211);
+
+    let answer = space.lead_answers_at(300, "Question one?", "One is yes.");
+    let context = space.reviewer_prompt_at(310, "turn-b", &answer.to_string());
+    assert!(!context.contains(&woken_for(&attempt)), "{context}");
+    assert!(
+        context.contains(&format!(
+            "delivery {attempt} from an earlier turn is still open"
+        )),
+        "{context}"
+    );
+    space.reviewer_stop_at(320, "turn-b", "Two is fine. And one is yes.");
+    assert_eq!(space.answers_to(&other), ["Two is fine. And one is yes."]);
+    assert!(space.answers_to(&question).is_empty());
+    let held = space
+        .claims()
+        .into_iter()
+        .find(|claim| claim["attempt_id"] == attempt)
+        .unwrap();
+    assert_eq!(held["state"], json!({"left":"held"}));
+}
+
+/// The turn the lead's answer starts is interrupted with Esc, or ended by an
+/// API error, and never stops. Once its pane has sat idle past the Stop's
+/// grace, the person is told the held delivery went unanswered, with no later
+/// prompt needed, and Channels stops showing it as still being worked on.
+#[test]
+fn an_answer_turn_that_never_stops_warns_about_the_held_delivery() {
+    let space = Space::new();
+    let (question, ask, answer) = space.held_on_the_lead();
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap();
+    let turn = ("prompt_id", "answer-turn");
+    space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        turn,
+        &answer.to_string(),
+    );
+    let warned = || {
+        space.rows(&format!(
+            "SELECT summary FROM attention_items WHERE source_kind = 'agent_disposition'
+               AND source_id = '{attempt}' AND resolved_at_ms IS NULL"
+        ))
+    };
+    let due = space.observe_at(IDLE);
+    assert!(
+        warned().is_empty(),
+        "warned before a racing Stop could arrive"
+    );
+    assert_eq!(due, Some(IDLE + STOP_ARRIVAL_GRACE_MS));
+    assert_eq!(space.question_leg(&question), "working");
+    space.observe_at(IDLE + STOP_ARRIVAL_GRACE_MS);
+    let warnings = warned();
+    assert_eq!(
+        warnings.len(),
+        1,
+        "a held answer lost with its turn warned nothing"
+    );
+    assert!(
+        warnings[0][0].contains("ended its turn without a reply"),
+        "{warnings:?}"
+    );
+    assert_ne!(space.question_leg(&question), "working");
+    assert!(space.answers_to(&question).is_empty());
+}
+
+/// The turn the lead's answer starts replies to the lead with the line its
+/// text offers, and works on. That reply settles the answer's attempt, but
+/// the turn is not over: nothing warns while its pane works, and its Stop
+/// answers the held delivery. Interrupted instead, it warns once its pane
+/// has sat idle past the Stop's grace.
+#[test]
+fn a_reply_to_the_helper_while_the_answer_turn_runs_warns_nothing() {
+    for interrupted in [false, true] {
+        let space = Space::new();
+        let (question, ask, answer) = space.held_on_the_lead();
+        let attempt = ask["control"]["attempt_id"].as_str().unwrap();
+        let answer_attempt = answer["control"]["attempt_id"].as_str().unwrap();
+        space.reviewer_working(true);
+        let context = space.reviewer_prompt_at(100_000, "answer-turn", &answer.to_string());
+        assert!(context.contains(&woken_for(attempt)), "{context}");
+        dispatch::message(
+            "reply",
+            bound_reply(&space, &answer, "@lead Thanks, that settles it."),
+            &space.pane_at("pane-reviewer", &At(102_000)),
+        )
+        .unwrap();
+        space.observe_at(102_500);
+        space.observe_at(102_000 + STOP_ARRIVAL_GRACE_MS + 1_000);
+        space.observe_at(102_000 + STOPPED_GRACE_MS + 1_000);
+        assert_eq!(space.warnings_on(attempt), Vec::<String>::new());
+        assert_eq!(space.question_leg(&question), "working");
+        if interrupted {
+            space.reviewer_working(false);
+            let due = space.observe_at(200_000);
+            assert_eq!(space.warnings_on(attempt), Vec::<String>::new());
+            assert_eq!(due, Some(200_000 + STOP_ARRIVAL_GRACE_MS));
+            space.observe_at(200_000 + STOP_ARRIVAL_GRACE_MS);
+            let warnings = space.warnings_on(attempt);
+            assert_eq!(warnings.len(), 1, "{warnings:?}");
+            assert!(
+                warnings[0].contains("ended its turn without a reply"),
+                "{warnings:?}"
+            );
+            assert!(space.answers_to(&question).is_empty());
+        } else {
+            space.reviewer_stop_at(200_000, "answer-turn", "FINAL: option B is safe.");
+            space.reviewer_working(false);
+            space.observe_at(200_500);
+            assert_eq!(space.answers_to(&question), ["FINAL: option B is safe."]);
+            // The lead never settles the reply it got, so only the reviewer's
+            // deliveries count here.
+            assert_eq!(space.warnings_on(attempt), Vec::<String>::new());
+            assert_eq!(space.warnings_on(answer_attempt), Vec::<String>::new());
+        }
+    }
+}
+
+/// The turn the lead's answer starts replies to the lead, asks it a
+/// follow-up, and ends waiting: the delivery is held again, with no warning
+/// for the whole second hold, and the follow-up's answer answers it.
+#[test]
+fn a_turn_that_replies_to_the_helper_and_asks_again_holds_without_a_warning() {
+    let space = Space::new();
+    let (question, ask, answer) = space.held_on_the_lead();
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap();
+    space.reviewer_working(true);
+    space.reviewer_prompt_at(100_000, "answer-turn", &answer.to_string());
+    dispatch::message(
+        "reply",
+        bound_reply(&space, &answer, "@lead Thanks. One more question coming."),
+        &space.pane_at("pane-reviewer", &At(102_000)),
+    )
+    .unwrap();
+    space.reviewer_sends_at(103_000, "@lead And what about option C?");
+    space.observe_at(108_000);
+    space.reviewer_stop_at(120_000, "answer-turn", "Asked a follow-up; waiting.");
+    space.reviewer_working(false);
+    assert_eq!(space.claims()[0]["state"], json!({"left":"held"}));
+    space.observe_at(121_000);
+    space.observe_at(3_700_000);
+    assert_eq!(space.warnings_on(attempt), Vec::<String>::new());
+    assert_eq!(space.question_leg(&question), "working");
+
+    let answer = space.lead_answers_at(3_800_000, "And what about option C?", "C is unsafe.");
+    let context = space.reviewer_prompt_at(3_800_100, "answer-2", &answer.to_string());
+    assert!(context.contains(&woken_for(attempt)), "{context}");
+    space.reviewer_stop_at(3_800_200, "answer-2", "FINAL: B is safe, C is not.");
+    assert_eq!(space.answers_to(&question), ["FINAL: B is safe, C is not."]);
+    assert_eq!(space.warnings_on(attempt), Vec::<String>::new());
+}
+
+/// The turn the lead's answer starts sits idle with no Stop past the grace,
+/// so the person is warned. Then its Stop arrives after all and holds the
+/// delivery again on a follow-up: the warning goes, and Channels shows the
+/// delivery held again.
+#[test]
+fn a_late_stop_that_holds_the_answer_again_withdraws_its_warning() {
+    let space = Space::new();
+    let (question, ask, answer) = space.held_on_the_lead();
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap();
+    space.reviewer_prompt_at(1_000, "answer-turn", &answer.to_string());
+    space.reviewer_sends_at(2_000, "@lead And what about option C?");
+    space.observe_at(IDLE);
+    space.observe_at(IDLE + STOP_ARRIVAL_GRACE_MS);
+    assert_eq!(space.warnings_on(attempt).len(), 1);
+    space.reviewer_stop_at(IDLE + 20_000, "answer-turn", "Asked a follow-up; waiting.");
+    assert_eq!(space.claims()[0]["state"], json!({"left":"held"}));
+    assert_eq!(space.warnings_on(attempt), Vec::<String>::new());
+    space.observe_at(IDLE + 21_000);
+    assert_eq!(space.warnings_on(attempt), Vec::<String>::new());
+    assert_eq!(space.question_leg(&question), "working");
+}
+
+/// Another Stop hook blocks the first Stop of the turn the lead's answer
+/// starts, and the turn goes on, its pane working. Namedrop's Stop hook
+/// recorded that Stop before its worker saw it blocked, yet nothing warns
+/// however long the turn runs, and its real Stop answers the held delivery.
+/// Interrupted instead, it warns once its pane has sat idle past the grace.
+#[test]
+fn a_stop_another_hook_blocked_warns_nothing_while_the_answer_turn_runs() {
+    for interrupted in [false, true] {
+        let space = Space::new();
+        let (question, ask, answer) = space.held_on_the_lead();
+        let attempt = ask["control"]["attempt_id"].as_str().unwrap();
+        space.reviewer_working(true);
+        space.reviewer_prompt_at(100_000, "answer-turn", &answer.to_string());
+        let turn = HostTurn::from_ids(Some("answer-turn"), None).unwrap();
+        mark_stopped(
+            &space.directory.state,
+            "socket-a",
+            "session-reviewer",
+            &turn,
+            100_200,
+        );
+        space.observe_at(100_200 + STOPPED_GRACE_MS + 100);
+        space.observe_at(700_000);
+        assert_eq!(space.warnings_on(attempt), Vec::<String>::new());
+        assert_eq!(space.question_leg(&question), "working");
+        if interrupted {
+            space.reviewer_working(false);
+            let due = space.observe_at(800_000);
+            assert_eq!(space.warnings_on(attempt), Vec::<String>::new());
+            assert_eq!(due, Some(800_000 + STOP_ARRIVAL_GRACE_MS));
+            space.observe_at(800_000 + STOP_ARRIVAL_GRACE_MS);
+            assert_eq!(space.warnings_on(attempt).len(), 1);
+        } else {
+            mark_stopped(
+                &space.directory.state,
+                "socket-a",
+                "session-reviewer",
+                &turn,
+                800_000,
+            );
+            space.reviewer_stop_at(800_000, "answer-turn", "FINAL: option B is safe.");
+            space.reviewer_working(false);
+            space.observe_at(800_500);
+            assert_eq!(space.answers_to(&question), ["FINAL: option B is safe."]);
+            assert!(space.unresolved_disposition_warnings().is_empty());
+        }
+    }
 }
 
 /// A reply the agent sends during the turn opens no request, even to an
@@ -2467,7 +3499,7 @@ impl Space {
 
     /// A hook as the host starts it, from the copy it holds.
     fn hook_from_cached_copy(&self, session: &str) {
-        let mut hook = std::process::Command::new(env!("CARGO_BIN_EXE_namedrop"))
+        let mut hook = crate::binary::namedrop()
             .args(["hook", "user-prompt-submit", "--state-directory"])
             .arg(&self.directory.state)
             .env_clear()
@@ -2507,11 +3539,11 @@ impl Space {
     /// Reconcile at `now_ms`, with every pane idle. The drain report's
     /// earliest due time, when it must run again with no other event.
     /// The lead pane's runtime with `clock`.
-    fn runtime_at<'a>(&'a self, clock: &'a At) -> LifecycleRuntime<'a, FakeHerdr, At, SequenceIds> {
+    fn runtime_at<'a>(&'a self, clock: &'a At) -> LifecycleRuntime<'a, FakeMux, At, SequenceIds> {
         let runtime = self.runtime("pane-lead");
         LifecycleRuntime {
             clock,
-            herdr: runtime.herdr,
+            mux: runtime.mux,
             ids: runtime.ids,
             state_directory: runtime.state_directory,
             home_directory: runtime.home_directory,
@@ -3024,7 +4056,7 @@ impl Space {
     fn real_runtime<'a>(
         &'a self,
         pane: &'a str,
-    ) -> LifecycleRuntime<'a, FakeHerdr, namedrop::SystemClock, SequenceIds> {
+    ) -> LifecycleRuntime<'a, FakeMux, namedrop::SystemClock, SequenceIds> {
         LifecycleRuntime {
             state_directory: &self.directory.state,
             home_directory: Some(&self.directory.home),
@@ -3033,7 +4065,7 @@ impl Space {
             workspace_id: None,
             current_pane_id: Some(pane),
             session_socket_id: "socket-a",
-            herdr: &self.herdr,
+            mux: &self.herdr.space,
             clock: &namedrop::SystemClock,
             ids: &self.ids,
         }
@@ -4287,6 +5319,22 @@ impl Space {
             .next_due_ms()
     }
 
+    /// Each pane workspace-2's reconcile discovers, with its session.
+    fn workspace_2_panes(&self) -> Vec<(String, Option<String>)> {
+        namedrop::discover_worktree_for_workspace(&*self.herdr.space, "workspace-2")
+            .unwrap()
+            .panes
+            .iter()
+            .map(|pane| {
+                (
+                    pane.pane_id.clone(),
+                    pane.agent_session_id()
+                        .map(|session| session.as_str().to_owned()),
+                )
+            })
+            .collect()
+    }
+
     /// Whether Herdr lists the reviewer's pane.
     fn reviewer_pane_gone(&self, gone: bool) {
         self.herdr.reviewer_gone.store(gone, Ordering::Relaxed);
@@ -4390,6 +5438,14 @@ fn a_pane_moved_to_another_workspace_loses_its_held_answer_only_once_it_closes()
     space.settle_attempt(&ask);
     space.reviewer_pane_moved_at(IDLE);
     assert!(!space.reviewer_bound());
+    assert_eq!(
+        space.workspace_2_panes(),
+        [(
+            "pane-elsewhere".to_owned(),
+            Some("session-reviewer".to_owned())
+        )],
+        "fixture precondition: the fixture lists the moved pane in workspace-2 until it closes"
+    );
     let long_after = IDLE + 3 * UNBOUND_GRACE_MS;
     assert_eq!(space.observe_at(IDLE + UNBOUND_GRACE_MS), None);
     assert_eq!(space.observe_workspace_2_at(IDLE + UNBOUND_GRACE_MS), None);
@@ -4404,6 +5460,11 @@ fn a_pane_moved_to_another_workspace_loses_its_held_answer_only_once_it_closes()
 
     let closed = long_after + 1;
     space.moved_pane_closed_at(closed);
+    assert_eq!(
+        space.workspace_2_panes(),
+        [],
+        "fixture precondition: the fixture stops listing the moved pane once it closes"
+    );
     let lost_at = closed + UNBOUND_GRACE_MS;
     assert_eq!(space.observe_at(closed), Some(lost_at));
     assert!(!space.disposition_warning_ever_opened());
@@ -5244,7 +6305,7 @@ impl Space {
         let output = self
             .hosted("sh")
             .args(["-c", &format!(r#""$0" {rest}"#)])
-            .arg(env!("CARGO_BIN_EXE_namedrop"))
+            .arg(crate::binary::namedrop_path())
             .output()
             .unwrap();
         assert!(output.status.success(), "{line}: {output:?}");
@@ -5446,8 +6507,8 @@ fn a_held_pointer_turn_leaves_the_delivery_open_and_shows_the_way_back() {
         armed.contains(
             "If it ends while background work you started this turn runs, Namedrop holds your \
              final message, and your final message in the turn that work's notice starts is the \
-             reply. If the notice arrives during another turn, or another delivery reaches the \
-             turn it starts, answer with the line Namedrop shows."
+             reply. Whenever a later turn shows a line to answer this delivery, answer with that \
+             line."
         ),
         "{armed}"
     );
@@ -5831,6 +6892,155 @@ fn a_claude_stop_with_background_agents_running_takes_mail_queued_during_the_tur
     assert_eq!(typed[0]["untrusted_body"], "Is the helper done?");
 }
 
+/// The prompt hook itself starts the mailbox wake once it sent a mention, as
+/// the wrapper's backgrounded wake did before, and the wake drains the space
+/// that wake drained: here the hook names no space, so the wake finds it from
+/// its directory. The mention reaches its idle recipient with no other
+/// command.
+#[test]
+fn the_prompt_hook_wakes_the_space_its_mention_went_to() {
+    let space = Space::new();
+    let mut command = space.command();
+    command.env("CLAUDE_CODE_SESSION_ID", "session-reviewer");
+    let mut hook = space.start_reviewer_prompt_in(command, "@lead Is the build green?");
+    let output: Value = serde_json::from_str(&hook.output()).unwrap();
+    assert_eq!(output["reason"], namedrop::MESSAGE_SENT, "{output}");
+    hook.wait();
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while space.prompted_by_binary("pane-lead").is_empty() && std::time::Instant::now() < until {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let typed = space.prompted_by_binary("pane-lead");
+    assert_eq!(typed.len(), 1, "{typed:?}");
+    assert_eq!(typed[0]["untrusted_body"], "@lead Is the build green?");
+}
+
+/// A Herdr pane on Herdr's default socket names its space and no socket. The
+/// prompt hook's wake keeps that space, as the wrapper's backgrounded wake
+/// inherited it, so the mention reaches its recipient even where Herdr places
+/// the directory in no space.
+#[test]
+fn the_prompt_hook_s_wake_keeps_a_space_named_without_a_socket() {
+    let space = Space::new();
+    fs::write(space.directory.root.join("default-socket"), "socket-a").unwrap();
+    fs::write(space.directory.root.join("no-checkout"), "").unwrap();
+    let mut command = space.command();
+    command
+        .env_remove("HERDR_SOCKET_PATH")
+        .env("HERDR_WORKSPACE_ID", "workspace-1")
+        .env("HERDR_PANE_ID", "pane-reviewer")
+        .env("CLAUDE_CODE_SESSION_ID", "session-reviewer");
+    let mut hook = space.start_reviewer_prompt_in(command, "@lead Is the build green?");
+    let output: Value = serde_json::from_str(&hook.output()).unwrap();
+    assert_eq!(output["reason"], namedrop::MESSAGE_SENT, "{output}");
+    hook.wait();
+    let typed = space.prompted_by_binary("pane-lead");
+    assert_eq!(typed.len(), 1, "{typed:?}");
+    assert_eq!(typed[0]["untrusted_body"], "@lead Is the build green?");
+}
+
+/// The Stop worker wakes the space its hook's home named, which `CapturedStop`
+/// carries, and not one its environment names: a Rex block's worker keeps the
+/// block's stale Herdr names. The send's own mailbox worker is gone before the
+/// Stop, so only the Stop's wake can deliver the mail.
+#[test]
+fn a_stop_worker_wakes_the_space_its_hook_named_and_not_an_inherited_one() {
+    let space = Space::new();
+    fs::write(space.directory.root.join("reviewer-status"), "working").unwrap();
+    fs::write(
+        space.directory.root.join("reviewer-screen"),
+        include_str!("fixtures/between-turns/claude-2.1.322-waiting-empty.ansi"),
+    )
+    .unwrap();
+    let summary: Value = serde_json::from_str(
+        include_str!("fixtures/final-reply/claude-2.1.319-blocked-stop.jsonl")
+            .lines()
+            .nth(2)
+            .unwrap(),
+    )
+    .unwrap();
+    space.append_transcript(&[]);
+    namedrop::turn_phase::record(
+        &space.directory.state,
+        "socket-a",
+        "session-reviewer",
+        namedrop::turn_phase::TurnEdge::Prompt,
+        now_ms(),
+    );
+    let sent = space
+        .command()
+        .arg("--plugin-state")
+        .arg(&space.directory.state)
+        .args([
+            "send",
+            "--herdr-socket",
+            "socket-a",
+            "--herdr-workspace",
+            "workspace-1",
+        ])
+        .args(["--herdr-pane", "pane-lead", "--input-json"])
+        .arg(json!({"request_id":"ask","source":"@reviewer Is the helper done?"}).to_string())
+        .output()
+        .unwrap();
+    assert!(sent.status.success(), "{sent:?}");
+    let lock = namedrop::status_queue::directory(&space.directory.state, "socket-a", "workspace-1")
+        .join("worker.lock");
+    let started = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !lock.exists() {
+        assert!(
+            std::time::Instant::now() < started,
+            "the send started no mailbox worker"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while fs::File::open(&lock).is_ok_and(|file| file.try_lock().is_err()) {
+        assert!(
+            std::time::Instant::now() < until,
+            "the send's mailbox worker still runs"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(space.prompted_by_binary("pane-reviewer").is_empty());
+
+    let transcript_end = fs::metadata(space.transcript()).unwrap().len();
+    space.append_transcript(std::slice::from_ref(&summary));
+    let captured = json!({
+        "input": {"hook_event_name":"Stop","session_id":"session-reviewer",
+                  "prompt_id":"reviewer-turn","last_assistant_message":"Started the helper.",
+                  "transcript_path":space.transcript(),
+                  "background_tasks":[{"id":"helper","status":"running"}]},
+        "socket": "socket-a",
+        "space": "workspace-1",
+        "ended_at_ms": now_ms(),
+        "transcript_end": transcript_end,
+        "settles": false,
+    });
+    let mut worker = space
+        .command()
+        .env("HERDR_WORKSPACE_ID", "workspace-stale")
+        .args(["hook", "stop-worker", "--state-directory"])
+        .arg(&space.directory.state)
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    worker
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(captured.to_string().as_bytes())
+        .unwrap();
+    assert!(worker.wait().unwrap().success());
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while space.prompted_by_binary("pane-reviewer").is_empty() && std::time::Instant::now() < until
+    {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let typed = space.prompted_by_binary("pane-reviewer");
+    assert_eq!(typed.len(), 1, "{typed:?}");
+    assert_eq!(typed[0]["untrusted_body"], "Is the helper done?");
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -5910,7 +7120,12 @@ fn the_answer_to_a_mention_typed_in_a_claude_pane_goes_into_a_box_cleared_of_the
     let mut hook = space.start_reviewer_prompt_in(command, "@lead Is the build green?");
     let output: Value = serde_json::from_str(&hook.output()).unwrap();
     assert_eq!(output["decision"], "block", "{output}");
+    // The hook's own wake has typed the mention to the lead by the time the
+    // hook and its detached processes are gone.
     hook.wait();
+    let asked = space.prompted_by_binary("pane-lead");
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    let asked = &asked[0];
     // The box as Claude Code draws it with the mention back in it.
     let drawn: Vec<&str> = include_str!("fixtures/between-turns/claude-2.1.322-waiting-draft.ansi")
         .lines()
@@ -5942,8 +7157,6 @@ fn the_answer_to_a_mention_typed_in_a_claude_pane_goes_into_a_box_cleared_of_the
     )
     .unwrap();
 
-    namedrop::drain_mailboxes(&space.runtime("pane-lead")).unwrap();
-    let asked = space.herdr.envelope_for("pane-lead");
     let answered = space
         .command()
         .arg("--plugin-state")
@@ -6033,6 +7246,25 @@ fn a_prompt_whose_hook_cannot_check_its_pane_still_starts_the_turn() {
     command.env("HERDR_PANE_ID", "pane-reviewer");
     space
         .start_reviewer_prompt_in(command, "Run the tests.")
+        .wait();
+    assert!(
+        matches!(
+            space.reviewer_phase(),
+            Some(namedrop::turn_phase::TurnPhase::Prompted { .. })
+        ),
+        "{:?}",
+        space.reviewer_phase()
+    );
+}
+
+/// The prompt hook records the turn's start under `NAMEDROP_ENDPOINT` alone,
+/// keyed by the same endpoint as under Herdr.
+#[test]
+fn a_prompt_under_neutral_names_starts_the_turn() {
+    let space = Space::new();
+    space.reviewer_edge(namedrop::turn_phase::TurnEdge::Stop, now_ms() - 1_000);
+    space
+        .start_reviewer_prompt_in(neutral(&space, "pane-reviewer"), "Run the tests.")
         .wait();
     assert!(
         matches!(

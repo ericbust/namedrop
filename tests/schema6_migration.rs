@@ -1,10 +1,13 @@
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 
 #[test]
 fn populated_schema_six_histories_migrate_through_the_cli_without_losing_values() {
-    let output = std::process::Command::new("python3")
-        .env("NAMEDROP_TEST_BINARY", env!("CARGO_BIN_EXE_namedrop"))
+    let output = crate::binary::command("python3")
+        .env("NAMEDROP_TEST_BINARY", crate::binary::namedrop_path())
         .arg(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/schema6_migration.py"

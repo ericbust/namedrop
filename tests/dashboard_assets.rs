@@ -1,3 +1,6 @@
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/executable.rs"]
@@ -67,7 +70,7 @@ impl Dashboard {
     }
 
     fn command_named(&self, ui: Option<&Path>, name: &str, human: bool) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_namedrop"));
+        let mut command = crate::binary::namedrop();
         command
             .current_dir(self.root())
             .env("TMPDIR", self.root())
@@ -219,16 +222,41 @@ impl Response {
     }
 
     fn security(&self) -> BTreeMap<&str, &str> {
+        let mut headers = self.protection();
+        headers.insert("Cache-Control", self.headers["Cache-Control"].as_str());
+        headers
+    }
+
+    /// The security headers apart from caching, which differs by kind of file.
+    fn protection(&self) -> BTreeMap<&str, &str> {
         [
             "Content-Security-Policy",
             "X-Frame-Options",
             "X-Content-Type-Options",
             "Referrer-Policy",
-            "Cache-Control",
         ]
         .into_iter()
         .map(|name| (name, self.headers[name].as_str()))
         .collect()
+    }
+
+    /// A built-in file with a digest in its name is kept by the browser.
+    fn kept_for_good(&self, path: &str) {
+        let name = path.rsplit('/').next().unwrap();
+        let stem = name.rsplit_once('.').unwrap().0;
+        let (_, digest) = stem.split_at(stem.len().saturating_sub(9));
+        assert!(
+            digest.len() == 9
+                && digest.starts_with('-')
+                && digest[1..]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'),
+            "{path} has no digest in its name, so it must not be cached for good"
+        );
+        assert_eq!(
+            self.headers["Cache-Control"], "private, max-age=31536000, immutable",
+            "{path}"
+        );
     }
 }
 
@@ -357,7 +385,100 @@ fn default_server_serves_built_channels_assets() {
                 "text/css; charset=utf-8"
             }
         );
-        assert_eq!(asset.security(), page.security());
+        assert_eq!(asset.protection(), page.protection());
+        asset.kept_for_good(path);
+    }
+    assert_eq!(
+        page.headers["Cache-Control"], "no-store",
+        "the page names the current files, so it is never kept"
+    );
+}
+
+#[test]
+fn the_page_names_its_diagram_code_and_the_server_serves_all_of_it_apart_from_the_page() {
+    let dashboard = Dashboard::new();
+    dashboard.open(None);
+    let page = dashboard.get("/", true);
+    page.status(200);
+    let bundle = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/dashboard/channels");
+    let names = |directory: &str| -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(bundle.join(directory))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    };
+    let script_name = names("assets")
+        .into_iter()
+        .find(|name| name.ends_with(".js"))
+        .unwrap();
+    let script = fs::read_to_string(bundle.join("assets").join(&script_name)).unwrap();
+    let start = script
+        .find("/diagram/draw-")
+        .expect("the page's script names the diagram code");
+    let entry = &script[start..start + script[start..].find(".js").unwrap() + ".js".len()];
+    let files = names("diagram");
+    assert!(
+        files.contains(&entry.trim_start_matches("/diagram/").to_owned()),
+        "{entry} is not among {files:?}"
+    );
+    for name in &files {
+        let path = format!("/diagram/{name}");
+        let served = dashboard.get(&path, false);
+        served.status(200);
+        let stored = fs::read(bundle.join("diagram").join(name)).unwrap();
+        assert_eq!(served.body, stored, "{path}");
+        assert_eq!(
+            served.headers["Content-Type"], "text/javascript; charset=utf-8",
+            "{path}"
+        );
+        assert_eq!(served.protection(), page.protection(), "{path}");
+        served.kept_for_good(&path);
+        // A file that named the page's script would be renamed with every
+        // change to the page, and all 92 would be committed again.
+        let text = String::from_utf8_lossy(&stored);
+        assert!(
+            !text.contains("/assets/") && !text.contains(&script_name),
+            "{path} depends on the page's own files"
+        );
+    }
+}
+
+/// Every file of the built-in app, as a path the server serves it at.
+fn embedded_paths(directory: &Path, root: &Path, found: &mut Vec<String>) {
+    for entry in fs::read_dir(directory).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            embedded_paths(&path, root, found);
+        } else {
+            found.push(format!(
+                "/{}",
+                path.strip_prefix(root).unwrap().to_str().unwrap()
+            ));
+        }
+    }
+}
+
+#[test]
+fn every_built_in_file_kept_for_good_has_a_digest_in_its_name() {
+    let dashboard = Dashboard::new();
+    dashboard.open(None);
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/dashboard/channels");
+    let mut paths = Vec::new();
+    embedded_paths(&root, &root, &mut paths);
+    assert!(paths.contains(&"/index.html".to_owned()), "{paths:?}");
+    assert!(paths.len() > 90, "{}", paths.len());
+    for path in paths.iter().filter(|path| *path != "/index.html") {
+        let served = dashboard.get(path, false);
+        served.status(200);
+        // An unhashed file sent with this header would stay in browsers
+        // after its content changed.
+        served.kept_for_good(path);
+    }
+    for path in ["/", "/index.html"] {
+        let page = dashboard.get(path, true);
+        assert_eq!(page.headers["Cache-Control"], "no-store", "{path}");
     }
 }
 
@@ -522,6 +643,94 @@ fn server_reuse_requires_the_same_canonical_ui_setting() {
 }
 
 #[test]
+fn with_tailscale_access_on_another_ui_restarts_the_server_and_a_killed_server_returns_with_it() {
+    let dashboard = Dashboard::new();
+    let custom = dashboard.ui("custom");
+    dashboard.open(None);
+    let first = dashboard.info();
+    fs::write(
+        dashboard.state().join("dashboard/tailscale.json"),
+        serde_json::json!({
+            "version": 1,
+            "state": "enabled",
+            "handler": {
+                "dns_name": "device.tail123.ts.net",
+                "https_port": 443,
+                "owner_login": "owner@example.com",
+                "backend_port": first["port"],
+            },
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let session = fs::read_to_string(dashboard.state().join("dashboard/session")).unwrap();
+    let request = dashboard.state().join("dashboard/ui-request.json");
+
+    let switched = dashboard.open(Some(&custom));
+    assert_eq!(switched["server"], "restarted", "{switched}");
+    let second = dashboard.info();
+    assert_ne!(second["pid"], first["pid"]);
+    assert_eq!(second["port"], first["port"], "the handler's port is kept");
+    assert_eq!(
+        second["ui"]["Directory"],
+        fs::canonicalize(&custom).unwrap().to_str().unwrap()
+    );
+    assert_eq!(dashboard.get("/", true).body, b"<h1>custom</h1>");
+    assert_eq!(
+        fs::read_to_string(dashboard.state().join("dashboard/session")).unwrap(),
+        session,
+        "a signed-in device stays signed in"
+    );
+    assert!(!request.exists(), "the request is spent");
+    assert_eq!(dashboard.open(Some(&custom))["server"], "running");
+
+    // The server is killed, and Herdr's startup command brings it back.
+    let killed = second["pid"].as_u64().unwrap();
+    assert!(
+        Command::new("kill")
+            .args(["-KILL", &killed.to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let returned = eventually(|| {
+        let _ = crate::binary::namedrop()
+            .arg("--plugin-state")
+            .arg(dashboard.state())
+            .args(["--herdr-socket", "assets-test", "--herdr-workspace", "w1"])
+            .arg("reconcile")
+            .env("TMPDIR", dashboard.root())
+            .env("HOME", dashboard.root())
+            .env("XDG_CONFIG_HOME", dashboard.root().join("config"))
+            .env_remove("HERDR_PANE_ID")
+            .env_remove("HERDR_WORKSPACE_ID")
+            .env_remove("HERDR_SOCKET_PATH")
+            .env_remove("HERDR_PLUGIN_STATE_DIR")
+            .env("HERDR_BIN_PATH", dashboard.root().join("herdr"))
+            .output()
+            .unwrap();
+        let info = dashboard.info();
+        (info["pid"] != killed && connect_ok(first["port"].as_u64().unwrap() as u16))
+            .then_some(info)
+    })
+    .expect("the killed server returns");
+    assert_eq!(
+        returned["ui"], second["ui"],
+        "with the app that was switched to"
+    );
+    assert_eq!(dashboard.get("/", true).body, b"<h1>custom</h1>");
+
+    let back = dashboard.open(None);
+    assert_eq!(back["server"], "restarted", "{back}");
+    assert_eq!(dashboard.info()["ui"], "Embedded");
+    assert_eq!(dashboard.info()["port"], first["port"]);
+}
+
+fn connect_ok(port: u16) -> bool {
+    TcpStream::connect(("127.0.0.1", port)).is_ok()
+}
+
+#[test]
 fn concurrent_first_opens_choose_one_ui_and_reject_the_other() {
     let dashboard = Dashboard::new();
     let a = dashboard.ui("a");
@@ -627,7 +836,7 @@ fn upgrade_handoff_keeps_directory_port_and_browser_session() {
     let runtime = dashboard.state().join("runtime");
     fs::create_dir_all(runtime.join("release")).unwrap();
     copy_executable(
-        env!("CARGO_BIN_EXE_namedrop"),
+        crate::binary::namedrop_path(),
         runtime.join("release/namedrop"),
     );
     symlink("release", runtime.join("current")).unwrap();
@@ -729,7 +938,7 @@ fn selected_startup_fixture(dashboard: &Dashboard, startup: &str) {
         runtime.join("release/namedrop"),
         format!(
             "#!/bin/sh\ncase \"$*\" in *--help*) ;; *dashboard-server*) {startup};; esac\nexec '{}' \"$@\"\n",
-            env!("CARGO_BIN_EXE_namedrop")
+            crate::binary::namedrop_path()
         ),
     );
     symlink("release", runtime.join("current")).unwrap();
@@ -738,7 +947,7 @@ fn selected_startup_fixture(dashboard: &Dashboard, startup: &str) {
         format!(
             "#!/bin/sh\nrm '{}'\nexec '{}' \"$@\"\n",
             runtime.join("namedrop").display(),
-            env!("CARGO_BIN_EXE_namedrop")
+            crate::binary::namedrop_path()
         ),
     );
 }
@@ -1001,7 +1210,7 @@ fn fix_two_handoff_resolves_and_probes_the_release_after_acquiring_the_runtime_g
         format!("#!/bin/sh\ntouch '{}'\nexit 1\n", premature_probe.display()),
     );
     copy_executable(
-        env!("CARGO_BIN_EXE_namedrop"),
+        crate::binary::namedrop_path(),
         runtime.join("release/namedrop"),
     );
     symlink("before-update", runtime.join("current")).unwrap();
@@ -1071,7 +1280,7 @@ fn fix_three_legacy_stub(dashboard: &Dashboard, fail_start: bool) -> PathBuf {
     let release = dashboard.state().join("runtime/legacy");
     fs::create_dir_all(&release).unwrap();
     let executable = release.join("namedrop");
-    let target = serde_json::to_string(env!("CARGO_BIN_EXE_namedrop")).unwrap();
+    let target = serde_json::to_string(crate::binary::namedrop_path()).unwrap();
     let marker = serde_json::to_string(
         dashboard
             .root()
@@ -1120,7 +1329,7 @@ fn fix_three_legacy_stub_rolls_back_embedded_and_custom_ui() {
         let _events = fix_two_subscribe(&dashboard, &opened);
         let executable = fix_three_legacy_stub(&dashboard, false);
         for flag in ["--inherit-claim", "--ui"] {
-            let output = Command::new(&executable)
+            let output = crate::binary::command(&executable)
                 .args(["dashboard-server", flag, "--help"])
                 .output()
                 .unwrap();
@@ -1179,7 +1388,7 @@ fn fix_three_inherited_successor_can_release_its_claim_for_a_legacy_rollback() {
     let runtime = dashboard.state().join("runtime");
     fs::create_dir_all(runtime.join("current-release")).unwrap();
     copy_executable(
-        env!("CARGO_BIN_EXE_namedrop"),
+        crate::binary::namedrop_path(),
         runtime.join("current-release/namedrop"),
     );
     symlink("current-release", runtime.join("current")).unwrap();
@@ -1286,7 +1495,7 @@ fn fix_three_package_switch_during_probe_starts_the_probed_executable() {
     let runtime = dashboard.state().join("runtime");
     fs::create_dir_all(runtime.join("pinned")).unwrap();
     fix_three_legacy_stub(&dashboard, false);
-    let target = serde_json::to_string(env!("CARGO_BIN_EXE_namedrop")).unwrap();
+    let target = serde_json::to_string(crate::binary::namedrop_path()).unwrap();
     let marker =
         serde_json::to_string(dashboard.root().join("probe-entered").to_str().unwrap()).unwrap();
     let release =
@@ -1378,7 +1587,7 @@ fn fix_three_current_successor_stays_pinned_when_its_probe_changes_current() {
     let runtime = dashboard.state().join("runtime");
     fs::create_dir_all(runtime.join("new")).unwrap();
     fix_three_legacy_stub(&dashboard, false);
-    copy_executable(env!("CARGO_BIN_EXE_namedrop"), runtime.join("new/real"));
+    copy_executable(crate::binary::namedrop_path(), runtime.join("new/real"));
     let started = dashboard.root().join("pinned-wrapper-started");
     write_executable(
         runtime.join("new/namedrop"),
@@ -1428,9 +1637,8 @@ fn fix_forward_stalled_asset_writer_times_out() {
             .unwrap()
             .filter_map(Result::ok)
             .filter(|task| {
-                !fs::read_to_string(task.path().join("comm"))
-                    .unwrap_or_default()
-                    .starts_with("channel-router-")
+                let name = fs::read_to_string(task.path().join("comm")).unwrap_or_default();
+                !name.starts_with("channel-router-") && !name.starts_with("agent-launches")
             })
             .count()
     };
@@ -1544,7 +1752,7 @@ fn replaced_ui_ancestor_symlinks_are_not_followed() {
 }
 
 fn inherited_server(dashboard: &Dashboard) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_namedrop"));
+    let mut command = crate::binary::namedrop();
     command
         .args(["--plugin-state"])
         .arg(dashboard.state())
@@ -1691,7 +1899,7 @@ fn fix_four_current_handoff_keeps_server_log_lines_prefixed() {
     let runtime = dashboard.state().join("runtime");
     fs::create_dir_all(runtime.join("release")).unwrap();
     copy_executable(
-        env!("CARGO_BIN_EXE_namedrop"),
+        crate::binary::namedrop_path(),
         runtime.join("release/namedrop"),
     );
     symlink("release", runtime.join("current")).unwrap();
@@ -1863,7 +2071,7 @@ fn fix_four_b_custom_ui_waits_then_refuses_an_embedded_legacy_successor() {
         format!(
             "#!/bin/sh\nrm '{}'\nexec '{}' \"$@\"\n",
             runtime.join("namedrop").display(),
-            env!("CARGO_BIN_EXE_namedrop")
+            crate::binary::namedrop_path()
         ),
     );
     symlink("release", runtime.join("current")).unwrap();

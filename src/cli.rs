@@ -1,4 +1,4 @@
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
@@ -45,20 +45,227 @@ pub enum ResultFormat {
 }
 
 /// Explicit transport context for permission-matchable direct invocations.
-/// Omitted values retain the existing Herdr environment behavior.
+/// Each flag has a neutral spelling and its Herdr one, and an omitted value
+/// comes from the environment (`crate::locator`).
 #[derive(Debug, Default, Args)]
 pub struct RuntimeOptions {
     #[arg(long, value_name = "PATH")]
     pub plugin_state: Option<PathBuf>,
-    #[arg(long, global = true, value_name = "SOCKET")]
-    pub herdr_socket: Option<String>,
-    #[arg(long, global = true, value_name = "WORKSPACE")]
-    pub herdr_workspace: Option<String>,
-    #[arg(long, global = true, value_name = "PANE")]
-    pub herdr_pane: Option<String>,
+    #[arg(
+        long,
+        visible_alias = "herdr-socket",
+        global = true,
+        value_name = "ENDPOINT"
+    )]
+    pub endpoint: Option<String>,
+    #[arg(
+        long,
+        visible_alias = "herdr-workspace",
+        global = true,
+        value_name = "SPACE"
+    )]
+    pub space: Option<String>,
+    #[arg(long, visible_alias = "herdr-pane", global = true, value_name = "PANE")]
+    pub pane: Option<String>,
 }
 
+impl RuntimeOptions {
+    /// The location flags, for choosing the home.
+    pub fn flags(&self) -> crate::mux::home::Flags<'_> {
+        crate::mux::home::Flags {
+            endpoint: self.endpoint.as_deref(),
+            space: self.space.as_deref(),
+            pane: self.pane.as_deref(),
+            plugin_state: self.plugin_state.as_deref(),
+        }
+    }
+}
+
+/// Each help line that names Herdr or its popups and plugin, and the line a
+/// Rex home shows in its place. Clap drops a doc comment's final period, so
+/// neither column has one.
+const REX_HELP: [(&str, &str); 14] = [
+    (
+        "Name and @mention AI agents and terminal panes to collaborate inside Herdr",
+        "Name and @mention AI agents and terminal panes to collaborate inside Rex",
+    ),
+    (
+        "Activate Namedrop for this Herdr space after confirmation",
+        "Activate Namedrop for this Rex session after confirmation",
+    ),
+    (
+        "Deactivate Namedrop for this Herdr space while preserving its data",
+        "Deactivate Namedrop for this Rex session while preserving its data",
+    ),
+    (
+        "Create and manage agent names in this Herdr space",
+        "Create and manage agent names in this Rex session",
+    ),
+    (
+        "Pause or resume all collaboration in this Herdr space",
+        "Pause or resume all collaboration in this Rex session",
+    ),
+    (
+        "Bind a name to a live Herdr pane",
+        "Bind a name to a live Rex pane",
+    ),
+    (
+        "Open a naming, name-management, Doctor, agent status, or tour popup",
+        "Open a naming, name-management, Doctor, agent status, or tour screen",
+    ),
+    (
+        "Recover after a plugin restart; ambiguous in-flight delivery attempts are held",
+        "Recover after a restart; ambiguous in-flight delivery attempts are held",
+    ),
+    (
+        "Plugin-owned state directory for this installed hook",
+        "Namedrop's state directory for this installed hook",
+    ),
+    (
+        "Permanently purge this space's Namedrop data after confirmation",
+        "Permanently purge this Rex session's Namedrop data after confirmation",
+    ),
+    (
+        "Open Channels for this workspace in your browser",
+        "Open Channels for this Rex session in your browser",
+    ),
+    (
+        "List this space's names and live agents",
+        "List this Rex session's names and live agents",
+    ),
+    (
+        "Let agents in other workspaces run commands in a named terminal",
+        "Let agents in other Rex sessions run commands in a named terminal",
+    ),
+    (
+        "Take back commands from other workspaces for a named terminal",
+        "Take back commands from other Rex sessions for a named terminal",
+    ),
+];
+
+/// The commands a Rex home hides, because only Herdr runs them, and the line
+/// each shows when asked for its help.
+const REX_HIDDEN: [(&str, &str); 2] = [
+    (
+        "Handle one Herdr lifecycle event",
+        "Handle one lifecycle event; Rex sends none",
+    ),
+    (
+        "Add Namedrop's popup shortcuts without replacing any existing binding",
+        "Unused on Rex, whose shortcuts come from namedrop.lua",
+    ),
+];
+
 impl Cli {
+    pub fn command_for(kind: crate::mux::MuxKind) -> clap::Command {
+        fn rex(command: clap::Command) -> clap::Command {
+            let about = command.get_about().map(|text| text.to_string());
+            let command = match REX_HELP
+                .iter()
+                .find(|(herdr, _)| about.as_deref() == Some(*herdr))
+            {
+                Some((_, rex)) => command.about(*rex),
+                None => command,
+            };
+            let command = match REX_HIDDEN
+                .iter()
+                .find(|(herdr, _)| about.as_deref() == Some(*herdr))
+            {
+                Some((_, rex)) => command.about(*rex).hide(true),
+                None => command,
+            };
+            command
+                .mut_args(|arg| {
+                    let help = arg.get_help().map(|text| text.to_string());
+                    let arg = match REX_HELP
+                        .iter()
+                        .find(|(herdr, _)| help.as_deref() == Some(*herdr))
+                    {
+                        Some((_, rex)) => arg.help(*rex),
+                        None => arg,
+                    };
+                    match arg.get_id().as_str() {
+                        "endpoint" => arg.visible_alias(None).alias("herdr-socket"),
+                        "space" => arg.visible_alias(None).alias("herdr-workspace"),
+                        "pane" => arg.visible_alias(None).alias("herdr-pane"),
+                        _ => arg,
+                    }
+                })
+                .mut_subcommands(rex)
+        }
+        let command = Self::command();
+        match kind {
+            crate::mux::MuxKind::Herdr => command,
+            crate::mux::MuxKind::Rex => rex(command),
+        }
+    }
+
+    pub fn try_parse_at(inherited: &dyn crate::mux::home::Inherited) -> Result<Self, clap::Error> {
+        let parsed = Self::try_parse();
+        if parsed.is_ok() {
+            return parsed;
+        }
+        let args: Vec<_> = std::env::args_os().collect();
+        let endpoint = args.iter().enumerate().find_map(|(i, arg)| {
+            let text = arg.to_str()?;
+            text.strip_prefix("--endpoint=")
+                .or_else(|| text.strip_prefix("--herdr-socket="))
+                .map(str::to_owned)
+                .or_else(|| {
+                    matches!(text, "--endpoint" | "--herdr-socket")
+                        .then(|| args.get(i + 1)?.to_str().map(str::to_owned))
+                        .flatten()
+                })
+        });
+        let flags = crate::mux::home::Flags {
+            endpoint: endpoint.as_deref(),
+            ..Default::default()
+        };
+        if crate::mux::home::resolve(&flags, inherited)
+            .is_ok_and(|home| home.kind() == crate::mux::MuxKind::Rex)
+        {
+            use clap::FromArgMatches;
+            Self::command_for(crate::mux::MuxKind::Rex)
+                .try_get_matches_from(args)
+                .and_then(|matches| Self::from_arg_matches(&matches))
+        } else {
+            parsed
+        }
+    }
+
+    pub fn install_options(&self) -> Option<(bool, bool)> {
+        match self.command {
+            Command::Install {
+                print_config,
+                remove,
+            } => Some((print_config, remove)),
+            _ => None,
+        }
+    }
+    pub fn explicit_state(&self) -> Option<&Path> {
+        self.subagent_hook()
+            .map(|(s, _)| s)
+            .or_else(|| self.stop_hook_state_directory())
+            .or_else(|| self.stop_worker_state_directory())
+            .or_else(|| self.user_prompt_submit_hook_state_directory())
+            .or_else(|| self.mailbox_wake_hook_state_directory())
+            .or_else(|| self.session_start_hook_state_directory())
+            .or(self.runtime.plugin_state.as_deref())
+    }
+    pub fn quiet_retirement(&self) -> bool {
+        matches!(
+            self.command,
+            Command::Hook { .. }
+                | Command::Rex {
+                    command: RexCommand::Bridge | RexCommand::Ensure { .. }
+                }
+                | Command::Relay {
+                    command: RelayCommand::Worker { .. }
+                }
+                | Command::DashboardServer { .. }
+                | Command::DashboardObserverGuard { .. }
+        )
+    }
     pub fn subagent_hook(&self) -> Option<(&Path, crate::AgentRuntime)> {
         match &self.command {
             Command::Hook {
@@ -185,6 +392,67 @@ impl Cli {
         )
     }
 
+    pub fn is_rex_bridge(&self) -> bool {
+        matches!(
+            self.command,
+            Command::Rex {
+                command: RexCommand::Bridge
+            }
+        )
+    }
+
+    pub fn is_rex_sessions(&self) -> bool {
+        matches!(
+            self.command,
+            Command::Rex {
+                command: RexCommand::Sessions
+            }
+        )
+    }
+
+    pub fn rex_action(&self) -> Option<&str> {
+        match &self.command {
+            Command::Rex {
+                command: RexCommand::Action { name },
+            } => Some(name),
+            _ => None,
+        }
+    }
+
+    pub fn rex_ensure_from_server(&self) -> bool {
+        matches!(
+            self.command,
+            Command::Rex {
+                command: RexCommand::Ensure { from_server: true }
+            }
+        )
+    }
+
+    /// The `host_id` of `namedrop relay accept`, and the caller's host as
+    /// its principal names it.
+    pub fn relay_accept_host_id(&self) -> Option<(&str, Option<&str>)> {
+        match &self.command {
+            Command::Relay {
+                command:
+                    RelayCommand::Accept {
+                        host_id,
+                        caller_host,
+                    },
+            } => Some((host_id, caller_host.as_deref())),
+            _ => None,
+        }
+    }
+
+    /// The label of `namedrop relay worker`.
+    pub fn relay_worker_host(&self) -> Option<&str> {
+        match &self.command {
+            Command::Relay {
+                command: RelayCommand::Worker { host },
+            } => Some(host),
+            _ => None,
+        }
+    }
+
     pub fn is_agent_status_worker_hook(&self) -> bool {
         matches!(
             self.command,
@@ -261,6 +529,13 @@ impl Cli {
         }
     }
 
+    pub fn dashboard_idle(&self) -> Option<crate::dashboard::idle::Stop> {
+        match &self.command {
+            Command::Dashboard(args) => args.idle,
+            _ => None,
+        }
+    }
+
     pub fn dashboard_ui(&self) -> Option<&Path> {
         match &self.command {
             Command::Dashboard(args) => args.ui.as_deref(),
@@ -332,6 +607,13 @@ enum Command {
     Name(NameArgs),
     /// Activate Namedrop for this Herdr space after confirmation.
     Activate,
+    /// Install Namedrop's Rex module and shared agent packages.
+    Install {
+        #[arg(long, conflicts_with = "remove")]
+        print_config: bool,
+        #[arg(long)]
+        remove: bool,
+    },
     /// Deactivate Namedrop for this Herdr space while preserving its data.
     Deactivate,
     /// Inspect collaboration health without changing state.
@@ -412,6 +694,53 @@ enum Command {
         #[command(subcommand)]
         command: HookCommand,
     },
+    /// Rex's long-lived bridge, which Namedrop starts itself.
+    #[command(hide = true)]
+    Rex {
+        #[command(subcommand)]
+        command: RexCommand,
+    },
+    /// The relay between this machine's Namedrop and another's, which
+    /// Namedrop runs itself.
+    #[command(hide = true)]
+    Relay {
+        #[command(subcommand)]
+        command: RelayCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum RelayCommand {
+    /// Decide one `namedrop.relay` call, read from stdin, for the Rex server
+    /// `--endpoint` names, whose `host_id` is `--host-id`.
+    Accept {
+        #[arg(long)]
+        host_id: String,
+        /// The caller's machine, as the server named it in the principal.
+        #[arg(long)]
+        caller_host: Option<String>,
+    },
+    /// Deliver the items queued for the `rex hosts` label `--host`, and
+    /// collect its replies, for the Rex server `--endpoint` names.
+    Worker {
+        #[arg(long)]
+        host: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum RexCommand {
+    /// Survey every block's agent and session without activating or changing state.
+    Sessions,
+    /// Turn one Rex server's events, named by `--endpoint`, into lifecycle work.
+    Bridge,
+    /// Run a Namedrop palette action in this process.
+    Action { name: String },
+    /// Start the bridge only when this process was started by its Rex server.
+    Ensure {
+        #[arg(long, required = true)]
+        from_server: bool,
+    },
 }
 
 impl Command {
@@ -435,6 +764,8 @@ impl Command {
             Self::Reminder { command } => command.operation(),
             Self::Name(_) => "name",
             Self::Activate => "activate",
+            Self::Install { remove: true, .. } => "install.remove",
+            Self::Install { .. } => "install",
             Self::Deactivate => "deactivate",
             Self::Doctor => "doctor",
             Self::Purge => "purge",
@@ -459,6 +790,24 @@ impl Command {
             Self::DashboardServer { .. } => "dashboard.server",
             Self::DashboardObserverGuard { .. } => "dashboard.observer-guard",
             Self::Hook { command } => command.operation(),
+            Self::Rex {
+                command: RexCommand::Bridge,
+            } => "rex.bridge",
+            Self::Rex {
+                command: RexCommand::Sessions,
+            } => "rex.sessions",
+            Self::Rex {
+                command: RexCommand::Action { .. },
+            } => "rex.action",
+            Self::Rex {
+                command: RexCommand::Ensure { .. },
+            } => "rex.ensure",
+            Self::Relay {
+                command: RelayCommand::Accept { .. },
+            } => "relay.accept",
+            Self::Relay {
+                command: RelayCommand::Worker { .. },
+            } => "relay.worker",
         }
     }
 }
@@ -541,6 +890,10 @@ struct DashboardArgs {
     /// Open Channels through Tailscale Serve, or remove its owned handler with off.
     #[arg(long, num_args = 0..=1, default_missing_value = "on", value_parser = ["on", "off"])]
     tailscale: Option<String>,
+    /// Stop the server this long after the last tab closes, or never. Saved
+    /// until you change it. With Tailscale access on, the server never stops.
+    #[arg(long, value_name = "MINUTES|never")]
+    idle: Option<crate::dashboard::idle::Stop>,
     /// Print the URL without opening a browser.
     #[arg(long = "no-open")]
     no_open: bool,
@@ -826,6 +1179,28 @@ mod tests {
             None
         );
         assert!(Cli::try_parse_from(["namedrop", "channels", "--tailscale", "anything"]).is_err());
+    }
+
+    #[test]
+    fn channels_idle_takes_minutes_or_never_and_nothing_else() {
+        use crate::dashboard::idle::Stop;
+        let idle = |args: &[&str]| {
+            Cli::try_parse_from([&["namedrop", "channels"], args].concat())
+                .map(|cli| cli.dashboard_idle())
+        };
+        assert_eq!(idle(&[]).unwrap(), None);
+        assert_eq!(idle(&["--idle", "never"]).unwrap(), Some(Stop::Never));
+        assert_eq!(
+            idle(&["--tailscale", "off", "--idle", "30"]).unwrap(),
+            Some(Stop::AfterMinutes(30.try_into().unwrap()))
+        );
+        for refused in ["0", "soon", "1.5"] {
+            let error = idle(&["--idle", refused]).unwrap_err().to_string();
+            assert!(
+                error.contains("`never` or a whole number of minutes"),
+                "{error}"
+            );
+        }
     }
 
     #[test]

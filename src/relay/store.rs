@@ -1,0 +1,2390 @@
+//! `<state>/relay.sqlite3`: the relay's own state, apart from the main
+//! database, whose schema a relay never changes. Only relay code opens it.
+
+use super::wire::{Lost, Outcome, Reply};
+use crate::StoreError;
+use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
+use std::{fs, os::unix::fs::PermissionsExt, path::Path, time::Duration};
+
+const FILE: &str = "relay.sqlite3";
+const VERSION: u32 = 4;
+/// What version 1 lacks: when a reply for another label was last dropped,
+/// and whether the sender of a reply A let go of was told, so the row
+/// stays as the refusal's tombstone.
+const TO_2: &str = "
+ALTER TABLE conditions ADD COLUMN other_label_at_ms INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE dropped ADD COLUMN told INTEGER NOT NULL DEFAULT 0;
+";
+
+/// What version 2 lacks: on B, the index B's page reads by, and the
+/// replies for each A host it let go of, and on A, what B said it let go
+/// of and what A told the sender, whether B's Automatic Reply Limit
+/// paused an item and its sender was told, the server each cursor and
+/// reply is of, the label whose server another one answers as, and the
+/// marks a capture rewinds to. A row from before is of the first label
+/// that last found its `host_id`, and a capture cursor from before, at the
+/// last relay message it read, is a mark capture never rewinds past.
+const TO_3: &str = "
+ALTER TABLE outbound ADD COLUMN paused INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE outbound ADD COLUMN paused_told INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE conditions ADD COLUMN same_server_as TEXT;
+CREATE TABLE cursors_3 (
+    endpoint TEXT NOT NULL,
+    host_id TEXT NOT NULL,
+    epoch TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    peer TEXT NOT NULL,
+    PRIMARY KEY (endpoint, host_id, peer)
+);
+INSERT INTO cursors_3 SELECT endpoint, host_id, epoch, seq,
+    COALESCE((SELECT MIN(label) FROM peers p WHERE p.host_id = c.host_id), '') FROM cursors c;
+DROP TABLE cursors;
+ALTER TABLE cursors_3 RENAME TO cursors;
+CREATE TABLE collected_3 (
+    endpoint TEXT NOT NULL,
+    host_id TEXT NOT NULL,
+    epoch TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    label TEXT NOT NULL,
+    space TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    remote_message_id TEXT NOT NULL,
+    remote_alias TEXT NOT NULL,
+    thread TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    peer TEXT NOT NULL,
+    PRIMARY KEY (endpoint, host_id, epoch, seq, peer)
+);
+INSERT INTO collected_3 SELECT endpoint, host_id, epoch, seq, label, space, message_id,
+    remote_message_id, remote_alias, thread, created_at_ms,
+    COALESCE((SELECT MIN(p.label) FROM peers p WHERE p.host_id = c.host_id), c.label)
+    FROM collected c;
+DROP TABLE collected;
+ALTER TABLE collected_3 RENAME TO collected;
+CREATE INDEX collected_by_message ON collected (endpoint, message_id);
+CREATE TABLE held_3 (
+    endpoint TEXT NOT NULL,
+    host_id TEXT NOT NULL,
+    remote_message_id TEXT NOT NULL,
+    epoch TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    label TEXT NOT NULL,
+    space TEXT NOT NULL,
+    thread TEXT NOT NULL,
+    re TEXT NOT NULL,
+    remote_alias TEXT NOT NULL,
+    text TEXT NOT NULL,
+    told INTEGER NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    peer TEXT NOT NULL,
+    PRIMARY KEY (endpoint, host_id, remote_message_id, peer)
+);
+INSERT INTO held_3 SELECT endpoint, host_id, remote_message_id, epoch, seq, label, space,
+    thread, re, remote_alias, text, told, created_at_ms,
+    COALESCE((SELECT MIN(p.label) FROM peers p WHERE p.host_id = h.host_id), h.label)
+    FROM held h ORDER BY rowid;
+DROP TABLE held;
+ALTER TABLE held_3 RENAME TO held;
+CREATE TABLE dropped_3 (
+    endpoint TEXT NOT NULL,
+    host_id TEXT NOT NULL,
+    remote_message_id TEXT NOT NULL,
+    label TEXT NOT NULL,
+    space TEXT NOT NULL,
+    re TEXT NOT NULL,
+    remote_alias TEXT NOT NULL,
+    count INTEGER NOT NULL,
+    reason TEXT,
+    created_at_ms INTEGER NOT NULL,
+    told INTEGER NOT NULL DEFAULT 0,
+    peer TEXT NOT NULL,
+    PRIMARY KEY (endpoint, host_id, remote_message_id, peer)
+);
+INSERT INTO dropped_3 SELECT endpoint, host_id, remote_message_id, label, space, re,
+    remote_alias, count, reason, created_at_ms, told,
+    COALESCE((SELECT MIN(p.label) FROM peers p WHERE p.host_id = d.host_id), d.label)
+    FROM dropped d ORDER BY rowid;
+DROP TABLE dropped;
+ALTER TABLE dropped_3 RENAME TO dropped;
+CREATE TABLE capture_start (
+    rowid INTEGER NOT NULL
+);
+CREATE TABLE capture_marks (
+    endpoint TEXT NOT NULL,
+    space TEXT NOT NULL,
+    rowid INTEGER NOT NULL,
+    message_id TEXT,
+    PRIMARY KEY (endpoint, space)
+);
+INSERT INTO capture_marks SELECT endpoint, '', rowid, NULL FROM capture;
+ALTER TABLE capture ADD COLUMN message_id TEXT;
+CREATE INDEX outbox_by_seq ON outbox (host_id, seq);
+CREATE TABLE outbox_lost (
+    host_id TEXT NOT NULL,
+    re TEXT NOT NULL,
+    sender TEXT NOT NULL,
+    since_ms INTEGER NOT NULL,
+    discarded INTEGER NOT NULL,
+    expired INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (host_id, re, sender)
+);
+CREATE TABLE lost (
+    endpoint TEXT NOT NULL,
+    host_id TEXT NOT NULL,
+    epoch TEXT NOT NULL,
+    re TEXT NOT NULL,
+    remote_alias TEXT NOT NULL,
+    since_ms INTEGER NOT NULL,
+    label TEXT NOT NULL,
+    peer TEXT NOT NULL,
+    discarded INTEGER NOT NULL,
+    expired INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (endpoint, host_id, epoch, re, remote_alias, since_ms)
+);
+CREATE TABLE lost_told (
+    endpoint TEXT NOT NULL,
+    label TEXT NOT NULL,
+    re TEXT NOT NULL,
+    remote_alias TEXT NOT NULL,
+    peer TEXT NOT NULL,
+    told_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (endpoint, label, re, remote_alias)
+);
+";
+
+/// What version 3 lacks: the id and creation time of the message at
+/// capture's floor, and of each mark's, so a capture can tell that one is
+/// gone and read what was made after it. A database before has neither,
+/// and its first capture fills them in from the messages at their rowids.
+const TO_4: &str = "
+ALTER TABLE capture_start ADD COLUMN message_id TEXT;
+ALTER TABLE capture_start ADD COLUMN created_at_ms INTEGER;
+ALTER TABLE capture_marks ADD COLUMN created_at_ms INTEGER;
+";
+/// B's replies for A after `after`, a range of `outbox_by_seq` read in
+/// `seq` order, which B stops at the page's end.
+const PAGE: &str = "SELECT seq, re, thread, sender, message_id, text FROM outbox
+    WHERE host_id = ?1 AND seq > ?2 ORDER BY seq";
+
+/// B tells A of at most this many of the A messages whose replies it let
+/// go of, the latest first, and A keeps at most this many for each label
+/// and server.
+pub(crate) const LOST_LIMIT: i64 = 32;
+pub(crate) const LOST_COUNT_LIMIT: i64 = 1_000_000_000;
+/// A tells its senders of at most this many new losses of one server an
+/// hour, so a server that makes up losses cannot fill their mailboxes.
+pub(crate) const LOST_NOTICES_PER_HOUR: i64 = 4;
+const HOUR_MS: i64 = 60 * 60 * 1000;
+
+/// An item A could not deliver within this fails.
+pub(crate) const OUTBOUND_LIFETIME_MS: i64 = 24 * 60 * 60 * 1000;
+/// B keeps a reply for A, and the key of each item A sent, this long. The
+/// key outlasts A's retries, so every retry still finds it.
+pub(crate) const OUTBOX_LIFETIME_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+pub(crate) const INBOUND_LIFETIME_MS: i64 = OUTBOX_LIFETIME_MS;
+/// A keeps an item it is done with this long, which outlasts a reply B
+/// keeps for a week after a week of quiet.
+pub(crate) const DONE_LIFETIME_MS: i64 = 2 * OUTBOX_LIFETIME_MS;
+/// A holds at most this many replies of one label for one endpoint, and
+/// at most `HELD_PER_THREAD` of them for one thread, so no thread takes
+/// every place. B stops its own agents after 10 replies in a thread with
+/// no human turn, so an honest B sends about 10 while A's thread is
+/// paused. A reply past either cap stays on B until A has room.
+pub(crate) const HELD_LIMIT: i64 = 100;
+pub(crate) const HELD_PER_THREAD: i64 = 20;
+/// B keeps at most this many replies for one A host. One more is counted
+/// with the expired replies, as one that can never reach A.
+pub(crate) const OUTBOX_LIMIT: i64 = 10_000;
+/// Doctor counts the replies dropped for answering a message sent to
+/// another host until this long after the last one.
+pub(crate) const OTHER_LABEL_LIFETIME_MS: i64 = OUTBOX_LIFETIME_MS;
+
+/// A holds `peers`, `outbound`, `collected`, `cursors`, the last `seq`
+/// each local endpoint took from each B and the outbox epoch it counts in,
+/// because each endpoint reads its own outbox on B, `held`, the replies
+/// the Automatic Reply Limit kept out of their threads, `dropped`, the
+/// replies A refused and the held ones that expired, whose senders are
+/// still to be told, and
+/// `conditions`, what Doctor reports for each label. A cursor, and each
+/// reply A collected, holds, or dropped, is of one `peer`: the first label,
+/// by name, of the labels that dial the server's addresses, so a server
+/// that reports another's `host_id` touches none of that one's. B holds
+/// `inbound`, `outbox`, its `outbox_epoch`, `remote_threads`, and the tally
+/// of the replies that expired, which Doctor reports after the items
+/// themselves are gone. Both hold `capture`, the last main-database message
+/// each endpoint's capture read, by rowid and id, `capture_start`, the last
+/// one when this database was made, by rowid, id and creation time, where
+/// an endpoint's capture starts, and `capture_marks`, the last relay
+/// message capture read in each space, where a capture whose message is
+/// gone reads again from. A mark of no space is a version 2 cursor's, a
+/// floor of its endpoint, with the creation time of its message.
+const SCHEMA: &str = "
+CREATE TABLE peers (
+    label TEXT PRIMARY KEY,
+    host_id TEXT NOT NULL,
+    contacted_at_ms INTEGER NOT NULL
+);
+CREATE TABLE outbound (
+    label TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    recipient TEXT NOT NULL,
+    endpoint TEXT NOT NULL,
+    space TEXT NOT NULL,
+    sender TEXT NOT NULL,
+    thread TEXT NOT NULL,
+    in_reply_to TEXT,
+    text TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('queued', 'accepted', 'failed', 'expired')),
+    host_id TEXT,
+    reason TEXT,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    notified_at_ms INTEGER,
+    paused INTEGER NOT NULL DEFAULT 0,
+    paused_told INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (label, message_id, recipient)
+);
+CREATE TABLE collected (
+    endpoint TEXT NOT NULL,
+    host_id TEXT NOT NULL,
+    epoch TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    label TEXT NOT NULL,
+    space TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    remote_message_id TEXT NOT NULL,
+    remote_alias TEXT NOT NULL,
+    thread TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    peer TEXT NOT NULL,
+    PRIMARY KEY (endpoint, host_id, epoch, seq, peer)
+);
+CREATE INDEX collected_by_message ON collected (endpoint, message_id);
+CREATE TABLE cursors (
+    endpoint TEXT NOT NULL,
+    host_id TEXT NOT NULL,
+    epoch TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    peer TEXT NOT NULL,
+    PRIMARY KEY (endpoint, host_id, peer)
+);
+CREATE TABLE held (
+    endpoint TEXT NOT NULL,
+    host_id TEXT NOT NULL,
+    remote_message_id TEXT NOT NULL,
+    epoch TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    label TEXT NOT NULL,
+    space TEXT NOT NULL,
+    thread TEXT NOT NULL,
+    re TEXT NOT NULL,
+    remote_alias TEXT NOT NULL,
+    text TEXT NOT NULL,
+    told INTEGER NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    peer TEXT NOT NULL,
+    PRIMARY KEY (endpoint, host_id, remote_message_id, peer)
+);
+CREATE TABLE inbound (
+    host_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    recipient TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    local_message_id TEXT,
+    endpoint TEXT,
+    space TEXT,
+    created_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (host_id, message_id, recipient)
+);
+CREATE TABLE outbox (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    host_id TEXT NOT NULL,
+    re TEXT NOT NULL,
+    thread TEXT NOT NULL,
+    sender TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    text TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    UNIQUE (host_id, message_id)
+);
+CREATE INDEX outbox_by_seq ON outbox (host_id, seq);
+CREATE TABLE remote_threads (
+    host_id TEXT NOT NULL,
+    thread TEXT NOT NULL,
+    endpoint TEXT NOT NULL,
+    space TEXT NOT NULL,
+    local_thread TEXT NOT NULL,
+    sender TEXT NOT NULL,
+    display_host TEXT NOT NULL,
+    used_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (host_id, thread, space)
+);
+CREATE INDEX remote_threads_by_local ON remote_threads (endpoint, space, local_thread);
+CREATE TABLE outbox_expired (
+    sender TEXT PRIMARY KEY,
+    count INTEGER NOT NULL
+);
+CREATE TABLE capture (
+    endpoint TEXT PRIMARY KEY,
+    rowid INTEGER NOT NULL,
+    message_id TEXT
+);
+CREATE TABLE capture_start (
+    rowid INTEGER NOT NULL,
+    message_id TEXT,
+    created_at_ms INTEGER
+);
+CREATE TABLE capture_marks (
+    endpoint TEXT NOT NULL,
+    space TEXT NOT NULL,
+    rowid INTEGER NOT NULL,
+    message_id TEXT,
+    created_at_ms INTEGER,
+    PRIMARY KEY (endpoint, space)
+);
+CREATE TABLE outbox_epoch (
+    epoch TEXT NOT NULL
+);
+CREATE TABLE conditions (
+    endpoint TEXT NOT NULL,
+    label TEXT NOT NULL,
+    other_label INTEGER NOT NULL DEFAULT 0,
+    held_full INTEGER NOT NULL DEFAULT 0,
+    cannot_reply INTEGER NOT NULL DEFAULT 0,
+    other_label_at_ms INTEGER NOT NULL DEFAULT 0,
+    same_server_as TEXT,
+    PRIMARY KEY (endpoint, label)
+);
+CREATE TABLE dropped (
+    endpoint TEXT NOT NULL,
+    host_id TEXT NOT NULL,
+    remote_message_id TEXT NOT NULL,
+    label TEXT NOT NULL,
+    space TEXT NOT NULL,
+    re TEXT NOT NULL,
+    remote_alias TEXT NOT NULL,
+    count INTEGER NOT NULL,
+    reason TEXT,
+    created_at_ms INTEGER NOT NULL,
+    told INTEGER NOT NULL DEFAULT 0,
+    peer TEXT NOT NULL,
+    PRIMARY KEY (endpoint, host_id, remote_message_id, peer)
+);
+CREATE TABLE outbox_lost (
+    host_id TEXT NOT NULL,
+    re TEXT NOT NULL,
+    sender TEXT NOT NULL,
+    since_ms INTEGER NOT NULL,
+    discarded INTEGER NOT NULL,
+    expired INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (host_id, re, sender)
+);
+CREATE TABLE lost (
+    endpoint TEXT NOT NULL,
+    host_id TEXT NOT NULL,
+    epoch TEXT NOT NULL,
+    re TEXT NOT NULL,
+    remote_alias TEXT NOT NULL,
+    since_ms INTEGER NOT NULL,
+    label TEXT NOT NULL,
+    peer TEXT NOT NULL,
+    discarded INTEGER NOT NULL,
+    expired INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (endpoint, host_id, epoch, re, remote_alias, since_ms)
+);
+CREATE TABLE lost_told (
+    endpoint TEXT NOT NULL,
+    label TEXT NOT NULL,
+    re TEXT NOT NULL,
+    remote_alias TEXT NOT NULL,
+    peer TEXT NOT NULL,
+    told_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (endpoint, label, re, remote_alias)
+);
+";
+
+/// Opens `path`, which only its owner may read.
+fn connect(path: &Path) -> Result<Connection, StoreError> {
+    let connection = Connection::open(path)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    connection.busy_timeout(Duration::from_secs(2))?;
+    Ok(connection)
+}
+
+/// Each table's columns, by name, with each column's type, whether it is
+/// `NOT NULL`, and its place in the primary key, and each index's columns,
+/// by name, in order.
+type Layout = Vec<(String, String, String, bool, i64)>;
+
+fn layout(connection: &Connection) -> Result<Layout, StoreError> {
+    let mut statement = connection.prepare(
+        "SELECT m.name, c.name, c.type, c.\"notnull\", c.pk
+         FROM sqlite_schema m JOIN pragma_table_info(m.name) c
+         WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite\\_%' ESCAPE '\\'
+         UNION ALL
+         SELECT m.name, c.name, '', 0, c.seqno
+         FROM sqlite_schema m JOIN pragma_index_info(m.name) c
+         WHERE m.type = 'index' AND m.name NOT LIKE 'sqlite\\_%' ESCAPE '\\'
+         ORDER BY 1, 2",
+    )?;
+    let layout = statement
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })?
+        .collect::<Result<_, _>>()?;
+    Ok(layout)
+}
+
+/// The layout `SCHEMA` makes.
+fn current_layout() -> &'static Layout {
+    static CURRENT: std::sync::OnceLock<Layout> = std::sync::OnceLock::new();
+    CURRENT.get_or_init(|| {
+        let connection = Connection::open_in_memory().expect("an in-memory database opens");
+        connection
+            .execute_batch(SCHEMA)
+            .expect("the relay's schema is valid");
+        layout(&connection).expect("an in-memory database lists its columns")
+    })
+}
+
+/// The columns `TO_2` adds.
+const COLUMNS_NEW_IN_2: [(&str, &str); 2] =
+    [("conditions", "other_label_at_ms"), ("dropped", "told")];
+/// The tables and indexes `TO_3` makes, and the columns it adds.
+const NEW_IN_3: [&str; 6] = [
+    "outbox_lost",
+    "lost",
+    "lost_told",
+    "outbox_by_seq",
+    "capture_start",
+    "capture_marks",
+];
+/// The columns `TO_4` adds.
+const COLUMNS_NEW_IN_4: [(&str, &str); 3] = [
+    ("capture_start", "message_id"),
+    ("capture_start", "created_at_ms"),
+    ("capture_marks", "created_at_ms"),
+];
+const COLUMNS_NEW_IN_3: [(&str, &str); 8] = [
+    ("capture", "message_id"),
+    ("outbound", "paused"),
+    ("outbound", "paused_told"),
+    ("conditions", "same_server_as"),
+    ("cursors", "peer"),
+    ("collected", "peer"),
+    ("held", "peer"),
+    ("dropped", "peer"),
+];
+
+/// Makes the database at `path`, or migrates it from its version, under
+/// the write lock, and says whether it then has this schema's layout. One
+/// that does not is left as it was.
+fn upgrade(connection: &mut Connection, path: &Path) -> Result<bool, StoreError> {
+    // The main database is read before the write lock is taken here, so a
+    // relay write never waits on the main database.
+    let start = if layout(connection)?.is_empty() {
+        main_end(path)?
+    } else {
+        Place::default()
+    };
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let version: u32 = transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if matches!(version, 1..=3) {
+        let expected: Layout = current_layout()
+            .iter()
+            .filter(|(table, column, ..)| {
+                let column = (table.as_str(), column.as_str());
+                !COLUMNS_NEW_IN_4.contains(&column)
+                    && !(version < 3
+                        && (NEW_IN_3.contains(&table.as_str())
+                            || COLUMNS_NEW_IN_3.contains(&column)))
+                    && !(version == 1 && COLUMNS_NEW_IN_2.contains(&column))
+            })
+            .cloned()
+            .collect();
+        if layout(&transaction)? != expected {
+            return Ok(false);
+        }
+    }
+    match version {
+        0 if layout(&transaction)?.is_empty() => {
+            transaction.execute_batch(SCHEMA)?;
+            transaction.execute(
+                "INSERT INTO outbox_epoch (epoch) VALUES (?1)",
+                params![crate::IdGenerator::next_id(
+                    &crate::ProcessIds::default(),
+                    "outbox"
+                )],
+            )?;
+            transaction.execute(
+                "INSERT INTO capture_start (rowid, message_id, created_at_ms) VALUES (?1, ?2, ?3)",
+                params![start.rowid, start.message_id, start.created_at_ms],
+            )?;
+        }
+        1 => transaction.execute_batch(&format!("{TO_2}{TO_3}{TO_4}"))?,
+        2 => transaction.execute_batch(&format!("{TO_3}{TO_4}"))?,
+        3 => transaction.execute_batch(TO_4)?,
+        VERSION => (),
+        newer if newer > VERSION => {
+            return Err(StoreError::invalid_input(format!(
+                "{} has relay schema {newer}, and this Namedrop knows {VERSION}",
+                path.display()
+            )));
+        }
+        _ => return Ok(false),
+    }
+    if layout(&transaction)? != *current_layout() {
+        return Ok(false);
+    }
+    transaction.pragma_update(None, "user_version", VERSION)?;
+    transaction.commit()?;
+    Ok(true)
+}
+
+/// The last message in the main database beside the relay's at `path`,
+/// or rowid 0 when it has none. A new relay database captures only the
+/// messages after it, so one made again, or after one was set aside, never
+/// queues or keeps the history before it a second time.
+fn main_end(path: &Path) -> Result<Place, StoreError> {
+    let main = path.with_file_name(crate::store::DATABASE_FILE_NAME);
+    if !main.is_file() {
+        return Ok(Place::default());
+    }
+    let connection = Connection::open_with_flags(&main, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    connection.busy_timeout(Duration::from_secs(2))?;
+    let made: bool = connection.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE name = 'collaboration_messages')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !made {
+        return Ok(Place::default());
+    }
+    Ok(connection
+        .query_row(
+            "SELECT rowid, message_id, created_at_ms FROM collaboration_messages
+             ORDER BY rowid DESC LIMIT 1",
+            [],
+            |row| {
+                Ok(Place {
+                    rowid: row.get(0)?,
+                    message_id: row.get(1)?,
+                    created_at_ms: row.get(2)?,
+                })
+            },
+        )
+        .optional()?
+        .unwrap_or_default())
+}
+
+/// Moves the database at `path` to `relay.sqlite3.unreleased-<now_ms>`, so
+/// it is kept but no longer read. It has no journal to take along: the
+/// relay never uses WAL, SQLite rolls back a crashed writer's journal at
+/// the first read, and `upgrade` rolled back its own transaction.
+fn set_aside(path: &Path, now_ms: i64) -> Result<(), StoreError> {
+    fs::rename(path, format!("{}.{UNRELEASED}{now_ms}", path.display()))?;
+    Ok(())
+}
+
+/// What a database set aside is named after, past `relay.sqlite3.`.
+pub(crate) const UNRELEASED: &str = "unreleased-";
+
+/// Each relay database set aside in `state`, by file name.
+pub(crate) fn set_aside_in(state: &Path) -> Vec<String> {
+    let prefix = format!("{FILE}.{UNRELEASED}");
+    let mut names: Vec<String> = fs::read_dir(state)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .filter(|name| {
+            name.strip_prefix(&prefix)
+                .is_some_and(|rest| rest.bytes().all(|byte| byte.is_ascii_digit()))
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+pub(crate) struct RelayStore {
+    connection: Connection,
+}
+
+/// A main-database message by which capture keeps its place: its rowid,
+/// and its id and creation time where capture knows them.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct Place {
+    pub rowid: i64,
+    pub message_id: Option<String>,
+    pub created_at_ms: Option<i64>,
+}
+
+/// The last relay message capture read in `space`, or with no space, the
+/// cursor of a version 2 build: the last relay message it read, which is a
+/// floor of its endpoint.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Mark {
+    pub space: String,
+    pub place: Place,
+}
+
+/// What a capture found before it read, which `settle_capture` writes.
+#[derive(Debug, Default)]
+pub(crate) struct Found {
+    /// Where the cursor goes, when capture reads again or for the first
+    /// time.
+    pub cursor: Option<(i64, Option<String>)>,
+    /// The spaces whose mark's message is gone.
+    pub gone: Vec<String>,
+    /// The floor, with the id and creation time of its message, when the
+    /// database did not have them.
+    pub floor: Option<Place>,
+    /// The marks with no id, with the id and creation time of the message
+    /// at their rowid.
+    pub marks: Vec<Mark>,
+}
+
+/// An item queued on A for one label.
+#[derive(Clone, Debug)]
+pub(crate) struct Queued {
+    pub message_id: String,
+    pub recipient: String,
+    pub sender: String,
+    pub thread: String,
+    pub in_reply_to: Option<String>,
+    pub text: String,
+    /// The `host_id` the item was first sent to.
+    pub host_id: Option<String>,
+}
+
+/// An item that failed or expired and whose sender has not been told.
+pub(crate) struct Unsent {
+    pub label: String,
+    pub message_id: String,
+    pub recipient: String,
+    pub space: String,
+    pub reason: String,
+}
+
+/// A queued item that B's Automatic Reply Limit paused, whose sender has
+/// not been told.
+pub(crate) struct Paused {
+    pub label: String,
+    pub message_id: String,
+    pub recipient: String,
+    pub space: String,
+}
+
+/// How a queued item ends.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Settled {
+    Accepted,
+    Failed,
+}
+
+/// A reply A collected from B and inserted as `message_id`.
+pub(crate) struct Collected<'a> {
+    pub peer: &'a str,
+    pub host_id: &'a str,
+    pub epoch: &'a str,
+    pub seq: i64,
+    pub label: &'a str,
+    pub endpoint: &'a str,
+    pub space: &'a str,
+    pub message_id: &'a str,
+    pub remote_message_id: &'a str,
+    pub remote_alias: &'a str,
+    pub thread: &'a str,
+    pub now_ms: i64,
+}
+
+/// A reply A took from the server `host_id`, of `peer`, for `endpoint`
+/// and holds, because the Automatic Reply Limit paused the A thread it
+/// answers.
+#[derive(Clone, Debug)]
+pub(crate) struct Held {
+    pub endpoint: String,
+    pub peer: String,
+    pub host_id: String,
+    pub epoch: String,
+    pub label: String,
+    pub space: String,
+    pub thread: String,
+    pub reply: Reply,
+}
+
+/// Where a reply B made up goes on A.
+pub(crate) enum Answers {
+    /// To the thread of `space` that the label sent its message from.
+    Sent {
+        label: String,
+        space: String,
+        thread: String,
+    },
+    /// Nowhere yet: B may have accepted its message, but A has not
+    /// settled it, as when the write failed, so B keeps the reply until A
+    /// does. The thread is the one of `space` the message was sent from.
+    Unsettled { space: String, thread: String },
+    /// Nowhere: its message was sent to another host, which this server
+    /// cannot answer for.
+    OtherLabel,
+    /// Nowhere: A sent this server no such message.
+    Unknown,
+}
+
+/// What Doctor reports on A for one label: how many replies its worker
+/// dropped because they answered a message sent to another host, counted
+/// since a quiet `OTHER_LABEL_LIFETIME_MS`, whether
+/// A holds as many of its replies as it can, so B keeps the rest,
+/// whether B keeps no more replies for A, so A sends it nothing new, and
+/// whether its server answers as another label's.
+#[derive(Debug, Default, Eq, PartialEq)]
+pub(crate) struct Conditions {
+    pub label: String,
+    pub other_label: i64,
+    pub held_full: bool,
+    pub cannot_reply: bool,
+    /// The label whose server this label's server answers as, while this
+    /// machine's host list gives the two other addresses, so A relays
+    /// nothing by this label.
+    pub same_server_as: Option<String>,
+    /// How many replies B said it let go of for this machine, counted
+    /// since a quiet `OTHER_LABEL_LIFETIME_MS`.
+    pub lost: i64,
+}
+
+/// A reply A refused, or the held replies of one thread that expired,
+/// whose sender is still to be told.
+pub(crate) struct Dropped {
+    pub peer: String,
+    pub host_id: String,
+    pub remote_message_id: String,
+    pub label: String,
+    pub space: String,
+    pub re: String,
+    pub remote_alias: String,
+    pub why: Why,
+}
+
+/// Why A let go of a reply.
+pub(crate) enum Why {
+    /// The main store refused it, for this reason.
+    Refused(String),
+    /// It and this many held replies of its thread expired.
+    Expired(i64),
+}
+
+/// The replies of one B alias to one A message that B let go of, as B
+/// last said, whose sender has not been told of them.
+#[derive(Debug)]
+pub(crate) struct LostReplies {
+    pub re: String,
+    pub remote_alias: String,
+    pub discarded: i64,
+    pub expired: i64,
+    /// The label and space the A message was sent from, its recipient on
+    /// that label whose relay author tells the sender, and A's name for
+    /// the server.
+    pub label: String,
+    pub space: String,
+    pub recipient: String,
+    pub peer: String,
+}
+
+/// An item's key on B: A's `host_id`, A's message id, and the recipient.
+pub(crate) struct InboundKey<'a> {
+    pub host_id: &'a str,
+    pub message_id: &'a str,
+    pub recipient: &'a str,
+}
+
+/// A's thread as one of B's spaces carries it, and who started it there.
+pub(crate) struct RemoteThread<'a> {
+    pub host_id: &'a str,
+    pub thread: &'a str,
+    pub endpoint: &'a str,
+    pub space: &'a str,
+    pub sender: &'a str,
+    pub display_host: &'a str,
+}
+
+/// One item A sends: the A message `message_id` for `recipient` on `label`,
+/// from `sender` in the space of `endpoint`.
+pub(crate) struct Outbound<'a> {
+    pub label: &'a str,
+    pub message_id: &'a str,
+    pub recipient: &'a str,
+    pub endpoint: &'a str,
+    pub space: &'a str,
+    pub sender: &'a str,
+    pub thread: &'a str,
+    pub in_reply_to: Option<&'a str>,
+    pub text: &'a str,
+    pub now_ms: i64,
+}
+
+impl RelayStore {
+    /// Opens the relay's database in `state`, creating it when it is missing,
+    /// and expires whatever outlived its limit by `now_ms`.
+    pub(crate) fn open(state: &Path, now_ms: i64) -> Result<Self, StoreError> {
+        let mut store = Self::read(state)?;
+        store.expire(now_ms)?;
+        Ok(store)
+    }
+
+    /// Opens the relay's database in `state` as `open` does, without the
+    /// expiry, for a reader that looks often. A state directory that is gone
+    /// is an error, and is not made again. A database whose tables or
+    /// columns are not this schema's, even after the migrations from its
+    /// version, came from an unreleased build: it is set aside as
+    /// `relay.sqlite3.unreleased-<ms>`, and a new one is made.
+    pub(crate) fn read(state: &Path) -> Result<Self, StoreError> {
+        if !state.is_dir() {
+            return Err(StoreError::invalid_input(format!(
+                "{} is not a directory",
+                state.display()
+            )));
+        }
+        let path = state.join(FILE);
+        // A set-aside renames the file only under the exclusive lock, so the
+        // file an open checks under the shared one is the file it keeps, and
+        // one of this schema's layout is never set aside.
+        let lock = super::open_lock(state)?;
+        lock.lock_shared()?;
+        let connection = connect(&path)?;
+        let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version == VERSION && layout(&connection)? == *current_layout() {
+            return Ok(Self { connection });
+        }
+        drop(connection);
+        lock.unlock()?;
+        // Opens that race to make, migrate, or set aside the database take
+        // turns, and each looks again at what the path holds then.
+        lock.lock()?;
+        let mut connection = connect(&path)?;
+        if upgrade(&mut connection, &path)? {
+            return Ok(Self { connection });
+        }
+        drop(connection);
+        set_aside(&path, super::now_ms())?;
+        let mut connection = connect(&path)?;
+        if upgrade(&mut connection, &path)? {
+            Ok(Self { connection })
+        } else {
+            Err(StoreError::invalid_input(format!(
+                "{} could not be made",
+                path.display()
+            )))
+        }
+    }
+
+    /// Queues `item`, unless its key is already stored.
+    pub(crate) fn queue(&self, item: &Outbound<'_>) -> Result<(), StoreError> {
+        self.connection.execute(
+            "INSERT OR IGNORE INTO outbound (label, message_id, recipient, endpoint, space,
+                sender, thread, in_reply_to, text, state, created_at_ms, updated_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'queued', ?10, ?10)",
+            params![
+                item.label,
+                item.message_id,
+                item.recipient,
+                item.endpoint,
+                item.space,
+                item.sender,
+                item.thread,
+                item.in_reply_to,
+                item.text,
+                item.now_ms
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The rowid of the last main-database message capture read for
+    /// `endpoint`, or before any, the last one when this database was
+    /// made.
+    pub(crate) fn capture_cursor(&self, endpoint: &str) -> Result<i64, StoreError> {
+        match self.capture_anchor(endpoint)? {
+            Some((rowid, _)) => Ok(rowid),
+            None => Ok(self.capture_floor()?.rowid),
+        }
+    }
+
+    /// `capture_cursor`, and the id of the message at it when capture
+    /// recorded one, or `None` before `endpoint`'s first capture.
+    pub(crate) fn capture_anchor(
+        &self,
+        endpoint: &str,
+    ) -> Result<Option<(i64, Option<String>)>, StoreError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT rowid, message_id FROM capture WHERE endpoint = ?1",
+                params![endpoint],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?)
+    }
+
+    /// The last main-database message when this database was made, which
+    /// no capture reads again, or rowid 0 when there was none.
+    pub(crate) fn capture_floor(&self) -> Result<Place, StoreError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT rowid, message_id, created_at_ms FROM capture_start
+                 ORDER BY rowid DESC LIMIT 1",
+                [],
+                |row| {
+                    Ok(Place {
+                        rowid: row.get(0)?,
+                        message_id: row.get(1)?,
+                        created_at_ms: row.get(2)?,
+                    })
+                },
+            )
+            .optional()?
+            .unwrap_or_default())
+    }
+
+    /// The last relay message `endpoint`'s capture read in each space, and
+    /// the cursor of a build before, at the last relay message it read,
+    /// as a mark of no space.
+    pub(crate) fn capture_marks(&self, endpoint: &str) -> Result<Vec<Mark>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT space, rowid, message_id, created_at_ms FROM capture_marks
+             WHERE endpoint = ?1 ORDER BY rowid DESC",
+        )?;
+        let marks = statement
+            .query_map(params![endpoint], |row| {
+                Ok(Mark {
+                    space: row.get(0)?,
+                    place: Place {
+                        rowid: row.get(1)?,
+                        message_id: row.get(2)?,
+                        created_at_ms: row.get(3)?,
+                    },
+                })
+            })?
+            .collect::<Result<_, _>>()?;
+        Ok(marks)
+    }
+
+    /// Writes what `endpoint`'s capture found before it read, together:
+    /// its cursor, the marks whose message is gone, and the ids and
+    /// creation times found for the floor and the marks that had none.
+    pub(crate) fn settle_capture(&self, endpoint: &str, found: &Found) -> Result<(), StoreError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        if let Some((rowid, message_id)) = &found.cursor {
+            transaction.execute(
+                "INSERT INTO capture (endpoint, rowid, message_id) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (endpoint) DO UPDATE SET rowid = excluded.rowid,
+                    message_id = excluded.message_id",
+                params![endpoint, rowid, message_id],
+            )?;
+        }
+        for space in &found.gone {
+            transaction.execute(
+                "DELETE FROM capture_marks WHERE endpoint = ?1 AND space = ?2",
+                params![endpoint, space],
+            )?;
+        }
+        if let Some(floor) = &found.floor {
+            transaction.execute(
+                "UPDATE capture_start SET message_id = ?2, created_at_ms = ?3
+                 WHERE rowid = ?1 AND message_id IS NULL",
+                params![floor.rowid, floor.message_id, floor.created_at_ms],
+            )?;
+        }
+        for mark in &found.marks {
+            transaction.execute(
+                "UPDATE capture_marks SET message_id = ?4, created_at_ms = ?5
+                 WHERE endpoint = ?1 AND space = ?2 AND rowid = ?3 AND message_id IS NULL",
+                params![
+                    endpoint,
+                    mark.space,
+                    mark.place.rowid,
+                    mark.place.message_id,
+                    mark.place.created_at_ms
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Moves `endpoint`'s capture cursor to the main-database message
+    /// `rowid`, `message_id`, once capture read every message before it.
+    pub(crate) fn capture_through(
+        &self,
+        endpoint: &str,
+        rowid: i64,
+        message_id: &str,
+    ) -> Result<(), StoreError> {
+        self.connection.execute(
+            "INSERT INTO capture (endpoint, rowid, message_id) VALUES (?1, ?2, ?3)
+             ON CONFLICT (endpoint) DO UPDATE SET rowid = excluded.rowid,
+                message_id = excluded.message_id
+             WHERE excluded.rowid >= rowid",
+            params![endpoint, rowid, message_id],
+        )?;
+        Ok(())
+    }
+
+    /// Commits a message's relay writes, loss counts, capture cursor, and
+    /// the mark of its space together, under the write lock from the
+    /// start, so a capture that meets another relay writer waits its turn.
+    /// `message` is the main-database message at `rowid` and its space.
+    pub(crate) fn captured(
+        &self,
+        endpoint: &str,
+        rowid: i64,
+        message: (&str, &str),
+        capture: impl FnOnce() -> Result<(Vec<String>, Vec<String>), String>,
+    ) -> Result<Vec<String>, String> {
+        let transaction =
+            rusqlite::Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
+                .map_err(|error| error.to_string())?;
+        if self
+            .capture_cursor(endpoint)
+            .map_err(|error| error.to_string())?
+            >= rowid
+        {
+            return Ok(Vec::new());
+        }
+        let (queued, unkept) = capture()?;
+        for display in unkept {
+            transaction
+                .execute(
+                    "INSERT INTO outbox_expired (sender, count) VALUES (?1, 1)
+                 ON CONFLICT (sender) DO UPDATE SET count = count + 1",
+                    params![display],
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        let (message_id, space) = message;
+        transaction
+            .execute(
+                "INSERT INTO capture (endpoint, rowid, message_id) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (endpoint) DO UPDATE SET rowid = excluded.rowid,
+                    message_id = excluded.message_id
+                 WHERE excluded.rowid > rowid",
+                params![endpoint, rowid, message_id],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "INSERT INTO capture_marks (endpoint, space, rowid, message_id)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (endpoint, space) DO UPDATE SET rowid = excluded.rowid,
+                    message_id = excluded.message_id
+                 WHERE excluded.rowid > rowid",
+                params![endpoint, space, rowid, message_id],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())?;
+        Ok(queued)
+    }
+
+    /// A's thread and `host_id` for B's `local_thread` in `space`.
+    pub(crate) fn mapped_thread(
+        &self,
+        endpoint: &str,
+        space: &str,
+        local_thread: &str,
+    ) -> Result<Option<(String, String)>, StoreError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT host_id, thread FROM remote_threads
+                 WHERE endpoint = ?1 AND space = ?2 AND local_thread = ?3 LIMIT 1",
+                params![endpoint, space, local_thread],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?)
+    }
+
+    /// A's message id for the item B stored as `local_message_id`, when it
+    /// came from `host_id`.
+    pub(crate) fn relayed_as(
+        &self,
+        host_id: &str,
+        local_message_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT message_id FROM inbound WHERE host_id = ?1 AND local_message_id = ?2",
+                params![host_id, local_message_id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Keeps a reply for `host_id`, once per B message, cut so that its
+    /// text encodes in `TEXT_LIMIT` bytes and every page holds at least one
+    /// reply, and says whether it is kept, which it is not while B keeps
+    /// `OUTBOX_LIMIT` replies for `host_id`.
+    pub(crate) fn keep_reply(
+        &self,
+        host_id: &str,
+        reply: &Reply,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        self.connection.execute(
+            "INSERT OR IGNORE INTO outbox (host_id, re, thread, sender, message_id, text,
+                created_at_ms)
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7
+             WHERE (SELECT COUNT(*) FROM outbox WHERE host_id = ?1) < ?8",
+            params![
+                host_id,
+                reply.re,
+                reply.thread,
+                reply.from,
+                reply.message_id,
+                super::wire::cut(&reply.text, super::wire::TEXT_LIMIT),
+                now_ms,
+                OUTBOX_LIMIT
+            ],
+        )?;
+        let kept: bool = self.connection.query_row(
+            "SELECT EXISTS (SELECT 1 FROM outbox WHERE host_id = ?1 AND message_id = ?2)",
+            params![host_id, reply.message_id],
+            |row| row.get(0),
+        )?;
+        if !kept {
+            self.connection.execute(
+                "INSERT INTO outbox_lost (host_id, re, sender, since_ms, discarded, expired,
+                    updated_at_ms) VALUES (?1, ?2, ?3, ?4, 1, 0, ?4)
+                 ON CONFLICT (host_id, re, sender) DO UPDATE SET discarded = discarded + 1,
+                    updated_at_ms = excluded.updated_at_ms",
+                params![host_id, reply.re, reply.from, now_ms],
+            )?;
+        }
+        Ok(kept)
+    }
+
+    /// What B let go of for `host_id`: for each A message, the replies of
+    /// each B alias that B discarded past `OUTBOX_LIMIT` or let expire, the
+    /// latest `LOST_LIMIT` of them.
+    pub(crate) fn lost_for(&self, host_id: &str) -> Result<Vec<Lost>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT re, sender, since_ms, discarded, expired FROM outbox_lost WHERE host_id = ?1
+             ORDER BY updated_at_ms DESC, re, sender LIMIT ?2",
+        )?;
+        let lost = statement
+            .query_map(params![host_id, LOST_LIMIT], |row| {
+                Ok(Lost {
+                    re: row.get(0)?,
+                    from: row.get(1)?,
+                    since: row.get(2)?,
+                    discarded: row.get(3)?,
+                    expired: row.get(4)?,
+                })
+            })?
+            .collect::<Result<_, _>>()?;
+        Ok(lost)
+    }
+
+    /// Records what the server `host_id`, A's `peer`, said it let go of in
+    /// its outbox epoch `epoch`, as `label`'s worker read it. A count only
+    /// grows, and a new loss is dated `now_ms`. It reads `outbound` before
+    /// it writes, so it takes the write lock at its start, and one that
+    /// meets another relay writer waits its turn.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn note_lost(
+        &self,
+        endpoint: &str,
+        label: &str,
+        peer: &str,
+        host_id: &str,
+        epoch: &str,
+        lost: &[Lost],
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        let transaction =
+            rusqlite::Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        let labels = [label.to_owned()];
+        for lost in lost.iter().take(LOST_LIMIT as usize) {
+            if !super::valid_name(&lost.from)
+                || !super::wire::valid_id(&lost.re)
+                || !(0..=LOST_COUNT_LIMIT).contains(&lost.discarded)
+                || !(0..=LOST_COUNT_LIMIT).contains(&lost.expired)
+                || !matches!(
+                    self.sent_from(&lost.re, host_id, endpoint, &lost.from, &labels)?,
+                    Answers::Sent { .. }
+                )
+            {
+                continue;
+            }
+            transaction.execute(
+                "INSERT INTO lost (endpoint, host_id, epoch, re, remote_alias, since_ms, label,
+                    peer, discarded, expired, updated_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                 ON CONFLICT (endpoint, host_id, epoch, re, remote_alias, since_ms) DO UPDATE SET
+                    updated_at_ms = CASE WHEN excluded.discarded > discarded
+                        OR excluded.expired > expired THEN excluded.updated_at_ms
+                        ELSE updated_at_ms END,
+                    discarded = MAX(discarded, excluded.discarded),
+                    expired = MAX(expired, excluded.expired), peer = excluded.peer",
+                params![
+                    endpoint,
+                    host_id,
+                    epoch,
+                    lost.re,
+                    lost.from,
+                    lost.since,
+                    label,
+                    peer,
+                    lost.discarded,
+                    lost.expired,
+                    now_ms
+                ],
+            )?;
+        }
+        transaction.execute(
+            "DELETE FROM lost WHERE endpoint = ?1 AND label = ?2 AND host_id = ?3
+             AND rowid NOT IN (SELECT rowid FROM lost
+                WHERE endpoint = ?1 AND label = ?2 AND host_id = ?3
+                ORDER BY updated_at_ms DESC, rowid DESC LIMIT ?4)",
+            params![endpoint, label, host_id, LOST_LIMIT],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Each B alias and A message of `endpoint` whose replies B let go of,
+    /// and whose sender was never told, with how many B let go of, oldest
+    /// first. One whose item A no longer keeps is left out, since its
+    /// sender's thread is not known.
+    pub(crate) fn lost_untold(&self, endpoint: &str) -> Result<Vec<LostReplies>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT l.re, l.remote_alias, l.discarded, l.expired, o.label, o.space, o.recipient,
+                l.peer
+             FROM lost l JOIN outbound o ON o.rowid = (SELECT rowid FROM outbound
+                WHERE endpoint = l.endpoint AND message_id = l.re
+                    AND label = l.label AND host_id = l.host_id AND state = 'accepted'
+                ORDER BY recipient = l.remote_alias DESC, rowid LIMIT 1)
+             WHERE l.endpoint = ?1 AND (l.discarded > 0 OR l.expired > 0)
+                AND NOT EXISTS (SELECT 1 FROM lost_told t WHERE t.endpoint = l.endpoint
+                    AND t.label = l.label AND t.re = l.re AND t.remote_alias = l.remote_alias)
+             ORDER BY l.updated_at_ms, l.rowid",
+        )?;
+        let rows = statement.query_map(params![endpoint], |row| {
+            Ok(LostReplies {
+                re: row.get(0)?,
+                remote_alias: row.get(1)?,
+                discarded: row.get::<_, i64>(2)?.max(0),
+                expired: row.get::<_, i64>(3)?.max(0),
+                label: row.get(4)?,
+                space: row.get(5)?,
+                recipient: row.get(6)?,
+                peer: row.get(7)?,
+            })
+        })?;
+        // B counts again under a new epoch or start, so one alias and
+        // message can have several rows, and its sender is told of all.
+        let mut lost: Vec<LostReplies> = Vec::new();
+        for row in rows {
+            let row = row?;
+            match lost.iter_mut().find(|told| {
+                (&told.label, &told.re, &told.remote_alias)
+                    == (&row.label, &row.re, &row.remote_alias)
+            }) {
+                Some(told) => {
+                    told.discarded = told.discarded.saturating_add(row.discarded);
+                    told.expired = told.expired.saturating_add(row.expired);
+                }
+                None => lost.push(row),
+            }
+        }
+        Ok(lost)
+    }
+
+    /// How many more new losses of `peer` `endpoint`'s senders may be told
+    /// of in the hour before `now_ms`.
+    pub(crate) fn lost_allowance(
+        &self,
+        endpoint: &str,
+        peer: &str,
+        now_ms: i64,
+    ) -> Result<i64, StoreError> {
+        let told: i64 = self.connection.query_row(
+            "SELECT COUNT(*) FROM lost_told WHERE endpoint = ?1 AND peer = ?2
+                AND told_at_ms > ?3",
+            params![endpoint, peer, now_ms - HOUR_MS],
+            |row| row.get(0),
+        )?;
+        Ok(LOST_NOTICES_PER_HOUR - told)
+    }
+
+    /// Records that `lost`'s sender was told of what B let go of from its
+    /// alias to its message, once and for good: the record outlives the
+    /// `lost` rows, so a loss B names again under a new start is not told
+    /// again, and its item, so it lasts as long as a loss can be noted.
+    pub(crate) fn told_lost(
+        &self,
+        endpoint: &str,
+        lost: &LostReplies,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        self.connection.execute(
+            "INSERT OR IGNORE INTO lost_told (endpoint, label, re, remote_alias, peer, told_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                endpoint,
+                lost.label,
+                lost.re,
+                lost.remote_alias,
+                lost.peer,
+                now_ms
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// B's id for the reply of `alias` on `label` that an answer in A's
+    /// `thread` of `space` goes back to: the one A stored as `in_reply_to`
+    /// when it is that agent's, or else that agent's latest one there.
+    pub(crate) fn answered_reply(
+        &self,
+        endpoint: &str,
+        space: &str,
+        thread: &str,
+        in_reply_to: Option<&str>,
+        label: &str,
+        alias: &str,
+    ) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT remote_message_id FROM collected
+                 WHERE endpoint = ?1 AND space = ?2 AND thread = ?3 AND label = ?5
+                   AND remote_alias = ?6
+                 ORDER BY message_id = ?4 DESC, created_at_ms DESC, seq DESC LIMIT 1",
+                params![endpoint, space, thread, in_reply_to, label, alias],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Each remote sender whose replies expired on B, by its display name,
+    /// with how many expired.
+    pub(crate) fn expired_replies(&self) -> Result<Vec<(String, i64)>, StoreError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT sender, count FROM outbox_expired WHERE count > 0 ORDER BY sender")?;
+        let expired = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<_, _>>()?;
+        Ok(expired)
+    }
+
+    /// The items `endpoint` queued for `label`, oldest first.
+    pub(crate) fn queued(&self, label: &str, endpoint: &str) -> Result<Vec<Queued>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT message_id, recipient, sender, thread, in_reply_to, text, host_id
+             FROM outbound WHERE label = ?1 AND endpoint = ?2 AND state = 'queued'
+             ORDER BY created_at_ms, rowid",
+        )?;
+        let queued = statement
+            .query_map(params![label, endpoint], |row| {
+                Ok(Queued {
+                    message_id: row.get(0)?,
+                    recipient: row.get(1)?,
+                    sender: row.get(2)?,
+                    thread: row.get(3)?,
+                    in_reply_to: row.get(4)?,
+                    text: row.get(5)?,
+                    host_id: row.get(6)?,
+                })
+            })?
+            .collect::<Result<_, _>>()?;
+        Ok(queued)
+    }
+
+    /// The labels of `endpoint` with an item queued or a thread open at
+    /// `now_ms`, each of which needs its worker.
+    pub(crate) fn active_labels(
+        &self,
+        endpoint: &str,
+        now_ms: i64,
+    ) -> Result<Vec<String>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT label FROM outbound WHERE endpoint = ?1 AND (state = 'queued'
+                OR (state = 'accepted' AND updated_at_ms > ?2))
+             UNION SELECT label FROM collected WHERE endpoint = ?1 AND created_at_ms > ?2
+             ORDER BY label",
+        )?;
+        let labels = statement
+            .query_map(params![endpoint, now_ms - OUTBOUND_LIFETIME_MS], |row| {
+                row.get(0)
+            })?
+            .collect::<Result<_, _>>()?;
+        Ok(labels)
+    }
+
+    /// The items of `endpoint` that failed or expired and whose sender has
+    /// not been told, oldest first.
+    pub(crate) fn unsent(&self, endpoint: &str) -> Result<Vec<Unsent>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT label, message_id, recipient, space, COALESCE(reason, state) FROM outbound
+             WHERE endpoint = ?1 AND state IN ('failed', 'expired') AND notified_at_ms IS NULL
+             ORDER BY updated_at_ms, rowid",
+        )?;
+        let unsent = statement
+            .query_map(params![endpoint], |row| {
+                Ok(Unsent {
+                    label: row.get(0)?,
+                    message_id: row.get(1)?,
+                    recipient: row.get(2)?,
+                    space: row.get(3)?,
+                    reason: row.get(4)?,
+                })
+            })?
+            .collect::<Result<_, _>>()?;
+        Ok(unsent)
+    }
+
+    pub(crate) fn told(&self, unsent: &Unsent, now_ms: i64) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE outbound SET notified_at_ms = ?4
+             WHERE label = ?1 AND message_id = ?2 AND recipient = ?3",
+            params![unsent.label, unsent.message_id, unsent.recipient, now_ms],
+        )?;
+        Ok(())
+    }
+
+    /// Each label of `endpoint` with items that failed or expired, with how
+    /// many of each.
+    pub(crate) fn unsent_by_label(
+        &self,
+        endpoint: &str,
+    ) -> Result<Vec<(String, i64, i64)>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT label, SUM(state = 'failed'), SUM(state = 'expired') FROM outbound
+             WHERE endpoint = ?1 AND state IN ('failed', 'expired')
+             GROUP BY label ORDER BY label",
+        )?;
+        let counts = statement
+            .query_map(params![endpoint], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?
+            .collect::<Result<_, _>>()?;
+        Ok(counts)
+    }
+
+    /// Records whether B's last answer for `item` said that its Automatic
+    /// Reply Limit paused the thread it goes to on B, whose sender is told
+    /// once, and which an item that expires names as its reason.
+    pub(crate) fn set_paused(
+        &self,
+        label: &str,
+        item: &Queued,
+        paused: bool,
+    ) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE outbound SET paused = ?4
+             WHERE label = ?1 AND message_id = ?2 AND recipient = ?3 AND state = 'queued'",
+            params![label, item.message_id, item.recipient, paused],
+        )?;
+        Ok(())
+    }
+
+    /// The items of `endpoint` that B's Automatic Reply Limit paused and
+    /// whose sender has not been told, oldest first.
+    pub(crate) fn paused_untold(&self, endpoint: &str) -> Result<Vec<Paused>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT label, message_id, recipient, space FROM outbound
+             WHERE endpoint = ?1 AND state = 'queued' AND paused AND NOT paused_told
+             ORDER BY created_at_ms, rowid",
+        )?;
+        let paused = statement
+            .query_map(params![endpoint], |row| {
+                Ok(Paused {
+                    label: row.get(0)?,
+                    message_id: row.get(1)?,
+                    recipient: row.get(2)?,
+                    space: row.get(3)?,
+                })
+            })?
+            .collect::<Result<_, _>>()?;
+        Ok(paused)
+    }
+
+    pub(crate) fn told_paused(&self, paused: &Paused) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE outbound SET paused_told = 1
+             WHERE label = ?1 AND message_id = ?2 AND recipient = ?3",
+            params![paused.label, paused.message_id, paused.recipient],
+        )?;
+        Ok(())
+    }
+
+    /// Records the `host_id` an item was first sent to.
+    pub(crate) fn pin(&self, label: &str, item: &Queued, host_id: &str) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE outbound SET host_id = ?4
+             WHERE label = ?1 AND message_id = ?2 AND recipient = ?3 AND host_id IS NULL",
+            params![label, item.message_id, item.recipient, host_id],
+        )?;
+        Ok(())
+    }
+
+    /// Ends a queued item as `state`, with `reason` for a failure.
+    pub(crate) fn settle(
+        &self,
+        label: &str,
+        item: &Queued,
+        state: Settled,
+        reason: Option<&str>,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE outbound SET state = ?4, reason = ?5, updated_at_ms = ?6
+             WHERE label = ?1 AND message_id = ?2 AND recipient = ?3 AND state = 'queued'",
+            params![
+                label,
+                item.message_id,
+                item.recipient,
+                match state {
+                    Settled::Accepted => "accepted",
+                    Settled::Failed => "failed",
+                },
+                reason,
+                now_ms
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The labels whose server last reported `host_id`, by name.
+    pub(crate) fn answering_as(&self, host_id: &str) -> Result<Vec<String>, StoreError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT label FROM peers WHERE host_id = ?1 ORDER BY label")?;
+        let labels = statement
+            .query_map(params![host_id], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        Ok(labels)
+    }
+
+    /// Records the label whose server the server behind `label` answers as,
+    /// for Doctor, or with `None` that it answers as no other.
+    pub(crate) fn set_same_server(
+        &self,
+        endpoint: &str,
+        label: &str,
+        other: Option<&str>,
+    ) -> Result<(), StoreError> {
+        match other {
+            Some(other) => self.connection.execute(
+                "INSERT INTO conditions (endpoint, label, same_server_as) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (endpoint, label) DO UPDATE SET same_server_as = excluded.same_server_as",
+                params![endpoint, label, other],
+            )?,
+            None => self.connection.execute(
+                "UPDATE conditions SET same_server_as = NULL
+                 WHERE endpoint = ?1 AND label = ?2 AND same_server_as IS NOT NULL",
+                params![endpoint, label],
+            )?,
+        };
+        Ok(())
+    }
+
+    pub(crate) fn set_peer(
+        &self,
+        label: &str,
+        host_id: &str,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        self.connection.execute(
+            "INSERT INTO peers (label, host_id, contacted_at_ms) VALUES (?1, ?2, ?3)
+             ON CONFLICT (label) DO UPDATE SET host_id = excluded.host_id,
+                contacted_at_ms = excluded.contacted_at_ms",
+            params![label, host_id, now_ms],
+        )?;
+        Ok(())
+    }
+
+    /// Whether `endpoint` has a thread open with `label`: an item accepted,
+    /// or a reply collected, within 24 hours of `now_ms`.
+    pub(crate) fn thread_open(
+        &self,
+        label: &str,
+        endpoint: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        Ok(self.connection.query_row(
+            "SELECT EXISTS (SELECT 1 FROM outbound WHERE label = ?1 AND endpoint = ?2
+                    AND state = 'accepted' AND updated_at_ms > ?3
+                UNION ALL SELECT 1 FROM collected WHERE label = ?1 AND endpoint = ?2
+                    AND created_at_ms > ?3)",
+            params![label, endpoint, now_ms - OUTBOUND_LIFETIME_MS],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// The outbox epoch of `host_id`, as `peer` reaches it, that `endpoint`
+    /// last collected in, and the highest `seq` of it that `endpoint` has
+    /// taken.
+    pub(crate) fn ack_through(
+        &self,
+        endpoint: &str,
+        peer: &str,
+        host_id: &str,
+    ) -> Result<(String, i64), StoreError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT epoch, seq FROM cursors
+                 WHERE endpoint = ?1 AND peer = ?2 AND host_id = ?3",
+                params![endpoint, peer, host_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+            .unwrap_or_default())
+    }
+
+    /// Records that `endpoint` has taken B's `seq` of `epoch` from
+    /// `host_id`, as `peer` reaches it, so its next call acks it. A new
+    /// epoch starts the count again.
+    pub(crate) fn advance(
+        &self,
+        endpoint: &str,
+        peer: &str,
+        host_id: &str,
+        epoch: &str,
+        seq: i64,
+    ) -> Result<(), StoreError> {
+        self.connection.execute(
+            "INSERT INTO cursors (endpoint, peer, host_id, epoch, seq) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT (endpoint, host_id, peer) DO UPDATE SET seq = CASE
+                WHEN epoch = excluded.epoch THEN MAX(seq, excluded.seq) ELSE excluded.seq END,
+                epoch = excluded.epoch",
+            params![endpoint, peer, host_id, epoch, seq],
+        )?;
+        Ok(())
+    }
+
+    /// Holds `held` for its thread, cut as A would insert it, and says
+    /// whether it is held, which it is not when this endpoint already holds
+    /// `HELD_LIMIT` replies of its label, whatever `host_id` they came
+    /// from, or `HELD_PER_THREAD` of its thread.
+    pub(crate) fn hold(&self, held: &Held, now_ms: i64) -> Result<bool, StoreError> {
+        let changed = self.connection.execute(
+            "INSERT OR IGNORE INTO held (endpoint, host_id, remote_message_id, epoch, seq,
+                label, space, thread, re, remote_alias, text, told, created_at_ms, peer)
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0, ?12, ?15
+             WHERE (SELECT COUNT(*) FROM held WHERE endpoint = ?1 AND label = ?6) < ?13
+                AND (SELECT COUNT(*) FROM held WHERE endpoint = ?1 AND space = ?7
+                    AND thread = ?8) < ?14",
+            params![
+                held.endpoint,
+                held.host_id,
+                held.reply.message_id,
+                held.epoch,
+                held.reply.seq,
+                held.label,
+                held.space,
+                held.thread,
+                held.reply.re,
+                held.reply.from,
+                super::wire::cut(&held.reply.text, super::wire::TEXT_LIMIT),
+                now_ms,
+                HELD_LIMIT,
+                HELD_PER_THREAD,
+                held.peer
+            ],
+        )?;
+        Ok(changed == 1
+            || self.connection.query_row(
+                "SELECT EXISTS (SELECT 1 FROM held WHERE endpoint = ?1 AND peer = ?2
+                    AND host_id = ?3 AND remote_message_id = ?4)",
+                params![
+                    held.endpoint,
+                    held.peer,
+                    held.host_id,
+                    held.reply.message_id
+                ],
+                |row| row.get(0),
+            )?)
+    }
+
+    /// Whether A placed `held`'s reply before: took it at its `seq`, or
+    /// refused it.
+    pub(crate) fn placed(&self, held: &Held) -> Result<bool, StoreError> {
+        Ok(self.connection.query_row(
+            "SELECT EXISTS (SELECT 1 FROM collected WHERE endpoint = ?1 AND peer = ?6
+                    AND host_id = ?2 AND epoch = ?3 AND seq = ?4)
+                OR EXISTS (SELECT 1 FROM dropped WHERE endpoint = ?1 AND peer = ?6
+                    AND host_id = ?2 AND remote_message_id = ?5 AND reason IS NOT NULL)",
+            params![
+                held.endpoint,
+                held.host_id,
+                held.epoch,
+                held.reply.seq,
+                held.reply.message_id,
+                held.peer
+            ],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Whether `endpoint` holds a reply for A's `thread` in `space`, so a
+    /// new one waits behind it.
+    pub(crate) fn holding(
+        &self,
+        endpoint: &str,
+        space: &str,
+        thread: &str,
+    ) -> Result<bool, StoreError> {
+        Ok(self.connection.query_row(
+            "SELECT EXISTS (SELECT 1 FROM held WHERE endpoint = ?1 AND space = ?2
+                AND thread = ?3)",
+            params![endpoint, space, thread],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// The replies `endpoint` holds, oldest first, or with `untold` only the
+    /// oldest of each thread, when its sender has not been told about it.
+    /// So a thread is told once each time the limit pauses it.
+    pub(crate) fn held(&self, endpoint: &str, untold: bool) -> Result<Vec<Held>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT host_id, epoch, label, space, thread, seq, re, remote_alias,
+                remote_message_id, text, peer FROM held h
+             WHERE endpoint = ?1 AND (?2 = 0 OR (told = 0 AND rowid = (SELECT MIN(rowid)
+                FROM held o WHERE o.endpoint = h.endpoint AND o.space = h.space
+                    AND o.thread = h.thread)))
+             ORDER BY rowid",
+        )?;
+        let held = statement
+            .query_map(params![endpoint, untold], |row| {
+                Ok(Held {
+                    endpoint: endpoint.to_owned(),
+                    peer: row.get(10)?,
+                    host_id: row.get(0)?,
+                    epoch: row.get(1)?,
+                    label: row.get(2)?,
+                    space: row.get(3)?,
+                    thread: row.get(4)?,
+                    reply: Reply {
+                        seq: row.get(5)?,
+                        re: row.get(6)?,
+                        from: row.get(7)?,
+                        message_id: row.get(8)?,
+                        text: row.get(9)?,
+                        thread: String::new(),
+                    },
+                })
+            })?
+            .collect::<Result<_, _>>()?;
+        Ok(held)
+    }
+
+    /// Records that the sender of `held`'s thread was told its replies are
+    /// held.
+    pub(crate) fn told_held(&self, held: &Held) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE held SET told = 1
+             WHERE endpoint = ?1 AND peer = ?2 AND host_id = ?3 AND remote_message_id = ?4",
+            params![
+                held.endpoint,
+                held.peer,
+                held.host_id,
+                held.reply.message_id
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Lets go of `held`, which its thread took or can never take.
+    pub(crate) fn release(&self, held: &Held) -> Result<(), StoreError> {
+        self.connection.execute(
+            "DELETE FROM held
+             WHERE endpoint = ?1 AND peer = ?2 AND host_id = ?3 AND remote_message_id = ?4",
+            params![
+                held.endpoint,
+                held.peer,
+                held.host_id,
+                held.reply.message_id
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// B's outbox epoch, which A's acks name.
+    pub(crate) fn outbox_epoch(&self) -> Result<String, StoreError> {
+        Ok(self
+            .connection
+            .query_row("SELECT epoch FROM outbox_epoch", [], |row| row.get(0))?)
+    }
+
+    /// Where a reply to the A message `message_id` goes, when `endpoint`
+    /// sent it to one of `labels` for the server `host_id`, which accepted
+    /// it, so B answers only what was sent to it. `labels` are the
+    /// collecting worker's own and those that dial its addresses, which
+    /// share its server's outbox, so a reply goes to the label its message
+    /// was sent by: the one sent to `from` first, then an accepted one, and
+    /// then the first by name, so every worker of that server places it
+    /// alike. A message still queued but pinned to `host_id` was sent
+    /// there, and is unsettled.
+    pub(crate) fn sent_from(
+        &self,
+        message_id: &str,
+        host_id: &str,
+        endpoint: &str,
+        from: &str,
+        labels: &[String],
+    ) -> Result<Answers, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT label, recipient, space, thread, host_id IS ?3, state = 'accepted'
+             FROM outbound
+             WHERE message_id = ?1 AND endpoint = ?2
+                AND (state = 'accepted' OR state = 'queued' AND host_id IS ?3)",
+        )?;
+        let sent: Vec<(String, String, String, String, bool, bool)> = statement
+            .query_map(params![message_id, endpoint, host_id], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            })?
+            .collect::<Result<_, _>>()?;
+        let best = sent
+            .iter()
+            .filter(|(label, _, _, _, pinned, _)| *pinned && labels.contains(label))
+            .max_by_key(|(label, recipient, .., accepted)| {
+                (recipient == from, *accepted, std::cmp::Reverse(label))
+            });
+        Ok(match best {
+            Some((label, _, space, thread, _, true)) => Answers::Sent {
+                label: label.clone(),
+                space: space.clone(),
+                thread: thread.clone(),
+            },
+            Some((_, _, space, thread, _, false)) => Answers::Unsettled {
+                space: space.clone(),
+                thread: thread.clone(),
+            },
+            None if sent
+                .iter()
+                .any(|(label, .., accepted)| *accepted && !labels.contains(label)) =>
+            {
+                Answers::OtherLabel
+            }
+            None => Answers::Unknown,
+        })
+    }
+
+    /// Counts a reply that `endpoint`'s worker for `label` collected and
+    /// dropped at `now_ms` because it answered a message sent to another
+    /// host. The count starts again after `OTHER_LABEL_LIFETIME_MS` with
+    /// none.
+    pub(crate) fn count_other_label(
+        &self,
+        endpoint: &str,
+        label: &str,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        self.connection.execute(
+            "INSERT INTO conditions (endpoint, label, other_label, other_label_at_ms)
+             VALUES (?1, ?2, 1, ?3)
+             ON CONFLICT (endpoint, label) DO UPDATE SET
+                other_label = CASE WHEN other_label_at_ms > ?3 - ?4 THEN other_label + 1
+                    ELSE 1 END,
+                other_label_at_ms = ?3",
+            params![endpoint, label, now_ms, OTHER_LABEL_LIFETIME_MS],
+        )?;
+        Ok(())
+    }
+
+    /// Records whether `endpoint`'s worker for `label` last stopped a
+    /// collect at a reply A had no room to hold.
+    pub(crate) fn set_held_full(
+        &self,
+        endpoint: &str,
+        label: &str,
+        full: bool,
+    ) -> Result<(), StoreError> {
+        self.connection.execute(
+            "INSERT INTO conditions (endpoint, label, held_full) VALUES (?1, ?2, ?3)
+             ON CONFLICT (endpoint, label) DO UPDATE SET held_full = excluded.held_full",
+            params![endpoint, label, full],
+        )?;
+        Ok(())
+    }
+
+    /// Records that the main store refused `held`'s reply for `reason`, so
+    /// its sender is told once. The record outlives the telling, so the
+    /// same reply read again is neither taken nor told again.
+    pub(crate) fn refused(&self, held: &Held, reason: &str, now_ms: i64) -> Result<(), StoreError> {
+        self.connection.execute(
+            "INSERT OR IGNORE INTO dropped (endpoint, host_id, remote_message_id, label, space,
+                re, remote_alias, count, reason, created_at_ms, peer)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8, ?9, ?10)",
+            params![
+                held.endpoint,
+                held.host_id,
+                held.reply.message_id,
+                held.label,
+                held.space,
+                held.reply.re,
+                held.reply.from,
+                reason,
+                now_ms,
+                held.peer
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Records whether the server behind `label` said, in its last page for
+    /// `endpoint`, that it keeps more replies for it.
+    pub(crate) fn set_can_reply(
+        &self,
+        endpoint: &str,
+        label: &str,
+        can_reply: bool,
+    ) -> Result<(), StoreError> {
+        self.connection.execute(
+            "INSERT INTO conditions (endpoint, label, cannot_reply) VALUES (?1, ?2, ?3)
+             ON CONFLICT (endpoint, label) DO UPDATE SET cannot_reply = excluded.cannot_reply",
+            params![endpoint, label, !can_reply],
+        )?;
+        Ok(())
+    }
+
+    /// Whether the server behind `label` last said it keeps no more
+    /// replies for `endpoint`.
+    pub(crate) fn cannot_reply(&self, endpoint: &str, label: &str) -> Result<bool, StoreError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT cannot_reply FROM conditions WHERE endpoint = ?1 AND label = ?2",
+                params![endpoint, label],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(false))
+    }
+
+    /// The replies of `endpoint` A refused, and its held replies that
+    /// expired, one row a thread, whose senders are still to be told,
+    /// oldest first.
+    pub(crate) fn dropped(&self, endpoint: &str) -> Result<Vec<Dropped>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT host_id, remote_message_id, label, space, re, remote_alias, count, reason,
+                peer FROM dropped WHERE endpoint = ?1 AND told = 0 ORDER BY created_at_ms, rowid",
+        )?;
+        let dropped = statement
+            .query_map(params![endpoint], |row| {
+                Ok(Dropped {
+                    peer: row.get(8)?,
+                    host_id: row.get(0)?,
+                    remote_message_id: row.get(1)?,
+                    label: row.get(2)?,
+                    space: row.get(3)?,
+                    re: row.get(4)?,
+                    remote_alias: row.get(5)?,
+                    why: match row.get::<_, Option<String>>(7)? {
+                        Some(reason) => Why::Refused(reason),
+                        None => Why::Expired(row.get(6)?),
+                    },
+                })
+            })?
+            .collect::<Result<_, _>>()?;
+        Ok(dropped)
+    }
+
+    /// Records that the sender of `dropped`'s thread was told.
+    pub(crate) fn told_dropped(&self, endpoint: &str, dropped: &Dropped) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE dropped SET told = 1
+             WHERE endpoint = ?1 AND peer = ?2 AND host_id = ?3 AND remote_message_id = ?4",
+            params![
+                endpoint,
+                dropped.peer,
+                dropped.host_id,
+                dropped.remote_message_id
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// What `endpoint`'s Doctor reports for each label at `now_ms`.
+    pub(crate) fn conditions(
+        &self,
+        endpoint: &str,
+        now_ms: i64,
+    ) -> Result<Vec<Conditions>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT label, CASE WHEN other_label_at_ms > ?2 - ?3 THEN other_label ELSE 0 END
+                    AS recent, held_full, cannot_reply, same_server_as
+             FROM conditions WHERE endpoint = ?1
+                AND (recent > 0 OR held_full OR cannot_reply OR same_server_as IS NOT NULL)
+             ORDER BY label",
+        )?;
+        let conditions = statement
+            .query_map(params![endpoint, now_ms, OTHER_LABEL_LIFETIME_MS], |row| {
+                Ok(Conditions {
+                    label: row.get(0)?,
+                    other_label: row.get(1)?,
+                    held_full: row.get(2)?,
+                    cannot_reply: row.get(3)?,
+                    same_server_as: row.get(4)?,
+                    lost: 0,
+                })
+            })?
+            .collect::<Result<Vec<Conditions>, _>>()?;
+        let mut statement = self.connection.prepare(
+            "SELECT label, discarded, expired FROM lost
+             WHERE endpoint = ?1 AND updated_at_ms > ?2 - ?3",
+        )?;
+        let lost = statement
+            .query_map(params![endpoint, now_ms, OTHER_LABEL_LIFETIME_MS], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?
+                        .max(0)
+                        .saturating_add(row.get::<_, i64>(2)?.max(0)),
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut conditions = conditions;
+        for (label, count) in lost {
+            match conditions
+                .iter_mut()
+                .find(|condition| condition.label == label)
+            {
+                Some(condition) => condition.lost = condition.lost.saturating_add(count),
+                None => conditions.push(Conditions {
+                    label,
+                    lost: count,
+                    ..Conditions::default()
+                }),
+            }
+        }
+        conditions.sort_by(|a, b| a.label.cmp(&b.label));
+        Ok(conditions)
+    }
+
+    /// Records a reply A inserted as `collected.message_id`, unless that A
+    /// message is already recorded, and says whether it was not.
+    pub(crate) fn record_collected(&self, collected: &Collected<'_>) -> Result<bool, StoreError> {
+        let recorded = self.connection.execute(
+            "INSERT OR IGNORE INTO collected (endpoint, host_id, epoch, seq, label, space,
+                message_id, remote_message_id, remote_alias, thread, created_at_ms, peer)
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12
+             WHERE NOT EXISTS (SELECT 1 FROM collected WHERE endpoint = ?1
+                AND message_id = ?7)",
+            params![
+                collected.endpoint,
+                collected.host_id,
+                collected.epoch,
+                collected.seq,
+                collected.label,
+                collected.space,
+                collected.message_id,
+                collected.remote_message_id,
+                collected.remote_alias,
+                collected.thread,
+                collected.now_ms,
+                collected.peer
+            ],
+        )?;
+        Ok(recorded == 1)
+    }
+
+    /// The outcome B stored for an item's key.
+    pub(crate) fn inbound(&self, key: &InboundKey<'_>) -> Result<Option<Outcome>, StoreError> {
+        let outcome: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT outcome FROM inbound
+                 WHERE host_id = ?1 AND message_id = ?2 AND recipient = ?3",
+                params![key.host_id, key.message_id, key.recipient],
+                |row| row.get(0),
+            )
+            .optional()?;
+        outcome
+            .map(|outcome| {
+                serde_json::from_str(&outcome)
+                    .map_err(|error| StoreError::invalid_input(error.to_string()))
+            })
+            .transpose()
+    }
+
+    /// Stores B's outcome for an item's key, with where an accepted item
+    /// went.
+    pub(crate) fn record_inbound(
+        &self,
+        key: &InboundKey<'_>,
+        outcome: &Outcome,
+        placed: Option<(&str, &str, &str)>,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        self.connection.execute(
+            "INSERT OR IGNORE INTO inbound (host_id, message_id, recipient, outcome,
+                local_message_id, endpoint, space, created_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                key.host_id,
+                key.message_id,
+                key.recipient,
+                serde_json::to_string(outcome)
+                    .map_err(|error| StoreError::invalid_input(error.to_string()))?,
+                placed.map(|placed| placed.0),
+                placed.map(|placed| placed.1),
+                placed.map(|placed| placed.2),
+                now_ms
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// B's thread for A's thread in one of B's spaces.
+    pub(crate) fn remote_thread(
+        &self,
+        thread: &RemoteThread<'_>,
+    ) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT local_thread FROM remote_threads
+                 WHERE host_id = ?1 AND thread = ?2 AND space = ?3",
+                params![thread.host_id, thread.thread, thread.space],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Records B's `local_thread` for A's thread, or that the thread it
+    /// already has was used at `now_ms`.
+    pub(crate) fn record_remote_thread(
+        &self,
+        thread: &RemoteThread<'_>,
+        local_thread: &str,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        self.connection.execute(
+            "INSERT INTO remote_threads (host_id, thread, endpoint, space, local_thread,
+                sender, display_host, used_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT (host_id, thread, space) DO UPDATE SET used_at_ms = excluded.used_at_ms",
+            params![
+                thread.host_id,
+                thread.thread,
+                thread.endpoint,
+                thread.space,
+                local_thread,
+                thread.sender,
+                thread.display_host,
+                now_ms
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Records that B's `local_thread` in `space` carried a reply at
+    /// `now_ms`.
+    pub(crate) fn touch_thread(
+        &self,
+        endpoint: &str,
+        space: &str,
+        local_thread: &str,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE remote_threads SET used_at_ms = ?4
+             WHERE endpoint = ?1 AND space = ?2 AND local_thread = ?3",
+            params![endpoint, space, local_thread, now_ms],
+        )?;
+        Ok(())
+    }
+
+    /// Whether B's `local_thread` in `space` carries a thread of `host_id`.
+    pub(crate) fn maps_thread(
+        &self,
+        host_id: &str,
+        endpoint: &str,
+        space: &str,
+        local_thread: &str,
+    ) -> Result<bool, StoreError> {
+        Ok(self.connection.query_row(
+            "SELECT EXISTS (SELECT 1 FROM remote_threads WHERE host_id = ?1 AND endpoint = ?2
+                AND space = ?3 AND local_thread = ?4)",
+            params![host_id, endpoint, space, local_thread],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Drops B's replies for `host_id` through `ack_through`, and returns
+    /// those after `after` from the oldest, within `limit` encoded bytes,
+    /// whether more remain, and how many B keeps for `host_id`.
+    pub(crate) fn outbox_page(
+        &self,
+        host_id: &str,
+        ack_through: i64,
+        after: i64,
+        limit: usize,
+    ) -> Result<(Vec<Reply>, bool, usize), StoreError> {
+        self.connection.execute(
+            "DELETE FROM outbox WHERE host_id = ?1 AND seq <= ?2",
+            params![host_id, ack_through],
+        )?;
+        let kept: i64 = self.connection.query_row(
+            "SELECT COUNT(*) FROM outbox WHERE host_id = ?1",
+            params![host_id],
+            |row| row.get(0),
+        )?;
+        let mut statement = self.connection.prepare(PAGE)?;
+        let replies = statement.query_map(params![host_id, after], |row| {
+            Ok(Reply {
+                seq: row.get(0)?,
+                re: row.get(1)?,
+                thread: row.get(2)?,
+                from: row.get(3)?,
+                message_id: row.get(4)?,
+                text: row.get(5)?,
+            })
+        })?;
+        let (mut page, mut used, mut more) = (Vec::new(), 0, false);
+        for reply in replies {
+            let reply = reply?;
+            let size = serde_json::to_vec(&reply).map_or(usize::MAX, |encoded| encoded.len() + 1);
+            if used + size > limit {
+                more = true;
+                break;
+            }
+            used += size;
+            page.push(reply);
+        }
+        Ok((page, more, usize::try_from(kept).unwrap_or_default()))
+    }
+
+    /// Fails each queued item older than its lifetime, drops each outbox
+    /// item and `inbound` key older than theirs, each reply A collected or
+    /// held as long ago, each B thread mapping unused as long, and each item A was
+    /// done with two weeks ago, and counts the dropped outbox items per
+    /// remote sender. The held replies of each thread that expire leave one
+    /// `dropped` row, so their sender is told. `cursors` keeps what A acks.
+    fn expire(&mut self, now_ms: i64) -> Result<(), StoreError> {
+        let transaction = self.connection.transaction()?;
+        // A later message of a thread waits behind one B's limit paused, so
+        // it expires for the same reason. It goes first, while the first
+        // paused one, which no other is behind, is still queued.
+        transaction.execute(
+            "UPDATE outbound SET state = 'expired',
+                reason = 'the Automatic Reply Limit kept its thread on ' || label
+                    || ' paused for 24 hours',
+                updated_at_ms = ?1
+             WHERE state = 'queued' AND created_at_ms <= ?2
+                AND EXISTS (SELECT 1 FROM outbound p WHERE p.endpoint = outbound.endpoint
+                    AND p.label = outbound.label AND p.thread = outbound.thread
+                    AND p.message_id <> outbound.message_id AND p.state = 'queued' AND p.paused
+                    AND (p.created_at_ms, p.rowid) < (outbound.created_at_ms, outbound.rowid))",
+            params![now_ms, now_ms - OUTBOUND_LIFETIME_MS],
+        )?;
+        transaction.execute(
+            "UPDATE outbound SET state = 'expired',
+                reason = CASE WHEN paused
+                    THEN 'the Automatic Reply Limit kept its thread on ' || label
+                        || ' paused for 24 hours'
+                    ELSE label || ' was unreachable for 24 hours' END,
+                updated_at_ms = ?1
+             WHERE state = 'queued' AND created_at_ms <= ?2",
+            params![now_ms, now_ms - OUTBOUND_LIFETIME_MS],
+        )?;
+        let outbox_limit = now_ms - OUTBOX_LIFETIME_MS;
+        transaction.execute(
+            "INSERT INTO outbox_expired (sender, count)
+             SELECT COALESCE((SELECT sender || '@' || display_host FROM remote_threads t
+                    WHERE t.host_id = o.host_id LIMIT 1), o.host_id), COUNT(*)
+             FROM outbox o WHERE created_at_ms <= ?1 GROUP BY 1
+             ON CONFLICT (sender) DO UPDATE SET count = count + excluded.count",
+            params![outbox_limit],
+        )?;
+        transaction.execute(
+            "INSERT INTO outbox_lost (host_id, re, sender, since_ms, discarded, expired,
+                updated_at_ms)
+             SELECT host_id, re, sender, ?1, 0, COUNT(*), ?1 FROM outbox
+             WHERE created_at_ms <= ?2 GROUP BY host_id, re, sender
+             ON CONFLICT (host_id, re, sender) DO UPDATE SET
+                expired = expired + excluded.expired, updated_at_ms = excluded.updated_at_ms",
+            params![now_ms, outbox_limit],
+        )?;
+        transaction.execute(
+            "DELETE FROM outbox WHERE created_at_ms <= ?1",
+            params![outbox_limit],
+        )?;
+        transaction.execute(
+            "DELETE FROM outbox_lost WHERE updated_at_ms <= ?1",
+            params![outbox_limit],
+        )?;
+        transaction.execute(
+            "DELETE FROM lost WHERE updated_at_ms <= ?1",
+            params![now_ms - DONE_LIFETIME_MS],
+        )?;
+        // An item A accepted is dropped `DONE_LIFETIME_MS` after it was
+        // accepted, and no loss is noted or told without it, so a record
+        // made after that outlasts it.
+        transaction.execute(
+            "DELETE FROM lost_told WHERE told_at_ms <= ?1",
+            params![now_ms - DONE_LIFETIME_MS],
+        )?;
+        transaction.execute(
+            "DELETE FROM inbound WHERE created_at_ms <= ?1",
+            params![now_ms - INBOUND_LIFETIME_MS],
+        )?;
+        transaction.execute(
+            "DELETE FROM collected WHERE created_at_ms <= ?1",
+            params![outbox_limit],
+        )?;
+        transaction.execute(
+            "INSERT OR IGNORE INTO dropped (endpoint, host_id, remote_message_id, label, space,
+                re, remote_alias, count, created_at_ms, peer)
+             SELECT endpoint, host_id, remote_message_id, label, space, re, remote_alias, n, ?1,
+                peer
+             FROM (SELECT endpoint, host_id, remote_message_id, label, space, re,
+                    remote_alias, peer, COUNT(*) AS n, MIN(rowid)
+                FROM held WHERE created_at_ms <= ?2 GROUP BY endpoint, space, thread)",
+            params![now_ms, outbox_limit],
+        )?;
+        transaction.execute(
+            "DELETE FROM held WHERE created_at_ms <= ?1",
+            params![outbox_limit],
+        )?;
+        transaction.execute(
+            "DELETE FROM dropped WHERE created_at_ms <= ?1",
+            params![outbox_limit],
+        )?;
+        transaction.execute(
+            "DELETE FROM remote_threads WHERE used_at_ms <= ?1",
+            params![outbox_limit],
+        )?;
+        transaction.execute(
+            "DELETE FROM outbound WHERE state <> 'queued' AND updated_at_ms <= ?1",
+            params![now_ms - DONE_LIFETIME_MS],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests;

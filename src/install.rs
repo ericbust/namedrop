@@ -1,3 +1,5 @@
+use crate::installed_runtime::PackageLease;
+use crate::mux::MuxKind;
 use crate::{
     AgentRuntime, AttentionItemDraft, AttentionItemId, AttentionSourceKind, DiscoveredWorktree,
     LifecycleRuntime, MutationAttribution, StateStore, integration_package,
@@ -106,6 +108,8 @@ const CODEX_SNAPSHOT_FILES: [&str; 4] = [
 pub struct AgentConfigDirectories<'a> {
     pub claude: Option<&'a Path>,
     pub codex: Option<&'a Path>,
+    /// `XDG_CONFIG_HOME`, which holds the install record.
+    pub config: Option<&'a Path>,
 }
 impl AgentConfigDirectories<'_> {
     pub(crate) fn claude(self, home: &Path) -> PathBuf {
@@ -118,6 +122,11 @@ impl AgentConfigDirectories<'_> {
             .map(Path::to_owned)
             .unwrap_or_else(|| home.join(".codex"))
     }
+    /// Where the installer records the state directory it bakes into the
+    /// hook wrappers.
+    pub(crate) fn install_record(self, home: &Path) -> PathBuf {
+        crate::locator::install_record(home)
+    }
 }
 
 /// The home and agent config directories a process inherited. The CLI and
@@ -127,6 +136,7 @@ pub struct InheritedDirectories {
     home: Option<PathBuf>,
     claude: Option<PathBuf>,
     codex: Option<PathBuf>,
+    config: Option<PathBuf>,
 }
 impl InheritedDirectories {
     pub fn from_environment() -> Self {
@@ -136,6 +146,9 @@ impl InheritedDirectories {
                 .filter(|path| path.is_absolute()),
             claude: std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from),
             codex: std::env::var_os("CODEX_HOME").map(PathBuf::from),
+            config: std::env::var_os("XDG_CONFIG_HOME")
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute()),
         }
     }
     pub fn home(&self) -> Option<&Path> {
@@ -145,6 +158,7 @@ impl InheritedDirectories {
         AgentConfigDirectories {
             claude: self.claude.as_deref(),
             codex: self.codex.as_deref(),
+            config: self.config.as_deref(),
         }
     }
 }
@@ -206,11 +220,46 @@ pub fn disclosed_user_package_targets(
     )
 }
 
+/// What a package install writes outside its state directory, as
+/// (what, where) pairs, from the paths its writers use. `namedrop install`
+/// lists these before it writes and reports them after.
+pub(crate) fn package_targets(
+    home: &Path,
+    config: AgentConfigDirectories<'_>,
+) -> Vec<(&'static str, PathBuf)> {
+    let mut targets = vec![("Shell command", home.join(".local/bin/namedrop"))];
+    for file in command::shell_startup_files(home) {
+        targets.push(("PATH lines", file));
+    }
+    for (runtime, directory) in user_package_directories(home) {
+        targets.push((
+            match runtime {
+                AgentRuntime::Codex => "Codex package",
+                AgentRuntime::ClaudeCode => "Claude Code package",
+            },
+            directory,
+        ));
+    }
+    if let Ok(settings) = claude_permissions::settings_path(&config.claude(home)) {
+        targets.push(("Claude Code permissions", settings));
+    }
+    targets.push(("Codex rules, sandbox root and plugin", config.codex(home)));
+    targets.push((
+        "Install records",
+        crate::locator::install_record(home)
+            .parent()
+            .expect("the install record has a directory")
+            .to_owned(),
+    ));
+    targets
+}
+
 /// Read-only repair guidance. The Herdr activation runner applies supported
 /// Codex install steps automatically; hook trust remains a human action.
 pub(crate) fn user_hook_activation_guidance(
     home_directory: Option<&Path>,
     config: AgentConfigDirectories<'_>,
+    kind: crate::mux::MuxKind,
 ) -> Value {
     let mut codex_cache_current = false;
     let mut codex_migration_ready = false;
@@ -256,13 +305,19 @@ pub(crate) fn user_hook_activation_guidance(
             "steps": ["Start a new Claude Code session or run /reload-plugins. Verify a request and reply; doctor alone cannot verify hooks."]
         }
     });
-    if let Some(advice) = crate::codex_app_server::observe(home_directory, config).advice() {
+    if let Some(advice) = crate::codex_app_server::observe(home_directory, config).advice(kind) {
         guidance["codex"]["app_server"] = advice;
     }
     guidance
 }
 
-pub(crate) fn native_session_setup(runtime: AgentRuntime) -> Value {
+pub(crate) fn native_session_setup(runtime: AgentRuntime, kind: crate::mux::MuxKind) -> Value {
+    if kind == crate::mux::MuxKind::Rex {
+        return json!({
+            "status": "session_identity_missing",
+            "explanation": "Namedrop has no session identity for this Rex pane. Submit the first prompt, then check registration. If identity is still missing after a turn, run Activate Namedrop again and restart the agent so it loads the Namedrop hooks."
+        });
+    }
     let host_runtime = match runtime {
         AgentRuntime::Codex => "codex",
         AgentRuntime::ClaudeCode => "claude",
@@ -412,7 +467,13 @@ pub fn install_integration_package(
     executable: &Path,
     state_directory: &Path,
 ) -> Result<PathBuf, String> {
+    let lease = crate::installed_runtime::package_guard(
+        Some(root),
+        state_directory,
+        crate::installed_runtime::Writer::Activation,
+    )?;
     install_integration_package_with_config(
+        &lease,
         root,
         runtime,
         executable,
@@ -421,13 +482,15 @@ pub fn install_integration_package(
     )
 }
 
-fn install_integration_package_with_config(
+pub(crate) fn install_integration_package_with_config(
+    lease: &PackageLease,
     root: &Path,
     runtime: AgentRuntime,
     executable: &Path,
     state_directory: &Path,
     config: AgentConfigDirectories<'_>,
 ) -> Result<PathBuf, String> {
+    lease.require_write()?;
     let PreparedPackage {
         directory,
         files,
@@ -449,20 +512,29 @@ fn install_integration_package_with_config(
     }
     // Publish ownership first so an interrupted refresh can be completed later.
     for (name, contents, mode) in files {
-        replace_if_changed(&directory.join(name), &contents, mode)?;
+        replace_if_changed(lease, &directory.join(name), &contents, mode)?;
     }
     if let Some((path, contents)) = codex_policy {
         fs::create_dir_all(path.parent().expect("policy has a parent"))
             .map_err(|error| conflict(&path, &format!("cannot create rules directory: {error}")))?;
-        replace_if_changed(&path, &contents, Some(0o600))?;
+        replace_if_changed(lease, &path, &contents, Some(0o600))?;
     }
     if runtime == AgentRuntime::ClaudeCode
         && let Err(error) =
-            claude_permissions::refresh(&config.claude(root), executable, state_directory)
+            claude_permissions::refresh(lease, &config.claude(root), executable, state_directory)
     {
         eprintln!(
             "Namedrop skipped Claude Code permissions: {error}; {}",
             claude_permissions::REPAIR_GUIDANCE
+        );
+    }
+    // Only a Rex block's CLI reads the record, so Herdr's install never
+    // fails for it.
+    let record = config.install_record(root);
+    if let Err(error) = crate::locator::write_install_record(lease, &record, state_directory) {
+        eprintln!(
+            "Namedrop could not record its state directory in {}: {error}",
+            record.display()
         );
     }
     Ok(directory)
@@ -502,8 +574,20 @@ fn prepare_integration_package(
     }
     let directory = verified_package_directory(root, runtime)?;
     let package = integration_package(runtime);
-    let instructions =
-        installed_instructions(package.instructions, runtime, executable, state_directory)?;
+    let rex = fs::read_to_string(state_directory.join("runtime/owner"))
+        .is_ok_and(|owner| owner.trim() == "standalone");
+    let instructions = installed_instructions(
+        package.instructions,
+        runtime,
+        executable,
+        state_directory,
+        rex,
+    )?;
+    let descriptor = if rex {
+        crate::integration::rex_catalog_prose(package.tool_descriptor)
+    } else {
+        package.tool_descriptor.to_owned()
+    };
     let hooks = hooks_manifest(&directory)?;
     let scripts = HOOK_SCRIPTS
         .into_iter()
@@ -518,7 +602,7 @@ fn prepare_integration_package(
     let mut files = vec![
         (OWNERSHIP_MARKER_FILE, ownership_marker(), None),
         (INSTRUCTIONS_FILE, instructions, None),
-        (DESCRIPTOR_FILE, package.tool_descriptor.to_owned(), None),
+        (DESCRIPTOR_FILE, descriptor, None),
         (CODEX_MANIFEST_FILE, codex_manifest(REVISION_SLOT), None),
         (CLAUDE_MANIFEST_FILE, claude_manifest(REVISION_SLOT), None),
         (HOOKS_FILE, hooks, None),
@@ -593,6 +677,54 @@ pub(crate) fn inspect_integration_package(
     Ok(())
 }
 
+/// The state directory the install record names, when an installed
+/// SessionStart wrapper bakes another one. Doctor reports it, because a Rex
+/// block's CLI would then open a directory its hooks never write.
+pub(crate) fn install_record_mismatch(
+    home: &Path,
+    config: AgentConfigDirectories<'_>,
+) -> Option<(PathBuf, PathBuf)> {
+    let record = config.install_record(home);
+    let recorded = crate::locator::read_install_record(&record)?;
+    packages_bake_another_state(home, &recorded).then_some((record, recorded))
+}
+
+/// Whether an installed SessionStart wrapper bakes another state directory
+/// than `state`.
+pub(crate) fn packages_bake_another_state(home: &Path, state: &Path) -> bool {
+    let Some(baked) = state
+        .to_str()
+        .map(|state| format!("--state-directory {}", shell_single_quote(state)))
+    else {
+        return false;
+    };
+    [AgentRuntime::Codex, AgentRuntime::ClaudeCode]
+        .into_iter()
+        .filter_map(|runtime| {
+            fs::read_to_string(package_directory(home, runtime).join(SESSION_START_SCRIPT_FILE))
+                .ok()
+        })
+        .any(|wrapper| !wrapper.contains(&baked))
+}
+
+/// Each installed SessionStart or UserPromptSubmit wrapper that sets no
+/// `NAMEDROP_HOOK_RUNTIME`, as one installed before it existed. Its hooks
+/// never bind a session in a Rex block, so Doctor names them there.
+pub(crate) fn wrappers_without_runtime(home: &Path) -> Vec<PathBuf> {
+    [AgentRuntime::Codex, AgentRuntime::ClaudeCode]
+        .into_iter()
+        .flat_map(|runtime| {
+            [SESSION_START_SCRIPT_FILE, HOOK_SCRIPT_FILE]
+                .map(|file| package_directory(home, runtime).join(file))
+        })
+        .filter(|path| {
+            fs::read_to_string(path).is_ok_and(|wrapper| {
+                !wrapper.contains(&format!("{}=", crate::mux::home::HOOK_RUNTIME))
+            })
+        })
+        .collect()
+}
+
 fn inspect_installed_file(path: &Path, expected: &str, mode: Option<u32>) -> Result<(), String> {
     let actual =
         fs::read(path).map_err(|error| conflict(path, &format!("cannot be read: {error}")))?;
@@ -658,7 +790,7 @@ fn validate_claude_permission_paths(executable: &Path, state: &Path) -> Result<(
 
 fn claude_allow_rules(executable: &Path, state: &Path) -> Result<Vec<String>, String> {
     validate_claude_permission_paths(executable, state)?;
-    Ok(collaboration_permission_patterns(executable, state)
+    let mut rules: Vec<String> = collaboration_permission_patterns(executable, state)
         .into_iter()
         .map(|pattern| {
             format!(
@@ -668,7 +800,23 @@ fn claude_allow_rules(executable: &Path, state: &Path) -> Result<Vec<String>, St
                 pattern[3..].join(" ")
             )
         })
-        .collect())
+        .collect();
+    // Claude Code asks before it reads a file outside its working directory,
+    // and a message from Channels names its images by path in this directory.
+    // A path with a pattern character would widen the rule or cut it short,
+    // so such a state gets no rule and Claude Code asks.
+    if !state
+        .to_string_lossy()
+        .contains(['?', '[', ']', '{', '}', '(', ')'])
+    {
+        rules.push(format!(
+            "Read(/{}/**)",
+            state
+                .join(crate::dashboard::CHANNEL_IMAGES_DIRECTORY)
+                .display()
+        ));
+    }
+    Ok(rules)
 }
 
 fn prepare_codex_policy(
@@ -718,7 +866,18 @@ fn installed_instructions(
     runtime: AgentRuntime,
     executable: &Path,
     state_directory: &Path,
+    rex: bool,
 ) -> Result<String, String> {
+    let instructions = if rex {
+        instructions
+            .replace("agents or terminals in Herdr", "agents or terminals in Rex")
+            .replace(
+                "Registration uses that prefix with Herdr flags.",
+                "Registration uses that prefix with the location flags shown in the request.",
+            )
+    } else {
+        instructions.to_owned()
+    };
     let (frontmatter, body) = instructions.split_once("\n---\n").ok_or_else(|| {
         format!(
             "the {} instructions have no frontmatter boundary",
@@ -742,12 +901,18 @@ fn installed_instructions(
             "Use this exact installed command prefix whenever these instructions name `namedrop`: `{command_prefix}`."
         ),
     );
+    let invocation = if rex {
+        "Use the installed executable directly with `--plugin-state` and `NAMEDROP_STATE_DIR` before the bound operation. Append `--endpoint`, `--space`, and `--pane` with the exact `NAMEDROP_ENDPOINT`, `NAMEDROP_SPACE_ID`, and `NAMEDROP_PANE_ID` values the delivery's lines or `control.tool.environment` show."
+    } else {
+        "Use the installed executable directly with `--plugin-state` and the state directory (`HERDR_PLUGIN_STATE_DIR` or `NAMEDROP_STATE_DIR`) before the bound operation. Append the location flags with the exact values the delivery's lines or `control.tool.environment` show: `--herdr-socket`, `--herdr-workspace`, and `--herdr-pane` for `HERDR_SOCKET_PATH`, `HERDR_WORKSPACE_ID`, and `HERDR_PANE_ID`, or `--endpoint`, `--space`, and `--pane` for `NAMEDROP_ENDPOINT`, `NAMEDROP_SPACE_ID`, and `NAMEDROP_PANE_ID`."
+    };
     let body = format!(
-        "{body}\n## Invocation\n\nUse the installed executable directly with `--plugin-state <HERDR_PLUGIN_STATE_DIR>` before the bound operation. Append `--herdr-socket`, `--herdr-workspace`, and `--herdr-pane` with the exact values the delivery's lines or `control.tool.environment` show. Keep operation tokens and flags as shown; single-quote literal values. For long JSON, write and verify a file in a separate tool call, then use `--input-json-file <absolute-path>` instead of `--input-json`; retain all bound fields. Use no environment prefix, shell substitution, pipes or wrappers. An OS sandbox access error is not an approval decision: request normal host approval for this exact invocation. If approval policy rejects it, report the blocker and keep the reply pending; do not broaden permissions or relay around the denial.\n"
+        "{body}\n## Invocation\n\n{invocation} Keep operation tokens and flags as shown; single-quote literal values. For long JSON, write and verify a file in a separate tool call, then use `--input-json-file <absolute-path>` instead of `--input-json`; retain all bound fields. Use no environment prefix, shell substitution, pipes or wrappers. An OS sandbox access error is not an approval decision: request normal host approval for this exact invocation. If approval policy rejects it, report the blocker and keep the reply pending; do not broaden permissions or relay around the denial.\n"
     );
+    let transport = if rex { "Rex" } else { "Herdr" };
     if runtime != AgentRuntime::ClaudeCode {
         return Ok(format!(
-            "{frontmatter}\n---\n{body}\nCodex: Activation adds only Namedrop's deferred-commands directory to the writable roots; its runtime and database remain outside that grant. Use normal sandbox execution for send, reply, ack, complete, and the current-workspace address list. If the sandbox blocks Herdr, Namedrop queues these commands for its outside worker. A pending result has unknown commit status. Retry the exact command to recover its result. Start a new Codex session after activation to load the grant.\n"
+            "{frontmatter}\n---\n{body}\nCodex: Activation adds only Namedrop's deferred-commands directory to the writable roots; its runtime and database remain outside that grant. Use normal sandbox execution for send, reply, ack, complete, and the current-workspace address list. If the sandbox blocks {transport}, Namedrop queues these commands for its outside worker. A pending result has unknown commit status. Retry the exact command to recover its result. Start a new Codex session after activation to load the grant.\n"
         ));
     }
     Ok(format!(
@@ -759,9 +924,16 @@ fn installed_instructions(
 /// event. A runtime whose package failed must not be challenged.
 pub(crate) struct IntegrationPackageInstallation {
     outcomes: Vec<(AgentRuntime, Result<PathBuf, String>)>,
+    /// Why the registered Rex module could not be rewritten. The module is no
+    /// agent package, so its failure leaves both outcomes as they are.
+    module: Option<String>,
 }
 
 impl IntegrationPackageInstallation {
+    pub(crate) fn module_error(&self) -> Option<&str> {
+        self.module.as_deref()
+    }
+
     pub(crate) fn failed(&self, runtime: AgentRuntime) -> bool {
         self.outcomes
             .iter()
@@ -807,8 +979,9 @@ impl IntegrationPackageInstallation {
         &self,
         home_directory: Option<&Path>,
         config: AgentConfigDirectories<'_>,
+        kind: crate::mux::MuxKind,
     ) -> Value {
-        let mut guidance = user_hook_activation_guidance(home_directory, config);
+        let mut guidance = user_hook_activation_guidance(home_directory, config, kind);
         for (runtime, outcome) in &self.outcomes {
             if let Err(error) = outcome {
                 guidance[runtime.as_str()] = json!({
@@ -827,37 +1000,59 @@ impl IntegrationPackageInstallation {
 /// lifecycle event: it blocks challenge issuance for that runtime and leaves one
 /// durable Integration Registration Attention Item naming the failed target. A
 /// later successful refresh resolves that item.
-pub(crate) fn refresh_user_integration_packages<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub(crate) fn refresh_user_integration_packages<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     discovered: &DiscoveredWorktree,
+    writer: crate::installed_runtime::Writer,
 ) -> Result<IntegrationPackageInstallation, String>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
-    let (_package_guard, current) = crate::installed_runtime::package_guard()?;
+    let lease = crate::installed_runtime::package_guard(
+        runtime.home_directory,
+        runtime.state_directory,
+        writer,
+    )?;
+    // A refusal is this refresh's report, so the event that ran it still
+    // does its own work instead of failing.
+    let current = lease.writable();
+    if let Err(refusal) = &current {
+        eprintln!("{refusal}");
+    }
     let executable = crate::collaboration_executable().map(PathBuf::from);
     let outcomes = [AgentRuntime::Codex, AgentRuntime::ClaudeCode].map(|agent_runtime| {
-        let outcome = match (runtime.home_directory, &executable) {
-            (Some(home_directory), _) if !current => {
+        let outcome = match (runtime.home_directory, &executable, &current) {
+            (_, _, Err(refusal)) => Err(refusal.clone()),
+            (Some(home_directory), _, Ok(false)) => {
                 verified_package_directory(home_directory, agent_runtime)
             }
-            (Some(home_directory), Ok(executable)) => install_integration_package_with_config(
-                home_directory,
-                agent_runtime,
-                executable,
-                runtime.state_directory,
-                runtime.agent_config,
-            ),
-            (None, _) => Err(
+            (Some(home_directory), Ok(executable), Ok(true)) => {
+                install_integration_package_with_config(
+                    &lease,
+                    home_directory,
+                    agent_runtime,
+                    executable,
+                    runtime.state_directory,
+                    runtime.agent_config,
+                )
+            }
+            (None, _, _) => Err(
                 "no user home directory is available for the shared Agent Integration package"
                     .to_owned(),
             ),
-            (_, Err(error)) => Err(error.clone()),
+            (_, Err(error), _) => Err(error.clone()),
         };
         (agent_runtime, outcome)
     });
+    let module = match (&current, runtime.home_directory, &executable) {
+        (Ok(true), Some(home), Ok(executable)) => {
+            crate::rex_ui::refresh(&lease, home, executable, runtime.state_directory).err()
+        }
+        _ => None,
+    };
+    drop(lease);
     let namespace = discovered.namespace(runtime.session_socket_id);
     let attribution = MutationAttribution::new(
         crate::ActorKind::Plugin,
@@ -900,6 +1095,7 @@ where
         .map_err(|error| error.to_string())?;
     Ok(IntegrationPackageInstallation {
         outcomes: outcomes.into_iter().collect(),
+        module,
     })
 }
 
@@ -1044,12 +1240,89 @@ fn subagent_script(
     ))
 }
 
-pub(crate) fn remove_subagent_hooks(state: &Path, home: Option<&Path>) -> Result<usize, String> {
-    let (_guard, current) = crate::installed_runtime::package_guard()?;
-    if !current {
+pub(crate) fn remove_all(
+    lease: &PackageLease,
+    home: &Path,
+    state: &Path,
+    config: AgentConfigDirectories<'_>,
+) -> Result<(), String> {
+    lease.require_write()?;
+    remove_claude_permissions(lease, state)?;
+    codex_sandbox::remove(lease, state)?;
+    let codex = config.codex(home);
+    let policy = codex.join("rules/namedrop.rules");
+    if fs::symlink_metadata(&policy).is_ok_and(|m| m.is_file())
+        && fs::read_to_string(&policy).is_ok_and(|s| s.starts_with(CODEX_RULES_MARKER))
+    {
+        fs::remove_file(policy).map_err(|e| e.to_string())?;
+    }
+    let path = codex.join("config.toml");
+    if fs::symlink_metadata(&path).is_ok_and(|m| m.is_file()) {
+        let before = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        let mut doc = before.parse::<DocumentMut>().map_err(|e| e.to_string())?;
+        if codex_plugin_configuration(home, &package_directory(home, AgentRuntime::Codex), config).0
+            == CodexMarketplaceConfiguration::Matching
+        {
+            if let Some(table) = doc
+                .get_mut("marketplaces")
+                .and_then(Item::as_table_like_mut)
+            {
+                table.remove("namedrop");
+            }
+            if let Some(table) = doc.get_mut("plugins").and_then(Item::as_table_like_mut) {
+                table.remove("namedrop@namedrop");
+            }
+            replace_if_changed(lease, &path, &doc.to_string(), None)?;
+        }
+    }
+    for agent in [AgentRuntime::Codex, AgentRuntime::ClaudeCode] {
+        let directory = package_directory(home, agent);
+        if directory.exists() {
+            if fs::read_dir(&directory)
+                .map_err(|e| e.to_string())?
+                .next()
+                .is_some()
+            {
+                verified_package_directory(home, agent)?;
+                for entry in fs::read_dir(&directory).map_err(|e| e.to_string())? {
+                    let entry = entry.map_err(|e| e.to_string())?;
+                    if entry.file_name() == OWNERSHIP_MARKER_FILE {
+                        continue;
+                    }
+                    let kind = entry.file_type().map_err(|e| e.to_string())?;
+                    if kind.is_dir() {
+                        fs::remove_dir_all(entry.path())
+                    } else {
+                        fs::remove_file(entry.path())
+                    }
+                    .map_err(|e| e.to_string())?;
+                }
+                fs::remove_file(directory.join(OWNERSHIP_MARKER_FILE))
+                    .map_err(|e| e.to_string())?;
+            }
+            fs::remove_dir(directory).map_err(|e| e.to_string())?;
+        }
+    }
+    command::remove_shell_command(lease, home, state)?;
+    let record = crate::locator::install_record(home);
+    if crate::locator::read_install_record(&record).as_deref() == Some(state) {
+        fs::remove_file(record).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+pub(crate) fn remove_subagent_hooks(
+    lease: &PackageLease,
+    state: &Path,
+    home: Option<&Path>,
+) -> Result<usize, String> {
+    if !lease.writable()? {
         return Ok(0);
     }
-    if StateStore::open(state)
+    if !matches!(
+        crate::installed_runtime::retirement(state)?,
+        Some(crate::installed_runtime::Retirement::Removed { .. })
+    ) && StateStore::open(state)
         .map_err(|e| e.to_string())?
         .transaction(|tx| tx.any_activated_worktrees())
         .map_err(|e| e.to_string())?
@@ -1103,7 +1376,7 @@ pub(crate) fn remove_subagent_hooks(state: &Path, home: Option<&Path>) -> Result
             }
         }
         if changed {
-            replace_if_changed(&path, &format!("{manifest}\n"), None)?;
+            replace_if_changed(lease, &path, &format!("{manifest}\n"), None)?;
         }
         let ledger = directory.join(SUBAGENT_OWNERSHIP_FILE);
         let script = directory.join(SUBAGENT_SCRIPT_FILE);
@@ -1138,7 +1411,7 @@ fn stop_script(executable: &Path, state_directory: &Path) -> Result<String, Stri
             .ok_or("hook state path is not UTF-8")?,
     );
     Ok(format!(
-        "#!/bin/sh\nexec >/dev/null 2>&1\nNAMEDROP_HERDR_TIMEOUT_MS=250 {executable} hook stop --state-directory {state} <&0 >/dev/null 2>&1\nexit 0\n"
+        "#!/bin/sh\nexec >/dev/null 2>&1\nNAMEDROP_HERDR_TIMEOUT_MS=250 NAMEDROP_REX_TIMEOUT_MS=250 {executable} hook stop --state-directory {state} <&0 >/dev/null 2>&1\nexit 0\n"
     ))
 }
 
@@ -1180,9 +1453,9 @@ fn hook_script(
         safe_context.push_str(&forward_marked_context("UserPromptSubmit", marker));
     }
     Ok(format!(
-        "#!/bin/sh\noutput=$({} hook user-prompt-submit --state-directory {} 2>/dev/null) || exit 0\nif [ \"$output\" = '{{\"decision\":\"block\",\"reason\":\"Collaboration message sent.\"}}' ]; then\n  {} hook mailbox-wake --state-directory {} </dev/null >/dev/null 2>&1 &\n  printf '%s' \"$output\"\n  exit 0\nfi\n{}exit 0\n",
-        shell_single_quote(executable),
-        shell_single_quote(state_directory),
+        "#!/bin/sh\noutput=$({}={} {} hook user-prompt-submit --state-directory {} 2>/dev/null) || exit 0\nif [ \"$output\" = '{{\"decision\":\"block\",\"reason\":\"Collaboration message sent.\"}}' ]; then\n  printf '%s' \"$output\"\n  exit 0\nfi\n{}exit 0\n",
+        crate::mux::home::HOOK_RUNTIME,
+        runtime.as_str(),
         shell_single_quote(executable),
         shell_single_quote(state_directory),
         safe_context,
@@ -1219,16 +1492,25 @@ fn session_start_script(
             state_directory.display()
         )
     })?;
+    // Herdr's notice first, as it always was, then Rex's.
     let app_server_notice = match runtime {
-        AgentRuntime::Codex => format!(
-            "if [ \"$output\" = {} ]; then\n  printf '%s' \"$output\"\n  exit 0\nfi\n",
-            shell_single_quote(&crate::hook::codex_app_server_hook_output().to_string())
-        ),
+        AgentRuntime::Codex => [MuxKind::Herdr, MuxKind::Rex]
+            .map(|kind| {
+                format!(
+                    "if [ \"$output\" = {} ]; then\n  printf '%s' \"$output\"\n  exit 0\nfi\n",
+                    shell_single_quote(
+                        &crate::hook::codex_app_server_hook_output(kind).to_string()
+                    )
+                )
+            })
+            .concat(),
         AgentRuntime::ClaudeCode => String::new(),
     };
     let update_notice = forward_update_notice(runtime);
     Ok(format!(
-        "#!/bin/sh\noutput=$({} hook session-start --state-directory {} 2>/dev/null) || exit 0\n{app_server_notice}{}{update_notice}exit 0\n",
+        "#!/bin/sh\noutput=$({}={} {} hook session-start --state-directory {} 2>/dev/null) || exit 0\n{app_server_notice}{}{update_notice}exit 0\n",
+        crate::mux::home::HOOK_RUNTIME,
+        runtime.as_str(),
         shell_single_quote(executable),
         shell_single_quote(state_directory),
         forward_marked_context("SessionStart", crate::persona::POLICY_MARKER),
@@ -1243,40 +1525,60 @@ fn forward_update_notice(runtime: AgentRuntime) -> String {
         .expect("hook output is an object");
     let message_start = "\"systemMessage\":\"Namedrop ";
     let message_middle = " is available (you have ";
-    let message_end = format!("). Update: {}\"}}", crate::update_check::UPDATE_COMMAND,);
-    let mut patterns = vec![
-        format!(
-            "{}*{}*{}",
-            shell_single_quote(&format!("{{{message_start}")),
-            shell_single_quote(message_middle),
-            shell_single_quote(&message_end)
-        ),
-        format!(
-            "{}*{}*{}*{}",
-            shell_single_quote(&policy_start),
-            shell_single_quote(&format!("{policy_end},{message_start}")),
-            shell_single_quote(message_middle),
-            shell_single_quote(&message_end)
-        ),
-    ];
-    if runtime == AgentRuntime::Codex {
-        let notice = crate::hook::codex_app_server_hook_output().to_string();
-        let start = notice
-            .strip_suffix("\"}")
-            .expect("notice ends with systemMessage");
-        patterns.push(format!(
-            "{}*{}*{}",
-            shell_single_quote(&format!("{start}\\nNamedrop ")),
-            shell_single_quote(message_middle),
-            shell_single_quote(&message_end)
-        ));
+    let mut cases = Vec::new();
+    for standalone in [false, true] {
+        let message_end = if standalone {
+            format!(
+                "{}*{}",
+                shell_single_quote("). Update: download Namedrop "),
+                shell_single_quote(" and run sh scripts/install.sh\"}")
+            )
+        } else {
+            shell_single_quote(&format!(
+                "). Update: {}\"}}",
+                crate::update_check::UPDATE_COMMAND
+            ))
+        };
+        let mut patterns = vec![
+            format!(
+                "{}*{}*{message_end}",
+                shell_single_quote(&format!("{{{message_start}")),
+                shell_single_quote(message_middle),
+            ),
+            format!(
+                "{}*{}*{}*{message_end}",
+                shell_single_quote(&policy_start),
+                shell_single_quote(&format!("{policy_end},{message_start}")),
+                shell_single_quote(message_middle),
+            ),
+        ];
+        if runtime == AgentRuntime::Codex {
+            for kind in [MuxKind::Herdr, MuxKind::Rex] {
+                let notice = crate::hook::codex_app_server_hook_output(kind).to_string();
+                let start = notice
+                    .strip_suffix("\"}")
+                    .expect("notice ends with systemMessage");
+                patterns.push(format!(
+                    "{}*{}*{message_end}",
+                    shell_single_quote(&format!("{start}\\nNamedrop ")),
+                    shell_single_quote(message_middle),
+                ));
+            }
+        }
+        let parse = if standalone {
+            // Split at the first marker, so that no text before the version
+            // in the download segment, such as a second notice, can pass.
+            "download=${output#*'). Update: download Namedrop '}\n    download=${download%' and run sh scripts/install.sh\"}'}\n    versions=${output%%'). Update: download Namedrop '*}\n    versions=${versions##*'Namedrop '}".to_owned()
+        } else {
+            format!(
+                "versions=${{output##*'Namedrop '}}\n    versions=${{versions%{message_end}}}\n    download=${{versions%%' is available (you have '*}}"
+            )
+        };
+        cases.push(format!("  {})\n    {parse}\n    ;;", patterns.join("|")));
     }
-    // Validate both versions with shell builtins; wrapper bytes must remain
-    // stable when only the release version changes.
     format!(
-        "case \"$output\" in\n  {})\n    versions=${{output##*'Namedrop '}}\n    versions=${{versions%{}}}\n    available=${{versions%%' is available (you have '*}}\n    installed=${{versions#*' is available (you have '}}\n    valid_version() {{\n      [ \"${{#1}}\" -le 32 ] || return 1\n      value=$1\n      serial=\n      case \"$value\" in\n        *-exp.*) serial=${{value#*-exp.}}; value=${{value%%-exp.*}}; [ -n \"$serial\" ] || return 1 ;;\n      esac\n      case \"$value\" in ''|*[!0-9.]*) return 1 ;; esac\n      IFS=.\n      set -- $value\n      [ \"$#\" -eq 3 ] || return 1\n      [ \"$value\" = \"$1.$2.$3\" ] || return 1\n      if [ -n \"$serial\" ]; then set -- \"$@\" \"$serial\"; fi\n      for part do\n        case \"$part\" in ''|*[!0-9]*|0[0-9]*) return 1 ;; esac\n        [ \"${{#part}}\" -le 20 ] || return 1\n        if [ \"${{#part}}\" -eq 20 ]; then\n          high=${{part%??????????}}\n          low=${{part#??????????}}\n          [ \"$high\" -lt 1844674407 ] || {{\n            [ \"$high\" -eq 1844674407 ] && [ \"$low\" -le 3709551615 ]\n          }} || return 1\n        fi\n      done\n    }}\n    valid_version \"$available\" && valid_version \"$installed\" || exit 0\n    printf '%s' \"$output\"\n    ;;\nesac\n",
-        patterns.join("|"),
-        shell_single_quote(&message_end),
+        "case \"$output\" in\n{}\n  *) exit 0 ;;\nesac\n    available=${{versions%%' is available (you have '*}}\n    installed=${{versions#*' is available (you have '}}\n    valid_version() {{\n      [ \"${{#1}}\" -le 32 ] || return 1\n      value=$1\n      serial=\n      case \"$value\" in\n        *-exp.*) serial=${{value#*-exp.}}; value=${{value%%-exp.*}}; [ -n \"$serial\" ] || return 1 ;;\n      esac\n      case \"$value\" in ''|*[!0-9.]*) return 1 ;; esac\n      IFS=.\n      set -- $value\n      [ \"$#\" -eq 3 ] || return 1\n      [ \"$value\" = \"$1.$2.$3\" ] || return 1\n      if [ -n \"$serial\" ]; then set -- \"$@\" \"$serial\"; fi\n      for part do\n        case \"$part\" in ''|*[!0-9]*|0[0-9]*) return 1 ;; esac\n        [ \"${{#part}}\" -le 20 ] || return 1\n        if [ \"${{#part}}\" -eq 20 ]; then\n          high=${{part%??????????}}\n          low=${{part#??????????}}\n          [ \"$high\" -lt 1844674407 ] || {{\n            [ \"$high\" -eq 1844674407 ] && [ \"$low\" -le 3709551615 ]\n          }} || return 1\n        fi\n      done\n    }}\n    valid_version \"$available\" && valid_version \"$installed\" || exit 0\n    [ \"$download\" = \"$available\" ] || exit 0\n    printf '%s' \"$output\"\n",
+        cases.join("\n"),
     )
 }
 
@@ -1401,15 +1703,23 @@ impl std::fmt::Display for ReplacementError {
 /// Replaces one owned file by staging it and renaming it over the target, and
 /// only when its content differs, so a reader of the package never observes a
 /// half-written file and repeated lifecycle events rewrite nothing.
-fn replace_if_changed(target: &Path, contents: &str, mode: Option<u32>) -> Result<(), String> {
-    replace_with_status(target, contents, mode).map_err(|error| error.message)
+pub(crate) fn replace_if_changed(
+    lease: &PackageLease,
+    target: &Path,
+    contents: &str,
+    mode: Option<u32>,
+) -> Result<(), String> {
+    lease.require_write()?;
+    replace_with_status(lease, target, contents, mode).map_err(|error| error.message)
 }
 
 fn replace_with_status(
+    lease: &PackageLease,
     target: &Path,
     contents: &str,
     mode: Option<u32>,
 ) -> Result<(), ReplacementError> {
+    lease.require_write().map_err(ReplacementError::from)?;
     match fs::symlink_metadata(target) {
         Ok(metadata) if metadata.is_symlink() => {
             return Err(conflict(target, "is a symbolic link").into());
@@ -1491,6 +1801,174 @@ fn conflict(path: &Path, reason: &str) -> String {
 mod permission_tests {
     use super::*;
     use crate::StateNamespace;
+
+    /// The app-server notice names the multiplexer of the hook's home, and
+    /// the Codex SessionStart wrapper forwards each wording exactly, alone
+    /// or followed by an update notice, and nothing that differs from it.
+    #[test]
+    fn the_codex_wrapper_forwards_the_app_server_notice_in_either_multiplexers_words() {
+        let herdr = crate::hook::codex_app_server_hook_output(MuxKind::Herdr).to_string();
+        let rex = crate::hook::codex_app_server_hook_output(MuxKind::Rex).to_string();
+        assert!(
+            herdr.contains("so Herdr cannot tell which pane this session is in")
+                && !herdr.contains("Rex"),
+            "{herdr}"
+        );
+        assert!(
+            rex.contains("so Namedrop cannot tell which Rex pane this session is in")
+                && rex.contains("restart Codex in each of its Rex panes")
+                && !rex.contains("Herdr")
+                && !rex.contains("block"),
+            "{rex}"
+        );
+        let root = std::env::temp_dir().join(format!("namedrop-notice-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let executable = root.join("hook-result");
+        let wrapper = root.join("session-start");
+        fs::write(
+            &wrapper,
+            HookScript::Session
+                .render(AgentRuntime::Codex, &executable, Path::new("/s"))
+                .unwrap(),
+        )
+        .unwrap();
+        let updated = |notice: &str, standalone: bool| {
+            let mut composed: Value = serde_json::from_str(notice).unwrap();
+            composed["systemMessage"] = format!(
+                "{}\nNamedrop 9.0.0 is available (you have {}). Update: {}",
+                composed["systemMessage"].as_str().unwrap(),
+                env!("CARGO_PKG_VERSION"),
+                if standalone {
+                    "download Namedrop 9.0.0 and run sh scripts/install.sh"
+                } else {
+                    crate::update_check::UPDATE_COMMAND
+                }
+            )
+            .into();
+            composed.to_string()
+        };
+        for (output, forward) in [
+            (herdr.clone(), true),
+            (rex.clone(), true),
+            (updated(&herdr, false), true),
+            (updated(&rex, false), true),
+            (updated(&herdr, true), true),
+            (updated(&rex, true), true),
+            (format!("{rex} "), false),
+            (rex.replacen("Namedrop", "Nomedrop", 1), false),
+        ] {
+            fs::write(
+                &executable,
+                format!(
+                    "#!/bin/sh\nprintf '%s' '{}'\n",
+                    output.replace('\'', "'\"'\"'")
+                ),
+            )
+            .unwrap();
+            fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+            let result = std::process::Command::new("/bin/sh")
+                .arg(&wrapper)
+                .output()
+                .unwrap();
+            assert_eq!(
+                String::from_utf8(result.stdout).unwrap(),
+                if forward { output } else { String::new() }
+            );
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The UserPromptSubmit wrapper is the one before commit 16 without the
+    /// line that backgrounded `hook mailbox-wake`: the hook starts the wake.
+    /// It and the SessionStart wrapper name their runtime in a variable, which
+    /// only a Rex block's bind reads and an older binary ignores.
+    #[test]
+    fn the_context_wrappers_name_their_runtime_and_start_no_wake() {
+        for runtime in [AgentRuntime::Codex, AgentRuntime::ClaudeCode] {
+            let wrapper = HookScript::Prompt
+                .render(runtime, Path::new("/x/namedrop"), Path::new("/s"))
+                .unwrap();
+            let prompt = format!(
+                concat!(
+                    "#!/bin/sh\n",
+                    "output=$(NAMEDROP_HOOK_RUNTIME={} '/x/namedrop' hook user-prompt-submit --state-directory '/s' 2>/dev/null) || exit 0\n",
+                    "if [ \"$output\" = '{{\"decision\":\"block\",\"reason\":\"Collaboration message sent.\"}}' ]; then\n",
+                    "  printf '%s' \"$output\"\n",
+                    "  exit 0\n",
+                    "fi\n",
+                ),
+                runtime.as_str()
+            );
+            assert!(wrapper.starts_with(&prompt), "{wrapper}");
+            assert!(!wrapper.contains("mailbox-wake"), "{wrapper}");
+            let session = HookScript::Session
+                .render(runtime, Path::new("/x/namedrop"), Path::new("/s"))
+                .unwrap();
+            let start = format!(
+                "#!/bin/sh\noutput=$(NAMEDROP_HOOK_RUNTIME={} '/x/namedrop' hook session-start --state-directory '/s' 2>/dev/null) || exit 0\n",
+                runtime.as_str()
+            );
+            assert!(session.starts_with(&start), "{session}");
+        }
+    }
+
+    /// The Stop wrapper holds the hook to its 250 ms under either multiplexer,
+    /// and installing a package records the directory its wrappers bake.
+    #[test]
+    fn the_stop_wrapper_caps_both_multiplexers_and_the_install_is_recorded() {
+        let root =
+            std::env::temp_dir().join(format!("namedrop-stop-wrapper-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let (home, state) = (root.join("home"), root.join("state"));
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&state).unwrap();
+        let recorder = root.join("namedrop");
+        fs::write(
+            &recorder,
+            "#!/bin/sh\nenv | grep _TIMEOUT_MS= | sort > \"$0.env\"\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&recorder, fs::Permissions::from_mode(0o755)).unwrap();
+        let package =
+            install_integration_package(&home, AgentRuntime::ClaudeCode, &recorder, &state)
+                .unwrap();
+        let status = std::process::Command::new("/bin/sh")
+            .arg(package.join(STOP_SCRIPT_FILE))
+            .env_remove("NAMEDROP_HERDR_TIMEOUT_MS")
+            .env_remove("NAMEDROP_REX_TIMEOUT_MS")
+            .stdin(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(
+            fs::read_to_string(root.join("namedrop.env")).unwrap(),
+            "NAMEDROP_HERDR_TIMEOUT_MS=250\nNAMEDROP_REX_TIMEOUT_MS=250\n"
+        );
+        assert_eq!(
+            crate::locator::read_install_record(&home.join(".config/namedrop/state-directory")),
+            Some(state.clone())
+        );
+        assert_eq!(
+            install_record_mismatch(&home, AgentConfigDirectories::default()),
+            None
+        );
+        crate::locator::write_install_record(
+            &crate::installed_runtime::test_package_lease(),
+            &home.join(".config/namedrop/state-directory"),
+            Path::new("/elsewhere"),
+        )
+        .unwrap();
+        assert_eq!(
+            install_record_mismatch(&home, AgentConfigDirectories::default()),
+            Some((
+                home.join(".config/namedrop/state-directory"),
+                PathBuf::from("/elsewhere")
+            ))
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
 
     /// Codex hashes every byte of the plugin, so a byte outside the revision could
     /// strand a running session with no new version to show for it.
@@ -1596,12 +2074,28 @@ mod permission_tests {
         store
             .transaction(|tx| tx.deactivate_worktree(&ns_a, &attribution))
             .unwrap();
-        assert_eq!(remove_subagent_hooks(&root, Some(&home)).unwrap(), 0);
+        assert_eq!(
+            remove_subagent_hooks(
+                &crate::installed_runtime::test_package_lease(),
+                &root,
+                Some(&home)
+            )
+            .unwrap(),
+            0
+        );
         assert!(codex.join(SUBAGENT_SCRIPT_FILE).exists());
         store
             .transaction(|tx| tx.deactivate_worktree(&ns_b, &attribution))
             .unwrap();
-        assert_eq!(remove_subagent_hooks(&root, Some(&home)).unwrap(), 12);
+        assert_eq!(
+            remove_subagent_hooks(
+                &crate::installed_runtime::test_package_lease(),
+                &root,
+                Some(&home)
+            )
+            .unwrap(),
+            12
+        );
         assert!(!codex.join(SUBAGENT_SCRIPT_FILE).exists());
         assert_eq!(
             fs::read_to_string(claude.join(SUBAGENT_SCRIPT_FILE)).unwrap(),
@@ -1618,7 +2112,15 @@ mod permission_tests {
         }
         assert!(codex.join(SESSION_START_SCRIPT_FILE).exists());
         assert!(codex.join(HOOK_SCRIPT_FILE).exists());
-        assert_eq!(remove_subagent_hooks(&root, Some(&home)).unwrap(), 0);
+        assert_eq!(
+            remove_subagent_hooks(
+                &crate::installed_runtime::test_package_lease(),
+                &root,
+                Some(&home)
+            )
+            .unwrap(),
+            0
+        );
         drop(store);
         fs::remove_dir_all(root).unwrap();
     }
@@ -1649,8 +2151,26 @@ mod permission_tests {
             "Bash('/opt/namedrop' --plugin-state '/opt/state' reminder cancel *)",
             "Bash('/opt/namedrop' --plugin-state '/opt/state' address list *)",
             "Bash('/opt/namedrop' --plugin-state '/opt/state' handoff acknowledge-granted *)",
+            "Read(//opt/state/channel-images/**)",
         ];
         assert_eq!(actual, expected);
+        for state in [
+            "/opt/sta?e",
+            "/opt/[state]",
+            "/opt/state]",
+            "/opt/{a,b}",
+            "/opt/state}",
+            "/opt/state (old)",
+            "/opt/state)",
+        ] {
+            let rules = claude_allow_rules(Path::new("/opt/namedrop"), Path::new(state)).unwrap();
+            assert_eq!(rules.len(), 22, "{state}");
+            assert!(
+                rules.iter().all(|rule| rule.starts_with("Bash(")),
+                "{state}"
+            );
+        }
+        assert!(claude_allow_rules(Path::new("/opt/namedrop"), Path::new("/opt/st*te")).is_err());
         for operation in crate::operation_catalog()
             .management_operations
             .iter()

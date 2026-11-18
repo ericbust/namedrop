@@ -5,7 +5,7 @@ use std::{
     io::{Read, Write},
     os::unix::{fs::OpenOptionsExt, process::CommandExt},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -24,7 +24,24 @@ fn enabled() -> bool {
     true
 }
 
-pub(crate) fn settings_path() -> Result<PathBuf, String> {
+/// Whether the state's owner is a standalone install. Any other owner, an
+/// unreadable one included, keeps Herdr's settings and notice, as every state
+/// did before owners existed.
+fn standalone(state: &Path) -> bool {
+    crate::installed_runtime::standalone(state) == Ok(true)
+}
+
+pub(crate) fn settings_path(state: &Path) -> Result<PathBuf, String> {
+    if standalone(state) {
+        return env::var_os("HOME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .map(|home| home.join(".config/namedrop/settings.json"))
+            .ok_or(
+                "Namedrop cannot locate its standalone update settings without an absolute HOME"
+                    .into(),
+            );
+    }
     let directory = env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
@@ -45,8 +62,8 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
     serde_json::from_slice(&data).map_err(|error| error.to_string())
 }
 
-pub(crate) fn settings() -> Result<bool, String> {
-    let path = settings_path()?;
+pub(crate) fn settings(state: &Path) -> Result<bool, String> {
+    let path = settings_path(state)?;
     if !path.try_exists().map_err(|error| error.to_string())? {
         return Ok(true);
     }
@@ -107,10 +124,24 @@ pub(crate) struct AvailableUpdate {
     pub checked_at: u64,
     pub last_success_at: Option<u64>,
     pub last_error: Option<String>,
+    pub standalone: bool,
+}
+
+impl AvailableUpdate {
+    pub fn instruction(&self) -> String {
+        if self.standalone {
+            format!(
+                "download Namedrop {} and run sh scripts/install.sh",
+                self.version
+            )
+        } else {
+            UPDATE_COMMAND.to_owned()
+        }
+    }
 }
 
 pub(crate) fn available(state: &Path) -> Option<AvailableUpdate> {
-    settings().ok().filter(|enabled| *enabled)?;
+    settings(state).ok().filter(|enabled| *enabled)?;
     let cache = cache(state)?;
     let remote = cache.remote_version?;
     (version(&remote)? > version(env!("CARGO_PKG_VERSION"))?).then_some(AvailableUpdate {
@@ -118,23 +149,18 @@ pub(crate) fn available(state: &Path) -> Option<AvailableUpdate> {
         checked_at: cache.checked_at,
         last_success_at: cache.last_success_at,
         last_error: cache.last_error,
+        standalone: standalone(state),
     })
 }
 
-/// Called only by startup reconciliation and pane lifecycle events. The child
-/// owns the lock and all subprocess/network work, so pane handling never waits.
+/// Called by startup reconciliation and pane lifecycle events, and for a
+/// standalone install by its Rex bridge. The child owns the lock and all
+/// subprocess/network work, so pane handling never waits. Returns the child
+/// it started, for a long-lived caller to reap.
 #[doc(hidden)]
-pub fn start(state: &Path, now: u64) {
-    let Ok(path) = settings_path() else {
-        return;
-    };
-    if settings() != Ok(true)
-        || cache(state)
-            .is_some_and(|cache| now >= cache.checked_at && now - cache.checked_at < DAY_MS)
-    {
-        return;
-    }
-    let _ = Command::new("python3")
+pub fn start(state: &Path, now: u64) -> Option<Child> {
+    let path = due(state, now)?;
+    Command::new("python3")
         .args(["-c", include_str!("../scripts/check-update.py")])
         .arg(state)
         .arg(path)
@@ -142,7 +168,66 @@ pub fn start(state: &Path, now: u64) {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn();
+        .spawn()
+        .ok()
+}
+
+/// The settings file of a check that is due: the settings allow it and none
+/// ran within the day.
+fn due(state: &Path, now: u64) -> Option<PathBuf> {
+    let path = settings_path(state).ok()?;
+    (settings(state) == Ok(true)
+        && !cache(state)
+            .is_some_and(|cache| now >= cache.checked_at && now - cache.checked_at < DAY_MS))
+    .then_some(path)
+}
+
+/// Starts the update check of a standalone install, from its Rex bridge,
+/// which runs no `reconcile` or lifecycle event. A Herdr-owned state keeps
+/// its own triggers. The check reads `runtime/source.json`, which a first
+/// install writes after the bridge has started, so until it exists the
+/// bridge's next start runs the check (the U10 review's F2). It asks about
+/// Apple's stub only for a check that is due, so an opted-out or checked
+/// install runs no `xcode-select` (round A's review, F4).
+pub(crate) fn start_standalone(state: &Path, now: u64) -> Option<Child> {
+    if !standalone(state)
+        || !state.join("runtime/source.json").is_file()
+        || due(state, now).is_none()
+        || apple_python_stub()
+    {
+        return None;
+    }
+    start(state, now)
+}
+
+/// On a Mac without the developer tools, `/usr/bin/python3` is Apple's stub,
+/// which fails and offers to install them. It writes no cache, so the bridge
+/// would run it on every connection and every hour (the U10 review's F1).
+/// The stub is the `python3` that `start` would run when it is the first on
+/// PATH and `xcode-select -p`, found as the check finds it, fails.
+fn apple_python_stub() -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    if !cfg!(target_os = "macos") {
+        return false;
+    }
+    // Without PATH, Command searches the system default.
+    let path = env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into());
+    let first = env::split_paths(&path)
+        .map(|directory| directory.join("python3"))
+        .find(|candidate| {
+            fs::metadata(candidate).is_ok_and(|metadata| {
+                metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+            })
+        });
+    first.and_then(|python| fs::canonicalize(python).ok())
+        == Some(PathBuf::from("/usr/bin/python3"))
+        && !Command::new("xcode-select")
+            .arg("-p")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
 }
 
 #[derive(Deserialize, Serialize)]
@@ -205,9 +290,10 @@ pub fn session_notice(
         return output;
     }
     let message = format!(
-        "Namedrop {} is available (you have {}). Update: {UPDATE_COMMAND}",
+        "Namedrop {} is available (you have {}). Update: {}",
         update.version,
-        env!("CARGO_PKG_VERSION")
+        env!("CARGO_PKG_VERSION"),
+        update.instruction()
     );
     let output = output.get_or_insert_with(|| serde_json::json!({}));
     output["systemMessage"] = match output["systemMessage"].as_str() {

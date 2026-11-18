@@ -1,3 +1,6 @@
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/executable.rs"]
@@ -31,7 +34,7 @@ esac
         self.0.join("home")
     }
     fn command(&self, executable: impl AsRef<std::ffi::OsStr>) -> Command {
-        let mut command = Command::new(executable);
+        let mut command = crate::binary::command(executable);
         command
             .env("HOME", self.home())
             .env("CLAUDE_CONFIG_DIR", self.home().join(".claude"))
@@ -58,7 +61,7 @@ esac
         command.output().unwrap()
     }
     fn cli(&self, args: &[&str]) -> std::process::Output {
-        self.command(env!("CARGO_BIN_EXE_namedrop"))
+        self.command(crate::binary::namedrop_path())
             .arg("--plugin-state")
             .arg(self.0.join("state"))
             .args(args)
@@ -88,7 +91,7 @@ finally:
 sys.exit(child.wait(timeout=10))
 "#,
             ])
-            .arg(env!("CARGO_BIN_EXE_namedrop"))
+            .arg(crate::binary::namedrop_path())
             .arg("--plugin-state")
             .arg(self.0.join("state"))
             .args(args)
@@ -114,7 +117,7 @@ fn activation_makes_the_readme_command_work_in_a_fresh_shell_and_refreshes_its_p
         "# existing settings\nexport KEEP_ME=yes\n",
     )
     .unwrap();
-    let binary = std::path::Path::new(env!("CARGO_BIN_EXE_namedrop"));
+    let binary = std::path::Path::new(crate::binary::namedrop_path());
     success(f.activate(binary));
     let wrapper = f.home().join(".local/bin/namedrop");
     assert!(
@@ -161,7 +164,7 @@ fn activation_preserves_an_unrelated_command_and_shell_configuration() {
     let launcher = f.home().join(".local/bin/namedrop");
     fs::write(&launcher, "#!/bin/sh\necho user-owned\n").unwrap();
     fs::write(f.home().join(".zshrc"), "# untouched\n").unwrap();
-    let result = f.activate(std::path::Path::new(env!("CARGO_BIN_EXE_namedrop")));
+    let result = f.activate(std::path::Path::new(crate::binary::namedrop_path()));
     assert!(!result.status.success());
     assert!(
         String::from_utf8(result.stdout)
@@ -184,7 +187,7 @@ fn activation_refuses_symlinked_startup_files_before_installing_the_command() {
     let original = f.0.join("user configuration");
     fs::write(&original, "# preserved\n").unwrap();
     std::os::unix::fs::symlink(&original, f.home().join(".zshrc")).unwrap();
-    let result = f.activate(std::path::Path::new(env!("CARGO_BIN_EXE_namedrop")));
+    let result = f.activate(std::path::Path::new(crate::binary::namedrop_path()));
     assert!(!result.status.success());
     assert!(
         String::from_utf8(result.stdout)
@@ -202,7 +205,7 @@ fn activation_reports_partial_installation_as_failure_in_json_and_human_output()
     fs::create_dir_all(&skill).unwrap();
     fs::write(skill.join("SKILL.md"), "user-owned skill\n").unwrap();
     for human in [false, true] {
-        let mut command = f.command(env!("CARGO_BIN_EXE_namedrop"));
+        let mut command = f.command(crate::binary::namedrop_path());
         command.arg("--plugin-state").arg(f.0.join("state")).args([
             "activate",
             "--input-json",
@@ -239,7 +242,7 @@ fn activation_supports_bash_login_and_interactive_shells_without_shadowing_profi
     let f = Fixture::new("bash");
     fs::write(f.home().join(".profile"), "export KEEP_ME=yes\n").unwrap();
     let activated = f
-        .command(env!("CARGO_BIN_EXE_namedrop"))
+        .command(crate::binary::namedrop_path())
         .env("SHELL", "/bin/bash")
         .arg("--plugin-state")
         .arg(f.0.join("state"))
@@ -273,7 +276,7 @@ fn activation_honors_zdotdir_inside_the_isolated_home() {
     let f = Fixture::new("zdotdir");
     let zdotdir = f.home().join("zsh config");
     success(
-        f.command(env!("CARGO_BIN_EXE_namedrop"))
+        f.command(crate::binary::namedrop_path())
             .env("ZDOTDIR", &zdotdir)
             .arg("--plugin-state")
             .arg(f.0.join("state"))
@@ -298,7 +301,7 @@ fn activation_honors_zdotdir_inside_the_isolated_home() {
 #[test]
 fn terminal_commands_are_readable_while_pipes_and_explicit_json_keep_the_protocol() {
     let f = Fixture::new("readable");
-    success(f.activate(std::path::Path::new(env!("CARGO_BIN_EXE_namedrop"))));
+    success(f.activate(std::path::Path::new(crate::binary::namedrop_path())));
     let text = success(f.terminal(&["name", "@build", "--type", "terminal"]));
     assert!(text.contains("Named this terminal @build."), "{text}");
     assert!(text.contains("Ready to receive commands."));
@@ -334,7 +337,7 @@ fn terminal_commands_are_readable_while_pipes_and_explicit_json_keep_the_protoco
 #[test]
 fn human_health_and_errors_preserve_failure_status_and_json_can_be_forced() {
     let f = Fixture::new("health-output");
-    success(f.activate(std::path::Path::new(env!("CARGO_BIN_EXE_namedrop"))));
+    success(f.activate(std::path::Path::new(crate::binary::namedrop_path())));
     success(f.cli(&["name", "@build", "--type", "terminal"]));
     assert!(success(f.terminal(&["space", "pause"])).contains("Messages will wait"));
     let report = f.cli(&["doctor", "--human"]);
@@ -368,7 +371,7 @@ fn human_health_and_errors_preserve_failure_status_and_json_can_be_forced() {
 #[test]
 fn activation_installs_and_reloads_every_shortcut_without_an_extra_command() {
     let f = Fixture::new("status-shortcut");
-    let binary = std::path::Path::new(env!("CARGO_BIN_EXE_namedrop"));
+    let binary = std::path::Path::new(crate::binary::namedrop_path());
     let first: serde_json::Value = serde_json::from_str(&success(f.activate(binary))).unwrap();
     assert_eq!(first["data"]["shortcuts"]["status"], "installed");
     assert_eq!(first["data"]["shortcuts"]["reloaded"], true);
@@ -471,7 +474,7 @@ fn activation_reports_shortcut_conflicts_and_reload_failures() {
     fs::write(&path, "# preserve this comment\n").unwrap();
     fs::write(f.home().join("reload-fails"), "").unwrap();
     let report: serde_json::Value = serde_json::from_str(&success(
-        f.activate(std::path::Path::new(env!("CARGO_BIN_EXE_namedrop"))),
+        f.activate(std::path::Path::new(crate::binary::namedrop_path())),
     ))
     .unwrap();
     assert_eq!(report["data"]["shortcuts"]["reloaded"], false);
@@ -488,7 +491,7 @@ fn activation_reports_shortcut_conflicts_and_reload_failures() {
     );
     fs::remove_file(f.home().join("reload-fails")).unwrap();
     let report: serde_json::Value = serde_json::from_str(&success(
-        f.activate(std::path::Path::new(env!("CARGO_BIN_EXE_namedrop"))),
+        f.activate(std::path::Path::new(crate::binary::namedrop_path())),
     ))
     .unwrap();
     assert_eq!(report["data"]["shortcuts"]["reloaded"], true);
@@ -499,7 +502,7 @@ fn activation_uses_the_config_override_and_refuses_a_symlink() {
     let f = Fixture::new("status-config-override");
     let config = f.0.join("custom/config.toml");
     let activate = || {
-        let mut command = f.command(env!("CARGO_BIN_EXE_namedrop"));
+        let mut command = f.command(crate::binary::namedrop_path());
         command
             .env("HERDR_CONFIG_PATH", &config)
             .arg("--plugin-state")

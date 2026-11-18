@@ -3,8 +3,10 @@
 //! no read transaction outlives a single snapshot build.
 use super::server_files::ServerFiles;
 use super::snapshot::{self, DashboardSnapshot, RepoRef, SpaceKey, SpaceSummary};
-use crate::{HerdrCommandExecutor, ProcessHerdr, StateNamespace, StateStore, StoreErrorKind};
-use serde::Deserialize;
+use crate::{
+    StateNamespace, StateStore, StoreErrorKind,
+    mux::{Budget, Depth, MuxConnector, MuxError, PaneFacts, Scope, SpaceView, Survey},
+};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
@@ -67,27 +69,11 @@ struct LiveSpace {
     repo: Option<RepoRef>,
 }
 
-#[derive(Deserialize)]
-struct HerdrWorkspaceList {
-    result: HerdrWorkspaces,
-}
-
-#[derive(Deserialize)]
-struct HerdrWorkspaces {
-    workspaces: Vec<HerdrSpace>,
-}
-
-#[derive(Deserialize)]
-struct HerdrSpace {
-    workspace_id: String,
-    label: Option<String>,
-    #[serde(
-        default,
-        rename = "worktree",
-        deserialize_with = "RepoRef::from_herdr_worktree"
-    )]
-    repo: Option<RepoRef>,
-}
+/// The limits on each Herdr read the hub makes.
+const HERDR_BUDGET: Budget = Budget {
+    timeout: HERDR_TIMEOUT,
+    max_output_bytes: 8 * 1024 * 1024,
+};
 
 struct Discovery {
     cancel: Arc<AtomicBool>,
@@ -97,14 +83,14 @@ struct Discovery {
 
 struct DiscoveryMailbox {
     sockets: BTreeSet<String>,
-    latest: HashMap<String, Vec<HerdrSpace>>,
+    latest: HashMap<String, Vec<SpaceView>>,
     answered: HashSet<String>,
     failed: HashSet<String>,
     notified: bool,
 }
 
 enum DiscoveryAnswer {
-    Snapshot(Vec<HerdrSpace>),
+    Snapshot(Vec<SpaceView>),
     Failed,
     Retired,
 }
@@ -146,6 +132,7 @@ impl Discovery {
         sockets: BTreeSet<String>,
         states: Arc<Mutex<HashMap<String, SocketState>>>,
         notify: Sender<HubCommand>,
+        mux: Arc<dyn MuxConnector>,
     ) -> Self {
         let cancel = Arc::new(AtomicBool::new(false));
         let mailbox = Arc::new(Mutex::new(DiscoveryMailbox {
@@ -158,7 +145,7 @@ impl Discovery {
         let worker_cancel = cancel.clone();
         let worker_mailbox = mailbox.clone();
         let thread =
-            thread::spawn(move || Self::run(worker_cancel, worker_mailbox, states, notify));
+            thread::spawn(move || Self::run(worker_cancel, worker_mailbox, states, notify, &*mux));
         Self {
             cancel,
             mailbox,
@@ -182,6 +169,7 @@ impl Discovery {
         mailbox: Arc<Mutex<DiscoveryMailbox>>,
         states: Arc<Mutex<HashMap<String, SocketState>>>,
         notify: Sender<HubCommand>,
+        mux: &dyn MuxConnector,
     ) {
         while !cancel.load(Ordering::Relaxed) {
             let started = Instant::now();
@@ -207,18 +195,10 @@ impl Discovery {
                         },
                     );
                 }
-                let result = ProcessHerdr::default()
-                    .with_socket(Some(socket.clone()))
-                    .execute_bounded(
-                        &["workspace", "list"],
-                        HERDR_TIMEOUT,
-                        &cancel,
-                        8 * 1024 * 1024,
-                    )
-                    .and_then(|output| {
-                        serde_json::from_str::<HerdrWorkspaceList>(&output.stdout)
-                            .map_err(|error| error.to_string())
-                    });
+                let result = mux
+                    .connect(&socket, HERDR_BUDGET, cancel.clone())
+                    .and_then(|herdr| herdr.survey(Scope::All, Depth::Spaces))
+                    .map_err(|error| error.to_string());
                 if cancel.load(Ordering::Relaxed) {
                     return;
                 }
@@ -231,7 +211,7 @@ impl Discovery {
                             .lock()
                             .unwrap()
                             .insert(socket.clone(), SocketState::Healthy);
-                        DiscoveryAnswer::Snapshot(list.result.workspaces)
+                        DiscoveryAnswer::Snapshot(list.spaces)
                     }
                     Err(error) => {
                         if matches!(state, SocketState::Healthy) {
@@ -341,26 +321,35 @@ enum NativeSubagentSession {
 type SubagentPaneSessions = HashMap<String, NativeSubagentSession>;
 type NativeSubagentPanes = HashMap<(String, String), Option<SubagentPaneSessions>>;
 
-fn native_subagent_panes(input: &str) -> Option<SubagentPaneSessions> {
-    let value: serde_json::Value = serde_json::from_str(input).ok()?;
-    value["result"]["panes"]
-        .as_array()?
-        .iter()
-        .map(|pane| {
-            Some((
-                pane["pane_id"].as_str()?.to_owned(),
-                match pane.get("agent_session") {
-                    Some(serde_json::Value::Null) => NativeSubagentSession::Ended,
-                    Some(session) => session["value"]
-                        .as_str()
-                        .filter(|session| !session.is_empty())
-                        .map(|session| NativeSubagentSession::Active(session.to_owned()))
-                        .unwrap_or(NativeSubagentSession::Unknown),
-                    None => NativeSubagentSession::Unknown,
-                },
-            ))
-        })
-        .collect()
+/// `None` when the read failed, so nothing is known about any pane.
+fn native_subagent_panes(survey: Result<Survey, MuxError>) -> Option<SubagentPaneSessions> {
+    let survey = survey.ok()?;
+    Some(
+        survey
+            .spaces
+            .into_iter()
+            .flat_map(|space| space.panes)
+            .map(|pane| {
+                let session = native_subagent_session(&pane);
+                (pane.id.as_str().to_owned(), session)
+            })
+            .collect(),
+    )
+}
+
+fn native_subagent_session(pane: &PaneFacts) -> NativeSubagentSession {
+    match pane
+        .agent
+        .as_ref()
+        .and_then(|agent| crate::mux::resolve_session(&agent.session))
+    {
+        Some(session) if !session.as_str().is_empty() => {
+            NativeSubagentSession::Active(session.as_str().to_owned())
+        }
+        Some(_) => NativeSubagentSession::Unknown,
+        None if pane.reports_session => NativeSubagentSession::Ended,
+        None => NativeSubagentSession::Unknown,
+    }
 }
 
 fn subagent_presence(
@@ -396,9 +385,11 @@ fn subagent_presence(
 }
 
 struct Hub<'a> {
+    mux: Arc<dyn MuxConnector>,
     files: &'a ServerFiles,
     instance: &'a str,
-    idle: Duration,
+    /// The test override; without one the saved setting decides, read as it changes.
+    idle: Option<Duration>,
     store: Option<StateStore>,
     data_version: Option<i64>,
     channel_notes_revision: Option<(std::time::SystemTime, u64)>,
@@ -420,15 +411,20 @@ struct Hub<'a> {
     unsupported_schema: bool,
     schema_busy_since: Option<Instant>,
     last_error: Option<String>,
+    launches: super::launches::Launches,
+    launches_revision: u64,
 }
 
 pub(crate) fn run(
     files: &ServerFiles,
     instance: &str,
-    idle: Duration,
+    idle: Option<Duration>,
     commands: Receiver<HubCommand>,
+    mux: Arc<dyn MuxConnector>,
+    launches: super::launches::Launches,
 ) -> Verdict {
     let mut hub = Hub {
+        mux,
         files,
         instance,
         idle,
@@ -453,6 +449,8 @@ pub(crate) fn run(
         unsupported_schema: false,
         schema_busy_since: None,
         last_error: None,
+        launches,
+        launches_revision: 0,
     };
     let verdict = loop {
         let wait = if hub.retry_discovery_drain {
@@ -617,11 +615,19 @@ impl Hub<'_> {
         {
             return Some(Verdict::Exit("server.json was replaced"));
         }
-        if self
-            .idle_since
-            .is_some_and(|since| now.duration_since(since) >= self.idle)
-            && !tailnet_owned
-        {
+        if let Some(requested) = self.files.requested_ui() {
+            let serves_it = self.files.info().is_some_and(|info| info.ui == requested);
+            if !serves_it && requested.usable() && tailnet.is_ok() {
+                return Some(Verdict::Handoff("another Channels app was requested"));
+            }
+            if serves_it || !requested.usable() {
+                let _ = self.files.take_ui_request();
+            }
+        }
+        if self.idle_since.is_some_and(|since| {
+            super::idle::policy(self.files.state(), tailnet_owned, self.idle)
+                .reached(now.duration_since(since))
+        }) {
             return Some(Verdict::Idle);
         }
         None
@@ -649,24 +655,21 @@ impl Hub<'_> {
             return;
         };
         let state = self.files.state().to_owned();
+        let mux = self.mux.clone();
         self.subagent_maintenance = thread::Builder::new()
             .name("subagent-maintenance".to_owned())
             .spawn(move || {
                 let mut native = HashMap::new();
-                let cancel = AtomicBool::new(false);
                 for binding in &bindings {
                     let key = (binding.socket.clone(), binding.workspace.clone());
                     native.entry(key).or_insert_with(|| {
-                        ProcessHerdr::default()
-                            .with_socket(Some(binding.socket.clone()))
-                            .execute_bounded(
-                                &["pane", "list", "--workspace", &binding.workspace],
-                                HERDR_TIMEOUT,
-                                &cancel,
-                                8 * 1024 * 1024,
-                            )
-                            .ok()
-                            .and_then(|output| native_subagent_panes(&output.stdout))
+                        let space = crate::SpaceId::new(&binding.workspace);
+                        native_subagent_panes(
+                            mux.connect(&binding.socket, HERDR_BUDGET, Arc::default())
+                                .and_then(|herdr| {
+                                    herdr.survey(Scope::PanesOf(&space), Depth::Panes)
+                                }),
+                        )
                     });
                 }
                 let _ = crate::subagent::maintain(&state, now_ms(), |parent| {
@@ -713,6 +716,9 @@ impl Hub<'_> {
         let subagents_changed =
             self.subagent_revision != Some(subagent_revision) || subagent_revision == [0xff; 32];
         self.subagent_revision = Some(subagent_revision);
+        let launches_revision = self.launches.revision();
+        let launches_changed = launches_revision != self.launches_revision;
+        self.launches_revision = launches_revision;
         let retention_expired = self.published.values().any(|published| {
             published
                 .expires_at_ms
@@ -721,6 +727,7 @@ impl Hub<'_> {
         if !database_changed
             && !metadata_changed
             && !subagents_changed
+            && !launches_changed
             && !retention_expired
             && incoming.is_none()
         {
@@ -975,6 +982,7 @@ impl Hub<'_> {
                     sockets,
                     self.socket_states.clone(),
                     notify,
+                    self.mux.clone(),
                 ));
             }
             Some(discovery) if !discovery.cancel.load(Ordering::Relaxed) => {
@@ -1020,13 +1028,14 @@ impl Hub<'_> {
             self.live_spaces
                 .retain(|_, space| space.namespace.session_socket_id != socket);
             for workspace in workspaces {
-                let namespace = StateNamespace::for_space(&socket, workspace.workspace_id);
+                let repo = RepoRef::of_checkout(workspace.checkout.as_ref());
+                let namespace = StateNamespace::for_space(&socket, workspace.id.as_str());
                 self.live_spaces.insert(
                     SpaceKey::of(&namespace),
                     LiveSpace {
                         namespace,
                         label: workspace.label,
-                        repo: workspace.repo,
+                        repo,
                     },
                 );
             }
@@ -1084,9 +1093,26 @@ impl Hub<'_> {
                     .addresses
                     .iter()
                     .filter_map(snapshot::closed_member_expires_at)
+                    .chain(
+                        rows.attention
+                            .iter()
+                            .filter_map(snapshot::attention_expires_at),
+                    )
                     .filter(|expiry| *expiry > now)
                     .min();
                 let mut snapshot = snapshot::build(&rows, label.as_deref(), now);
+                let starting = self.launches.starting(&namespace);
+                let starts = snapshot.add_agent_start_cards(
+                    &rows,
+                    &super::launches::as_starting(&starting),
+                    now,
+                );
+                for address_id in &starts.settled {
+                    self.launches.forget(&namespace, address_id);
+                }
+                if let Some(due) = starts.next_due_ms {
+                    expires_at_ms = Some(expires_at_ms.map_or(due, |old| old.min(due)));
+                }
                 for participant in &mut snapshot.participants {
                     if !matches!(participant.kind, snapshot::ParticipantKind::Agent { .. }) {
                         continue;
@@ -1236,7 +1262,11 @@ impl Hub<'_> {
             .position(|entry| entry.space == target.namespace.space_id)
             .ok_or(Reason::Unavailable)?;
         let here = others.swap_remove(index);
-        let directory = SpaceDirectory::new(here, others);
+        let directory = SpaceDirectory::new(
+            crate::mux::Endpoint::parse(&target.namespace.session_socket_id).kind,
+            here,
+            others,
+        );
         names_in_scope(&crate::SpaceScope::Named(vec![token.clone()]), &directory).map_err(
             |refusal| match refusal {
                 crate::spaces::RouteRefusal::DuplicateLabel { .. } => collision_reason,
@@ -1351,9 +1381,10 @@ mod tests {
 
     fn test_hub(files: &ServerFiles) -> Hub<'_> {
         Hub {
+            mux: Arc::new(crate::mux::Connector::new(std::path::Path::new(""))),
             files,
             instance: "test",
-            idle: Duration::from_secs(60),
+            idle: Some(Duration::from_secs(60)),
             store: None,
             data_version: None,
             channel_notes_revision: None,
@@ -1375,6 +1406,8 @@ mod tests {
             unsupported_schema: false,
             schema_busy_since: None,
             last_error: None,
+            launches: Default::default(),
+            launches_revision: 0,
         }
     }
 
@@ -1718,7 +1751,7 @@ mod tests {
         let files = schema_test_files("tailnet-lifetime");
         let mut hub = schema_test_hub(&files);
         let now = Instant::now();
-        hub.idle_since = Some(now - hub.idle);
+        hub.idle_since = Some(now - hub.idle.unwrap());
         let ownership = files.state().join("dashboard/tailscale.json");
         let runtime = files.state().join("runtime");
         fs::create_dir_all(&runtime).unwrap();
@@ -1786,6 +1819,53 @@ mod tests {
     }
 
     #[test]
+    fn a_saved_idle_setting_applies_to_a_running_server_and_tailscale_overrides_it() {
+        let files = schema_test_files("idle-setting");
+        let mut hub = schema_test_hub(&files);
+        hub.idle = None;
+        let now = Instant::now();
+        let setting = files.state().join("dashboard/idle");
+        hub.idle_since = Some(now - Duration::from_secs(10 * 60));
+        assert!(
+            matches!(hub.verdict_at(now), Some(Verdict::Idle)),
+            "no setting stops after 10 minutes"
+        );
+        hub.idle_since = Some(now - Duration::from_secs(10 * 60 - 1));
+        assert!(hub.verdict_at(now).is_none());
+
+        fs::write(&setting, "never").unwrap();
+        hub.idle_since = Some(now - Duration::from_secs(30 * 24 * 60 * 60));
+        assert!(hub.verdict_at(now).is_none(), "never keeps it running");
+
+        fs::write(&setting, "2").unwrap();
+        hub.idle_since = Some(now - Duration::from_secs(119));
+        assert!(hub.verdict_at(now).is_none());
+        hub.idle_since = Some(now - Duration::from_secs(120));
+        assert!(matches!(hub.verdict_at(now), Some(Verdict::Idle)));
+
+        fs::write(
+            files.state().join("dashboard/tailscale.json"),
+            serde_json::json!({
+                "version": 1,
+                "state": "enabled",
+                "handler": {
+                    "dns_name": "device.tailnet.ts.net",
+                    "https_port": 443,
+                    "owner_login": "owner@example.com",
+                    "backend_port": 1234
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(
+            hub.verdict_at(now).is_none(),
+            "a 2 minute setting must not stop a server that a Tailscale handler points at"
+        );
+        let _ = fs::remove_dir_all(files.state());
+    }
+
+    #[test]
     fn a_busy_schema_read_preserves_other_exit_and_handoff_checks() {
         let files = schema_test_files("schema-precedence");
         let mut hub = schema_test_hub(&files);
@@ -1793,7 +1873,7 @@ mod tests {
         writer.execute_batch("BEGIN EXCLUSIVE").unwrap();
         let now = Instant::now();
         assert!(hub.verdict_at(now).is_none());
-        hub.idle_since = Some(now - hub.idle);
+        hub.idle_since = Some(now - hub.idle.unwrap());
         assert!(matches!(hub.verdict_at(now), Some(Verdict::Idle)));
         fs::remove_file(files.state().join("dashboard/server.json")).unwrap();
         assert!(matches!(
@@ -2296,27 +2376,65 @@ mod tests {
             subagent_presence(&parent, &bindings, &native),
             ParentPresence::Unknown
         );
-        native.insert(
-            ("socket".into(), "space".into()),
-            native_subagent_panes(
-                r#"{"result":{"panes":[{"pane_id":"pane","agent_session":null}]}}"#,
-            ),
-        );
+        // What Herdr's `pane list` says of the pane's session: `null`, a
+        // value, or nothing at all.
+        let listed = |session: Option<Option<&str>>| {
+            native_subagent_panes(Ok(Survey {
+                spaces: vec![SpaceView {
+                    id: crate::SpaceId::new("space"),
+                    label: None,
+                    number: None,
+                    checkout: None,
+                    worktree: None,
+                    panes: vec![PaneFacts {
+                        id: crate::mux::PaneId::new("pane"),
+                        terminal: crate::mux::TerminalId::new("terminal"),
+                        tab: crate::mux::TabId::new("tab"),
+                        space: crate::SpaceId::new("space"),
+                        cwd: None,
+                        title: None,
+                        agent: session.flatten().map(|session| crate::mux::AgentIdentity {
+                            kind: crate::mux::AgentKind::Unreported,
+                            label: None,
+                            session: crate::mux::SessionClaim::Reported(
+                                crate::AgentSessionId::new(session),
+                            ),
+                        }),
+                        state: None,
+                        idle_label: None,
+                        viewport_rows: None,
+                        reports_session: session.is_some(),
+                    }],
+                }],
+            }))
+        };
+        native.insert(("socket".into(), "space".into()), listed(Some(None)));
         assert_eq!(
             subagent_presence(&parent, &bindings, &native),
             ParentPresence::Absent
         );
+        native.insert(("socket".into(), "space".into()), listed(None));
+        assert_eq!(
+            subagent_presence(&parent, &bindings, &native),
+            ParentPresence::Unknown
+        );
+        native.insert(("socket".into(), "space".into()), listed(Some(Some(""))));
+        assert_eq!(
+            subagent_presence(&parent, &bindings, &native),
+            ParentPresence::Unknown
+        );
         native.insert(
             ("socket".into(), "space".into()),
-            native_subagent_panes(
-                r#"{"result":{"panes":[{"pane_id":"pane","agent_session":{"value":"session"}}]}}"#,
-            ),
+            listed(Some(Some("session"))),
         );
         assert_eq!(
             subagent_presence(&parent, &bindings, &native),
             ParentPresence::Present
         );
-        native.insert(("socket".into(), "space".into()), native_subagent_panes(r#"{"result":{"panes":[{"pane_id":"pane","agent_session":{"value":"new-session"}}]}}"#));
+        native.insert(
+            ("socket".into(), "space".into()),
+            listed(Some(Some("new-session"))),
+        );
         assert_eq!(
             subagent_presence(&parent, &bindings, &native),
             ParentPresence::Absent
@@ -2326,7 +2444,7 @@ mod tests {
             subagent_presence(&parent, &bindings, &native),
             ParentPresence::Absent
         );
-        assert!(native_subagent_panes(r#"{"result":{"panes":[{}]}}"#).is_none());
+        assert!(native_subagent_panes(Err(MuxError::Protocol("missing field".into()))).is_none());
     }
 
     #[test]

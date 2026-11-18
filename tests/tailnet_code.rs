@@ -1,5 +1,9 @@
 //! The tailnet link as a QR code, printed by `channels --tailscale --no-open`.
 //! Tailscale and Herdr are fakes throughout.
+
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/executable.rs"]
@@ -71,14 +75,14 @@ impl Tailnet {
     ) -> String {
         let mut command = match columns {
             Some(columns) => {
-                let mut command = Command::new("/usr/bin/python3");
+                let mut command = crate::binary::command("/usr/bin/python3");
                 command
                     .arg(self.0.join("in_terminal.py"))
                     .arg(columns.to_string())
-                    .arg(env!("CARGO_BIN_EXE_namedrop"));
+                    .arg(crate::binary::namedrop_path());
                 command
             }
-            None => Command::new(env!("CARGO_BIN_EXE_namedrop")),
+            None => crate::binary::namedrop(),
         };
         // The test itself may be run by an agent.
         for marker in namedrop::AGENT_SESSION_MARKERS {
@@ -178,7 +182,8 @@ fn channels_prints_a_code_to_scan_for_a_person_and_the_same_json_for_a_program()
                 "status": "ok",
                 "operation": "dashboard",
                 "data": {"url": null, "space_key": null, "workspace_id": "w1", "server": null,
-                         "opened": false, "tailscale": true},
+                         "opened": false, "tailscale": true,
+                         "idle": {"stop_after_ms": null, "source": "tailscale"}},
             }),
             "{format:?}"
         );
@@ -199,6 +204,11 @@ fn channels_prints_a_code_to_scan_for_a_person_and_the_same_json_for_a_program()
     for shown in &link_only {
         assert!(draws_no_code(shown), "{shown:?}");
         printed_link(shown);
+        assert!(
+            shown.contains("The server keeps running while Tailscale access is on.")
+                && !shown.contains("The server stops"),
+            "{shown:?}"
+        );
     }
     let asks_for_width = |shown: &String| {
         shown.contains("This terminal is too narrow for a QR code to scan. Widen it to ")

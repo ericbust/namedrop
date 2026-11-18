@@ -19,6 +19,7 @@ if not name.startswith('test-'):
     raise ValueError('staging requires a test- profile')
 p = testbed.Profile(name)
 p.owned()
+p.require_claude_login()
 assert p.socket.name.startswith('nd-tb-')
 assert p.env['HOME'] != str(Path.home()) and p.env['XDG_CONFIG_HOME'] != str(Path.home() / '.config')
 
@@ -53,7 +54,9 @@ with p.locked():
 
     r = livetest.Run(p, livetest.MODES['no-daemon'], p.dir / 'logs')
     for alias in ('claude', 'codex'):
-        command = 'cd ~/release-planning && ' + livetest.launch_command(alias, r.mode, os.environ)
+        # launch() starts Claude Code only from a command whose first word is claude.
+        p.type_line(p.state['panes'][alias], 'cd ~/release-planning')
+        command = livetest.launch_command(alias, r.mode, os.environ)
         p.launch(alias, command)
         first = r.settle_screens(alias)
         if first.restart:

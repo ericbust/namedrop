@@ -1,0 +1,3 @@
+{"type":"session_event","payload":{"session_id":"session:01a1d894-5ed4-71f7-a03b-020ee4509834","event":{"type":"window_closed","payload":{"window_id":"window:01a1d894-816e-7d9c-a94c-d611d1ef6e3d"}}}}
+{"type":"session_event","payload":{"session_id":"session:01a1d894-5ed4-71f7-a03b-020ee4509834","event":{"type":"active_window_changed","payload":{"window_id":"window:01a1d894-5ee4-71ff-bfe0-ca8e84bfe11e"}}}}
+{"type":"session_event","payload":{"session_id":"session:01a1d894-5ed4-71f7-a03b-020ee4509834","event":{"type":"session_view_changed","payload":{"revision":4}}}}

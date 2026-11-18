@@ -1,6 +1,6 @@
 [package]
 name = "namedrop"
-version = "1.7.10"
+version = "1.12.0"
 edition = "2024"
 rust-version = "1.97"
 description = "Name and @mention AI agents and terminal panes to collaborate inside Herdr"
@@ -33,5 +33,10 @@ serde_yaml_ng = "0.10.0"
 semver = "1.0.28"
 qrcode = { version = "0.14.1", default-features = false }
 
+[features]
+# `mux::fake`, the in-memory multiplexer that the tests in `tests/` build on.
+test-support = []
+
 [dev-dependencies]
+namedrop = { path = ".", features = ["test-support"] }
 rqrr = { version = "0.11.0", default-features = false }

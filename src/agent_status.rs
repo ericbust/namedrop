@@ -21,9 +21,10 @@
 //!   answer, and an ambiguous submission is uncertain rather than undelivered.
 
 use crate::{
-    AgentRuntime, Clock, DeliveryState, DiscoveredPane, DiscoveredWorktree, HerdrCommandExecutor,
-    HerdrCommandOutput, IdGenerator, LifecycleRuntime, PaneAddressRecord, StateStore,
-    discover_worktree, discover_worktree_for_workspace,
+    AgentRuntime, Clock, DeliveryState, DiscoveredPane, DiscoveredWorktree, IdGenerator,
+    LifecycleRuntime, PaneAddressRecord, StateStore, discover_worktree,
+    discover_worktree_for_workspace,
+    mux::{Allowance, Budget, MuxRead, PaneId, ScreenRequest, Style, Wrap},
 };
 use serde_json::{Value, json};
 use std::{
@@ -58,7 +59,7 @@ const MAX_PANE_ROWS: usize = 32;
 
 /// Recent unwrapped lines requested per excerpt. The plan's ceiling is 120; a
 /// glance only needs the tail, and every excerpt is byte-capped below.
-const EXCERPT_LINES: &str = "40";
+const EXCERPT_LINES: usize = 40;
 
 /// Bytes kept per excerpt, counted from the end.
 const MAX_EXCERPT_BYTES: usize = 2_048;
@@ -93,28 +94,39 @@ const REQUESTS_UNKNOWN: &str =
 /// `origin`, `observed_at_ms`, `panes`, `waits`, `handoffs_available`,
 /// `warnings` and `omitted_panes`. `waits` rows also carry the recipient
 /// `alias` so the panel can name a recipient whose pane is gone.
-pub fn collect_agent_status<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub fn collect_agent_status<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     expected_terminal: &str,
     expected_session: Option<&str>,
+    observing_pane: Option<&str>,
     cancelled: &AtomicBool,
 ) -> Result<Value, String>
 where
-    E: HerdrCommandExecutor,
-    C: Clock,
+    M: crate::mux::Mux,
+    C: Clock + Sync,
     I: IdGenerator,
 {
     let observed_at_ms = runtime.clock.now_unix_ms();
-    let reads = Deadline {
-        herdr: runtime.herdr,
+    let collection = Collection {
         clock: runtime.clock,
         deadline_ms: observed_at_ms.saturating_add(COLLECTION_BUDGET_MS),
         cancelled,
     };
+    // Discovery, including the closing identity check, may use everything
+    // that is left: it is the one read the snapshot cannot do without.
+    let lists = runtime.mux.within(Allowance::each(
+        || {
+            Ok(Budget {
+                timeout: collection.remaining()?,
+                max_output_bytes: MAX_LIST_OUTPUT_BYTES,
+            })
+        },
+        cancelled,
+    ));
     let origin_pane_id = runtime
         .current_pane_id
         .ok_or("The agent status panel requires its invoking pane")?;
-    let discovered = discover(runtime, &reads)?;
+    let discovered = discover(runtime, &*lists)?;
     let origin = bound_origin(
         &discovered,
         origin_pane_id,
@@ -123,26 +135,33 @@ where
     )?;
 
     let mut warnings = Vec::new();
-    let observing_pane = std::env::var("HERDR_PANE_ID").ok();
-    let visible = visible_panes(
-        &discovered,
-        origin,
-        observing_pane.as_deref(),
-        &mut warnings,
-    );
+    let visible = visible_panes(&discovered, origin, observing_pane, &mut warnings);
 
-    let (addresses, handoffs) = read_state(runtime, &discovered, origin, &reads, &mut warnings);
+    let (addresses, handoffs) =
+        read_state(runtime, &discovered, origin, &collection, &mut warnings);
     let handoffs_available = handoffs.is_some();
     let waits = handoffs.map_or_else(Vec::new, |reports| {
-        collect_waits(&reports, &addresses, &visible, &mut warnings)
+        collect_waits(
+            &reports,
+            &addresses,
+            &visible,
+            &mut warnings,
+            runtime.mux.endpoint().kind,
+        )
     });
 
     let ordered = wait_first_order(&visible, origin, &waits);
-    let rows = pane_rows(&ordered, &addresses, &reads, &mut warnings);
+    let rows = pane_rows(
+        runtime.mux,
+        &ordered,
+        &addresses,
+        &collection,
+        &mut warnings,
+    );
 
     // Identities are re-read after the excerpts, so every pane in the snapshot
     // is one whose space, terminal and session held for the whole collection.
-    let verified = discover(runtime, &reads).map_err(|error| {
+    let verified = discover(runtime, &*lists).map_err(|error| {
         format!("This space could not be re-checked before showing the panel: {error}")
     })?;
     if verified.workspace_id != discovered.workspace_id {
@@ -169,7 +188,7 @@ where
             "workspace_id": discovered.workspace_id,
             "pane_id": origin.pane_id,
             "terminal_id": origin.terminal_id,
-            "session_id": origin.agent_session_id.as_ref().map(|session| session.as_str()),
+            "session_id": origin.agent_session_id().map(|session| session.as_str()),
             "host": host(origin),
             "cwd": origin.cwd,
             "label": label(origin, &addresses),
@@ -185,15 +204,10 @@ where
     }))
 }
 
-fn discover<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
-    reads: &Deadline<'_, E, C>,
-) -> Result<DiscoveredWorktree, String>
-where
-    E: HerdrCommandExecutor,
-    C: Clock,
-    I: IdGenerator,
-{
+fn discover<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
+    reads: &(impl MuxRead + ?Sized),
+) -> Result<DiscoveredWorktree, String> {
     match runtime.workspace_id {
         Some(workspace_id) => discover_worktree_for_workspace(reads, workspace_id),
         None => discover_worktree(reads, runtime.cwd),
@@ -201,17 +215,15 @@ where
 }
 
 /// Spends one collection budget across every read, so a slow pane cannot
-/// consume the whole panel's latency budget. Reads made through the existing
-/// discovery helpers pass through here too, and the state store is handed the
-/// same remaining budget.
-struct Deadline<'a, E, C> {
-    herdr: &'a E,
+/// consume the whole panel's latency budget. Discovery, the excerpt reads, and
+/// the state store are each handed what is left of it.
+struct Collection<'a, C> {
     clock: &'a C,
     deadline_ms: u64,
     cancelled: &'a AtomicBool,
 }
 
-impl<E: HerdrCommandExecutor, C: Clock> Deadline<'_, E, C> {
+impl<C: Clock> Collection<'_, C> {
     fn remaining(&self) -> Result<Duration, String> {
         if self.cancelled.load(Ordering::Relaxed) {
             return Err(CANCELLED.to_owned());
@@ -240,24 +252,6 @@ impl<E: HerdrCommandExecutor, C: Clock> Deadline<'_, E, C> {
                 )
             })
     }
-
-    fn bounded(
-        &self,
-        args: &[&str],
-        timeout: Duration,
-        max_output_bytes: usize,
-    ) -> Result<HerdrCommandOutput, String> {
-        self.herdr
-            .execute_bounded(args, timeout, self.cancelled, max_output_bytes)
-    }
-}
-
-impl<E: HerdrCommandExecutor, C: Clock> HerdrCommandExecutor for Deadline<'_, E, C> {
-    /// Discovery, including the closing identity check, may use everything that
-    /// is left: it is the one read the snapshot cannot do without.
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        self.bounded(args, self.remaining()?, MAX_LIST_OUTPUT_BYTES)
-    }
 }
 
 /// Resolve the invoking pane and refuse anything but the exact identity the
@@ -280,10 +274,7 @@ fn bound_origin<'a>(
         );
     }
     let expected_session = expected_session.filter(|session| !session.is_empty());
-    let observed_session = origin
-        .agent_session_id
-        .as_ref()
-        .map(|session| session.as_str());
+    let observed_session = origin.agent_session_id().map(|session| session.as_str());
     if observed_session != expected_session {
         return Err(
             "The invoking pane is running a different agent session. Close this panel and open it \
@@ -328,15 +319,14 @@ fn visible_panes<'a>(
 /// bound to panes, and the origin's outstanding requests. Either half can be
 /// unavailable on its own, and an unavailable half is reported rather than
 /// rendered as emptiness.
-fn read_state<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+fn read_state<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     discovered: &DiscoveredWorktree,
     origin: &DiscoveredPane,
-    reads: &Deadline<'_, E, C>,
+    reads: &Collection<'_, C>,
     warnings: &mut Vec<String>,
 ) -> (Vec<PaneAddressRecord>, Option<Vec<Value>>)
 where
-    E: HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {
@@ -451,6 +441,7 @@ fn collect_waits(
     addresses: &[PaneAddressRecord],
     visible: &[&DiscoveredPane],
     warnings: &mut Vec<String>,
+    kind: crate::mux::MuxKind,
 ) -> Vec<Value> {
     let mut waits = Vec::new();
     for report in reports {
@@ -487,7 +478,7 @@ fn collect_waits(
                 "alias": alias,
                 "description": format!("@{alias} · {request}"),
                 "state": recipient["state"],
-                "reason": wait_reason(state, result_status, recipient),
+                "reason": wait_reason(state, result_status, recipient, kind),
             }));
         }
     }
@@ -517,7 +508,12 @@ fn wait_rank(wait: &Value) -> u8 {
 /// recorded receipt, which is not proof it acted on it. Held can follow a
 /// submission whose outcome was never established, so it is described as
 /// uncertain rather than as undelivered.
-fn wait_reason(state: DeliveryState, result_status: Option<&str>, recipient: &Value) -> String {
+fn wait_reason(
+    state: DeliveryState,
+    result_status: Option<&str>,
+    recipient: &Value,
+    kind: crate::mux::MuxKind,
+) -> String {
     match state {
         DeliveryState::Held => {
             "held; whether it reached the recipient was never established, so it needs a decision \
@@ -539,7 +535,9 @@ fn wait_reason(state: DeliveryState, result_status: Option<&str>, recipient: &Va
                 .and_then(|constraints| constraints.first())
                 .and_then(Value::as_str);
             match constraint {
-                Some(constraint) => format!("not submitted yet: {}", constraint_reason(constraint)),
+                Some(constraint) => {
+                    format!("not submitted yet: {}", constraint_reason(constraint, kind))
+                }
                 None => "queued; not submitted to the recipient yet".to_owned(),
             }
         }
@@ -549,7 +547,7 @@ fn wait_reason(state: DeliveryState, result_status: Option<&str>, recipient: &Va
 
 /// The store's outlook vocabulary, in the panel's words. An unrecognized
 /// constraint is shown verbatim rather than dropped.
-fn constraint_reason(constraint: &str) -> String {
+fn constraint_reason(constraint: &str, kind: crate::mux::MuxKind) -> String {
     match constraint {
         "earlier_delivery_pending" => "an earlier delivery to that recipient is still ahead of it",
         "recipient_busy_or_unknown" => "the recipient is not idle",
@@ -560,9 +558,15 @@ fn constraint_reason(constraint: &str) -> String {
         "registration_required" => "the recipient has no active Namedrop registration",
         "integration_repair_required" => "the recipient's Namedrop integration needs repair",
         "terminal_contains_agent" => "that terminal now holds an agent",
-        "space_paused" => "this space is paused",
-        "space_inactive" => "Namedrop is not active in this space",
-        "reconciliation_required" => "this space needs reconciliation",
+        "space_paused" => kind.text("this space is paused", "this Rex session is paused"),
+        "space_inactive" => kind.text(
+            "Namedrop is not active in this space",
+            "Namedrop is not active in this Rex session",
+        ),
+        "reconciliation_required" => kind.text(
+            "this space needs reconciliation",
+            "this Rex session needs reconciliation",
+        ),
         "thread_paused" => "the thread is paused",
         "thread_stopped" => "the thread is stopped",
         other => return other.to_owned(),
@@ -602,14 +606,14 @@ fn wait_first_order<'a>(
 /// the excerpt cap and the remaining budget allow. Each row carries the exact
 /// identity its excerpt was read under, which is what [`verified_rows`] checks
 /// afterwards.
-fn pane_rows<E, C>(
+fn pane_rows<C>(
+    mux: &impl MuxRead,
     ordered: &[&DiscoveredPane],
     addresses: &[PaneAddressRecord],
-    reads: &Deadline<'_, E, C>,
+    reads: &Collection<'_, C>,
     warnings: &mut Vec<String>,
 ) -> Vec<Value>
 where
-    E: HerdrCommandExecutor,
     C: Clock,
 {
     let listed = ordered.len().min(MAX_PANE_ROWS);
@@ -620,31 +624,35 @@ where
         let mut excerpt = String::new();
         if index < MAX_EXCERPT_PANES {
             match reads.remaining_before_verification() {
-                Ok(timeout) => match reads.bounded(
-                    &[
-                        "pane",
-                        "read",
-                        &pane.pane_id,
-                        "--source",
-                        "recent-unwrapped",
-                        "--lines",
-                        EXCERPT_LINES,
-                    ],
-                    timeout,
-                    MAX_EXCERPT_OUTPUT_BYTES,
-                ) {
-                    Ok(output) => excerpt = excerpt_text(&output.stdout),
-                    Err(error) => {
-                        read_error.get_or_insert(error);
+                Ok(timeout) => {
+                    let budget = move || {
+                        Ok(Budget {
+                            timeout,
+                            max_output_bytes: MAX_EXCERPT_OUTPUT_BYTES,
+                        })
+                    };
+                    let request = ScreenRequest {
+                        lines: EXCERPT_LINES,
+                        wrap: Wrap::Joined,
+                        style: Style::Plain,
+                    };
+                    match mux
+                        .within(Allowance::each(budget, reads.cancelled))
+                        .screen(&PaneId::new(pane.pane_id.as_str()), request)
+                    {
+                        Ok(screen) => excerpt = excerpt_text(&screen.text),
+                        Err(error) => {
+                            read_error.get_or_insert(error.to_string());
+                        }
                     }
-                },
+                }
                 Err(_) => stopped_early = true,
             }
         }
         rows.push(json!({
             "pane_id": pane.pane_id,
             "terminal_id": pane.terminal_id,
-            "session_id": pane.agent_session_id.as_ref().map(|session| session.as_str()),
+            "session_id": pane.agent_session_id().map(|session| session.as_str()),
             "label": label(pane, addresses),
             "persona": persona(pane, addresses),
             "host": host(pane),
@@ -692,8 +700,7 @@ fn verified_rows(
                 pane.workspace_id == verified.workspace_id
                     && Some(pane.pane_id.as_str()) == row["pane_id"].as_str()
                     && Some(pane.terminal_id.as_str()) == row["terminal_id"].as_str()
-                    && pane.agent_session_id.as_ref().map(|s| s.as_str())
-                        == row["session_id"].as_str()
+                    && pane.agent_session_id().map(|s| s.as_str()) == row["session_id"].as_str()
             });
             if !held {
                 changed += 1;
@@ -734,7 +741,7 @@ fn label(pane: &DiscoveredPane, addresses: &[PaneAddressRecord]) -> String {
         .map(|address| format!("@{}", address.alias));
     let label = alias
         .or_else(|| pane.pane_label.clone())
-        .or_else(|| pane.occupant_label.clone())
+        .or_else(|| pane.occupant_label().map(str::to_owned))
         .unwrap_or_else(|| pane.pane_id.clone());
     one_line(&label, MAX_LABEL_CHARS)
 }

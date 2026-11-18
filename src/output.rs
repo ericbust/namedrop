@@ -17,6 +17,15 @@ pub fn render_command_result_to_text_within(
     result: &CommandResult,
     columns: Option<usize>,
 ) -> String {
+    render_command_result_to_text_for(result, columns, crate::mux::MuxKind::Herdr)
+}
+
+/// Render authored prose for the endpoint without changing response data.
+pub fn render_command_result_to_text_for(
+    result: &CommandResult,
+    columns: Option<usize>,
+    kind: crate::mux::MuxKind,
+) -> String {
     if let Some(error) = &result.error {
         // Preserve useful line breaks from Clap, but never emit terminal controls.
         return format!(
@@ -67,10 +76,12 @@ pub fn render_command_result_to_text_within(
                 "Channels Tailscale access is off. The owned Serve handler has been removed."
                     .into(),
             );
+            lines.extend(crate::dashboard::idle::sentence(&data["idle"]));
         }
         "dashboard" => {
             lines.push(format!(
-                "Namedrop dashboard for workspace {} is live:",
+                "Namedrop dashboard for {} {} is live:",
+                kind.text("workspace", "Rex session"),
                 text(&data["workspace_id"])
             ));
             // A link the browser on this machine already used is spent, and
@@ -90,18 +101,19 @@ pub fn render_command_result_to_text_within(
                 lines.extend(code.rows.iter().map(|row| format!("{QR_INDENT}{row}")));
             }
             lines.push(format!("  {}", text(&data["url"])));
-            lines.push(
-                if data["opened"] == true {
-                    "Opened in your browser. It stops on its own 10 minutes after the last tab closes."
-                } else if code.is_some() {
-                    "Scan the code or open that URL on a device signed in to your Tailscale account within 10 minutes; it works once. The server stops 10 minutes after the last tab closes."
-                } else if data["tailscale"] == true {
-                    "Open that URL on a device signed in to your Tailscale account within 10 minutes; it works once. The server stops 10 minutes after the last tab closes."
-                } else {
-                    "Open that URL in a browser on this machine within 10 minutes; it works once. The server stops on its own 10 minutes after the last tab closes."
-                }
-                .into(),
-            );
+            let link = if data["opened"] == true {
+                "Opened in your browser."
+            } else if code.is_some() {
+                "Scan the code or open that URL on a device signed in to your Tailscale account within 10 minutes; it works once."
+            } else if data["tailscale"] == true {
+                "Open that URL on a device signed in to your Tailscale account within 10 minutes; it works once."
+            } else {
+                "Open that URL in a browser on this machine within 10 minutes; it works once."
+            };
+            lines.push(match crate::dashboard::idle::sentence(&data["idle"]) {
+                Some(idle) => format!("{link} {idle}"),
+                None => link.to_owned(),
+            });
             if let Some(needed) = too_narrow_for {
                 lines.push(format!(
                     "This terminal is too narrow for a QR code to scan. Widen it to {needed} columns and run the command again."
@@ -111,7 +123,8 @@ pub fn render_command_result_to_text_within(
         "activate" => {
             lines.push("Status".into());
             lines.push(format!(
-                "  Namedrop activated in space {}.",
+                "  Namedrop activated in {} {}.",
+                kind.text("space", "Rex session"),
                 text(&data["space_id"])
             ));
             package_errors(&data["integration_packages"], &mut lines);
@@ -123,6 +136,18 @@ pub fn render_command_result_to_text_within(
                 }
             }
             let shortcuts = &data["shortcuts"];
+            if shortcuts["status"] == "no_module" {
+                lines.push(format!(
+                    "  Shortcuts: Namedrop's Rex module is not installed. {}",
+                    text(&shortcuts["repair"])
+                ));
+            }
+            if shortcuts["status"] == "stale_module" {
+                lines.push(format!(
+                    "  Shortcuts: Rex still runs an older namedrop.lua. {}",
+                    text(&shortcuts["repair"])
+                ));
+            }
             if let Some(error) = shortcuts["error"].as_str() {
                 lines.push(format!(
                     "  Shortcuts need attention: {}",
@@ -146,7 +171,11 @@ pub fn render_command_result_to_text_within(
                 &data["agent_integration_hook_activation"]["codex"]["app_server"],
                 &mut lines,
             );
-            lines.push("  Check native hooks: herdr integration status\n  If setup is needed, choose your runtime:\n    herdr integration install codex\n    herdr integration install claude".into());
+            if data["host"] == "rex" {
+                lines.push("  Check Namedrop hooks with namedrop doctor. If setup is needed, run Activate Namedrop again.".into());
+            } else {
+                lines.push("  Check native hooks: herdr integration status\n  If setup is needed, choose your runtime:\n    herdr integration install codex\n    herdr integration install claude".into());
+            }
             lines.push("  Start fresh agent sessions and confirm a request and reply to verify their hooks.".into());
             field("Shell", &data["shell_command"]["next_step"], 1, &mut lines);
             field(
@@ -160,7 +189,7 @@ pub fn render_command_result_to_text_within(
             field("Command", &data["shell_command"]["path"], 1, &mut lines);
         }
         "deactivate" => lines.push(
-            "Namedrop deactivated in this space. Names and message history are preserved.".into(),
+            kind.text("Namedrop deactivated in this space. Names and message history are preserved.", "Namedrop deactivated in this Rex session. Names and message history are preserved.").into(),
         ),
         "doctor" => {
             if let Ok(report) = serde_json::from_value::<HealthReport>(data.clone()) {
@@ -172,7 +201,7 @@ pub fn render_command_result_to_text_within(
             if let Some(addresses) = data.as_array() {
                 if addresses.is_empty() {
                     lines.push(
-                        "No names in this space. Use namedrop name @name to name this pane.".into(),
+                        kind.text("No names in this space. Use namedrop name @name to name this pane.", "No names in this Rex session. Use namedrop name @name to name this pane.").into(),
                     );
                 } else {
                     lines.push(format!(
@@ -222,7 +251,7 @@ pub fn render_command_result_to_text_within(
         "group.list" => {
             if let Some(groups) = data["groups"].as_array() {
                 if groups.is_empty() {
-                    lines.push("No saved groups in this space.".into());
+                    lines.push(kind.text("No saved groups in this space.", "No saved groups in this Rex session.").into());
                 }
                 for group in groups {
                     group_line(group, &mut lines);
@@ -244,8 +273,8 @@ pub fn render_command_result_to_text_within(
                 "address.unbind" => "Unbound",
                 "address.rename" => "Renamed to",
                 "address.enable" => "Enabled",
-                "address.allow-remote" => "Allowed commands from other workspaces for",
-                "address.deny-remote" => "Turned off commands from other workspaces for",
+                "address.allow-remote" => kind.text("Allowed commands from other workspaces for", "Allowed commands from other Rex sessions for"),
+                "address.deny-remote" => kind.text("Turned off commands from other workspaces for", "Turned off commands from other Rex sessions for"),
                 "address.persona" => {
                     if data["persona"].is_string() {
                         "Set the persona for"
@@ -281,9 +310,9 @@ pub fn render_command_result_to_text_within(
             )
         }),
         "worktree.pause" => {
-            lines.push("Namedrop paused in this space. Messages will wait until you resume.".into())
+            lines.push(kind.text("Namedrop paused in this space. Messages will wait until you resume.", "Namedrop paused in this Rex session. Messages will wait until you resume.").into())
         }
-        "worktree.resume" => lines.push("Namedrop resumed in this space.".into()),
+        "worktree.resume" => lines.push(kind.text("Namedrop resumed in this space.", "Namedrop resumed in this Rex session.").into()),
         "reconcile" => lines.push("Namedrop reconciliation completed.".into()),
         operation => {
             // Less common operations retain their complete data as labeled text,
@@ -694,7 +723,7 @@ mod tests {
 
     #[test]
     fn naming_a_served_codex_pane_shows_the_shared_app_server_advice_whatever_its_readiness() {
-        let advice = crate::codex_app_server::advice(false);
+        let advice = crate::codex_app_server::advice(false, crate::mux::MuxKind::Herdr);
         for ready in [true, false] {
             let result = CommandResult::success(
                 "name",
@@ -737,7 +766,7 @@ mod tests {
         };
         let rendered = activated(
             json!({"steps":["codex plugin add namedrop@namedrop --json"],
-                                        "app_server":crate::codex_app_server::advice(false)}),
+                                        "app_server":crate::codex_app_server::advice(false, crate::mux::MuxKind::Herdr)}),
         );
         assert!(
             rendered.contains(crate::codex_app_server::SUMMARY),
@@ -751,6 +780,22 @@ mod tests {
         }
         let quiet = activated(json!({"steps":["codex plugin add namedrop@namedrop --json"]}));
         assert!(!quiet.contains("Warning"), "{quiet}");
+    }
+
+    #[test]
+    fn activation_on_a_rex_home_without_its_module_says_how_to_install_it() {
+        let rendered = render_command_result_to_text(&CommandResult::success(
+            "activate",
+            json!({"space_id":"w1", "integration_packages":{}, "shell_command":null,
+                   "shortcuts":{"status":"no_module","repair":"Run sh scripts/install.sh."}}),
+        ));
+        assert!(
+            rendered.contains(
+                "  Shortcuts: Namedrop's Rex module is not installed. Run sh scripts/install.sh."
+            ),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("Shell"), "{rendered}");
     }
 
     /// The readable table shows what a person needs to choose a collaborator:
@@ -839,10 +884,15 @@ mod tests {
     }
 
     fn channels(url: &str, tailscale: bool, opened: bool) -> CommandResult {
+        let idle = if tailscale {
+            json!({"stop_after_ms": null, "source": "tailscale"})
+        } else {
+            json!({"stop_after_ms": 600_000, "source": "default"})
+        };
         CommandResult::success(
             "dashboard",
             json!({"url": url, "space_key": "0123456789abcdef0123", "workspace_id": "w1",
-                   "server": "running", "opened": opened, "tailscale": tailscale}),
+                   "server": "running", "opened": opened, "tailscale": tailscale, "idle": idle}),
         )
     }
 
@@ -877,7 +927,7 @@ mod tests {
         assert_eq!(
             render_command_result_to_text_within(&channels(local, false, false), Some(200)),
             format!(
-                "Namedrop dashboard for workspace w1 is live:\n  {local}\nOpen that URL in a browser on this machine within 10 minutes; it works once. The server stops on its own 10 minutes after the last tab closes."
+                "Namedrop dashboard for workspace w1 is live:\n  {local}\nOpen that URL in a browser on this machine within 10 minutes; it works once. The server stops 10 minutes after the last tab closes."
             )
         );
         assert!(plain(&render_command_result_to_text_within(
@@ -889,12 +939,50 @@ mod tests {
         assert_eq!(
             render_command_result_to_text(&tailnet),
             format!(
-                "Namedrop dashboard for workspace w1 is live:\n  {TAILNET_LINK}\nOpen that URL on a device signed in to your Tailscale account within 10 minutes; it works once. The server stops 10 minutes after the last tab closes."
+                "Namedrop dashboard for workspace w1 is live:\n  {TAILNET_LINK}\nOpen that URL on a device signed in to your Tailscale account within 10 minutes; it works once. The server keeps running while Tailscale access is on."
             )
         );
         let full = serde_json::to_string(&tailnet).unwrap();
         let agent = agent_result_view(&serde_json::to_value(&tailnet).unwrap()).to_string();
         assert!(plain(&full) && plain(&agent), "{full}\n{agent}");
+    }
+
+    #[test]
+    fn channels_says_when_the_server_stops_under_the_rule_in_force() {
+        let said = |tailscale: Value, idle: Value| {
+            render_command_result_to_text(&CommandResult::success(
+                "dashboard",
+                json!({"url": "http://127.0.0.1:4000/w/k?n=1", "workspace_id": "w1",
+                       "opened": true, "tailscale": tailscale, "idle": idle}),
+            ))
+        };
+        assert!(
+            said(
+                json!(false),
+                json!({"stop_after_ms": null, "source": "tailscale"})
+            )
+            .ends_with(
+                "Opened in your browser. The server keeps running while Tailscale access is on."
+            ),
+            "a plain open reports Tailscale access that an earlier command turned on"
+        );
+        assert!(
+            said(
+                json!(false),
+                json!({"stop_after_ms": 1_800_000, "source": "setting"})
+            )
+            .ends_with(
+                "The server stops 30 minutes after the last tab closes, as set with `--idle`."
+            )
+        );
+        assert_eq!(
+            said(
+                json!("off"),
+                json!({"stop_after_ms": null, "source": "setting"})
+            ),
+            "Channels Tailscale access is off. The owned Serve handler has been removed.\nThe server keeps running with no tab open, as set with `--idle never`."
+        );
+        assert!(said(json!(false), json!(null)).ends_with("Opened in your browser."));
     }
 
     #[test]
@@ -906,7 +994,7 @@ mod tests {
         assert_eq!(
             render_command_result_to_text_within(&tailnet, Some(width - 1)),
             format!(
-                "Namedrop dashboard for workspace w1 is live:\n  {TAILNET_LINK}\nOpen that URL on a device signed in to your Tailscale account within 10 minutes; it works once. The server stops 10 minutes after the last tab closes.\nThis terminal is too narrow for a QR code to scan. Widen it to {width} columns and run the command again."
+                "Namedrop dashboard for workspace w1 is live:\n  {TAILNET_LINK}\nOpen that URL on a device signed in to your Tailscale account within 10 minutes; it works once. The server keeps running while Tailscale access is on.\nThis terminal is too narrow for a QR code to scan. Widen it to {width} columns and run the command again."
             )
         );
     }

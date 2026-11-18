@@ -1,16 +1,20 @@
 //! Durable handoff of bound agent commands when the pane cannot connect to Herdr.
 use crate::{
-    AgentSessionId, Clock, IdGenerator, LifecycleRuntime, PaneAddressId, ProcessHerdr, ProcessIds,
-    StateNamespace, StateStore, StoreError, SystemClock, cli::RuntimeOptions,
+    AgentSessionId, Clock, IdGenerator, LifecycleRuntime, PaneAddressId, ProcessIds,
+    StateNamespace, StateStore, StoreError, SystemClock,
+    cli::RuntimeOptions,
+    mux::{
+        Budget, Endpoint,
+        home::{Home, Inherited, Location},
+    },
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     env, fs, io,
-    os::unix::{net::UnixStream, process::CommandExt},
+    os::unix::net::UnixStream,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -201,7 +205,11 @@ impl Request {
                 required(&input, "reminder_id")?;
             }
             Operation::Send | Operation::Reply => {
-                crate::validate_message_input(operation.token(), input.clone())?;
+                let rex = crate::mux::Endpoint::parse(&caller.namespace.session_socket_id).kind
+                    == crate::mux::MuxKind::Rex;
+                if !(rex && crate::names_remote_host(operation.token(), &input)) {
+                    crate::validate_message_input(operation.token(), input.clone())?;
+                }
                 if input["author_kind"] != "agent_session" {
                     return Err("deferred messages require author_kind agent_session".into());
                 }
@@ -339,39 +347,113 @@ fn permission_denied(error: &io::Error) -> bool {
     matches!(error.raw_os_error(), Some(libc::EPERM | libc::EACCES))
 }
 
+/// A connection to the socket an endpoint value names, as a liveness probe.
+fn probe(endpoint: &str) -> io::Result<UnixStream> {
+    Endpoint::parse(endpoint).unix_socket().map_or_else(
+        || {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{endpoint} names no Unix socket"),
+            ))
+        },
+        UnixStream::connect,
+    )
+}
+
+/// Where a command whose socket is denied queues: the endpoint key, space,
+/// and pane, and whether the socket still has to be probed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Target {
+    socket: String,
+    space: Option<String>,
+    pane: Option<String>,
+    probe: bool,
+}
+
+/// The flags first, then the home. A deferred Rex place was denied by the
+/// home's own probe and proved by its block's binding. A place from a
+/// verified `REX_BLOCK` reached its socket already, so it never defers. Any
+/// other home defers only when a probe of its socket is denied.
+fn target(
+    options: &RuntimeOptions,
+    home: Option<&Home>,
+    location: Option<Location>,
+) -> Option<Target> {
+    let flag = |flag: &Option<String>, value: Option<String>| flag.clone().or(value);
+    match home {
+        Some(Home::RexDeferred(deferral)) => Some(Target {
+            socket: deferral.endpoint.key.clone(),
+            space: flag(&options.space, Some(deferral.space.as_str().to_owned())),
+            pane: flag(&options.pane, Some(deferral.pane.as_str().to_owned())),
+            probe: false,
+        }),
+        Some(Home::Rex(place)) if place.caller.is_some() => None,
+        _ => {
+            let location = location.as_ref();
+            Some(Target {
+                socket: flag(
+                    &options.endpoint,
+                    location.and_then(|location| location.endpoint.as_ref().map(|e| e.key.clone())),
+                )?,
+                space: flag(
+                    &options.space,
+                    location.and_then(|location| {
+                        location.space.as_ref().map(|s| s.as_str().to_owned())
+                    }),
+                ),
+                pane: flag(
+                    &options.pane,
+                    location
+                        .and_then(|location| location.pane.as_ref().map(|p| p.as_str().to_owned())),
+                ),
+                probe: true,
+            })
+        }
+    }
+}
+
 /// Runs before runtime discovery or any mutating handler. A late handler error
 /// must never enter this fallback because the command may already have committed.
+///
+/// The endpoint, space, and pane come from the flags, then from the home of
+/// this process, which is resolved only for an operation that can defer.
 pub fn try_defer(
     operation: &str,
     input: &Value,
     options: &RuntimeOptions,
+    inherited: &dyn Inherited,
 ) -> Option<Result<Value, String>> {
     let operation = Operation::parse(operation)?;
-    let socket = options
-        .herdr_socket
-        .clone()
-        .or_else(|| env::var("HERDR_SOCKET_PATH").ok())?;
-    match UnixStream::connect(&socket) {
-        Err(error) if permission_denied(&error) => {}
-        _ => return None,
+    let home = crate::mux::home::resolve(&options.flags(), inherited).ok();
+    let location = home.as_ref().and_then(|home| home.location(inherited));
+    let target = target(options, home.as_ref(), location)?;
+    if target.probe {
+        match probe(&target.socket) {
+            Err(error) if permission_denied(&error) => {}
+            _ => return None,
+        }
     }
     Some((|| {
-        let state = options
-            .plugin_state
-            .clone()
-            .or_else(|| env::var_os("HERDR_PLUGIN_STATE_DIR").map(PathBuf::from))
-            .ok_or("plugin state is required for deferred commands")?;
-        let workspace = options
-            .herdr_workspace
-            .clone()
-            .or_else(|| env::var("HERDR_WORKSPACE_ID").ok())
+        let state = crate::locator::state_directory(
+            options.plugin_state.clone(),
+            Endpoint::parse(&target.socket).kind,
+            |name| inherited.var(name),
+        )
+        .ok_or(Endpoint::parse(&target.socket).kind.text(
+            "plugin state is required for deferred commands",
+            "a state directory is required for deferred commands",
+        ))?;
+        let workspace = target
+            .space
             .ok_or("workspace is required for deferred commands")?;
-        let pane = options
-            .herdr_pane
-            .clone()
-            .or_else(|| env::var("HERDR_PANE_ID").ok())
+        let pane = target
+            .pane
             .ok_or("pane is required for deferred commands")?;
-        let caller = stored_caller(&state, StateNamespace::for_space(socket, workspace), pane)?;
+        let caller = stored_caller(
+            &state,
+            StateNamespace::for_space(target.socket, workspace),
+            pane,
+        )?;
         let request = Request::new(
             operation,
             input.clone(),
@@ -438,25 +520,28 @@ fn launcher(state: &Path) -> Result<PathBuf, String> {
 
 /// Only a caller that can already connect to Herdr can ensure an outside owner.
 pub fn ensure_worker(state: &Path, socket: &str) -> Result<(), String> {
-    UnixStream::connect(socket).map_err(|e| e.to_string())?;
+    if crate::installed_runtime::retirement::check(state, false).is_err() {
+        return Ok(());
+    }
+    probe(socket).map_err(|e| e.to_string())?;
     let directory = directory(state, socket)?;
     let lock = worker_lock(&directory)?;
     if lock.try_lock().is_err() {
         return Ok(());
     }
     drop(lock);
-    Command::new(launcher(state)?)
-        .args([
-            "--deferred-worker",
-            state.to_str().ok_or("state path is not UTF-8")?,
-            socket,
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .process_group(0)
-        .spawn()
-        .map_err(|e| e.to_string())?;
+    crate::daemon::command(
+        &launcher(state)?,
+        crate::daemon::Scope::Endpoint(&crate::mux::Endpoint::parse(socket)),
+        crate::daemon::Starter::Caller,
+    )
+    .args([
+        "--deferred-worker",
+        state.to_str().ok_or("state path is not UTF-8")?,
+        socket,
+    ])
+    .spawn()
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -465,7 +550,16 @@ fn worker_lock(directory: &Dir) -> Result<fs::File, String> {
 }
 
 pub fn run_worker(state: &Path, socket: &str) -> Result<(), String> {
-    UnixStream::connect(socket).map_err(|e| e.to_string())?;
+    if crate::installed_runtime::retirement::check(state, false).is_err() {
+        return Ok(());
+    }
+    // Like every helper, it waits for the gate with no bound, and a gate it
+    // cannot take, as for a retired state or an interrupted update, ends it
+    // quietly.
+    let Ok(initial_gate) = crate::runtime_command_guard(state, None) else {
+        return Ok(());
+    };
+    probe(socket).map_err(|e| e.to_string())?;
     crate::installed_runtime::reexec_if_replaced(state)?;
     let directory = directory(state, socket)?;
     let lock = worker_lock(&directory)?;
@@ -483,10 +577,18 @@ pub fn run_worker(state: &Path, socket: &str) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     let pending_directory = pending_directory(&directory)?;
     let mut last_probe = Instant::now();
+    drop(initial_gate);
     loop {
+        let gate = match crate::runtime_command_guard(state, None) {
+            Ok(gate) => gate,
+            Err(_) => return Ok(()),
+        };
+        if crate::installed_runtime::retirement::check(state, false).is_err() {
+            return Ok(());
+        }
         crate::installed_runtime::reexec_if_replaced(state)?;
         if last_probe.elapsed() >= Duration::from_secs(5) {
-            if UnixStream::connect(socket).is_err() {
+            if probe(socket).is_err() {
                 return Ok(());
             }
             let active = StateStore::open_read_only(state)
@@ -525,18 +627,24 @@ pub fn run_worker(state: &Path, socket: &str) -> Result<(), String> {
             }
         }
         pending.sort();
+        drop(gate);
         for key in pending {
-            let mut child = Command::new(launcher(state)?)
-                .arg("--deferred-execute")
-                .arg(state)
-                .arg(socket)
-                .arg(&key)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .process_group(0)
-                .spawn()
-                .map_err(|e| e.to_string())?;
+            let gate = match crate::runtime_command_guard(state, None) {
+                Ok(gate) => gate,
+                Err(_) => return Ok(()),
+            };
+            let mut child = crate::daemon::command(
+                &launcher(state)?,
+                crate::daemon::Scope::Endpoint(&crate::mux::Endpoint::parse(socket)),
+                crate::daemon::Starter::Caller,
+            )
+            .arg("--deferred-execute")
+            .arg(state)
+            .arg(socket)
+            .arg(&key)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+            drop(gate);
             let deadline = Instant::now() + Duration::from_secs(60);
             loop {
                 if child.try_wait().map_err(|e| e.to_string())?.is_some() {
@@ -620,9 +728,9 @@ pub fn execute_queued(
             value,
             &RuntimeOptions {
                 plugin_state: Some(state.to_path_buf()),
-                herdr_socket: Some(socket.to_owned()),
-                herdr_workspace: Some(request.caller.namespace.space_id.as_str().to_owned()),
-                herdr_pane: Some(request.caller.pane.clone()),
+                endpoint: Some(socket.to_owned()),
+                space: Some(request.caller.namespace.space_id.as_str().to_owned()),
+                pane: Some(request.caller.pane.clone()),
             },
         );
     }
@@ -674,8 +782,13 @@ fn clear_pending(pending: &Dir, key: &str) -> Result<(), String> {
 }
 
 fn execute_request(state: &Path, request: &Request) -> Result<Value, String> {
-    let herdr = ProcessHerdr::default()
-        .with_socket(Some(request.caller.namespace.session_socket_id.clone()));
+    let herdr = crate::mux::connect(
+        state,
+        &Endpoint::parse(&request.caller.namespace.session_socket_id),
+        Budget::ADAPTER_DEFAULT,
+        Default::default(),
+    )
+    .map_err(|error| error.to_string())?;
     // From the worker's own environment, so a deferred `address list` reports
     // context sizes as a direct one does.
     let directories = crate::InheritedDirectories::from_environment();
@@ -687,7 +800,7 @@ fn execute_request(state: &Path, request: &Request) -> Result<Value, String> {
         workspace_id: Some(request.caller.namespace.space_id.as_str()),
         current_pane_id: Some(&request.caller.pane),
         session_socket_id: &request.caller.namespace.session_socket_id,
-        herdr: &herdr,
+        mux: &herdr,
         clock: &SystemClock,
         ids: &ProcessIds::default(),
     };
@@ -737,7 +850,7 @@ fn execute_request(state: &Path, request: &Request) -> Result<Value, String> {
     }
 }
 
-fn validate_live_caller<E: crate::HerdrCommandExecutor>(
+fn validate_live_caller<E: crate::mux::MuxRead>(
     state: &Path,
     caller: &Caller,
     herdr: &E,
@@ -751,7 +864,7 @@ fn validate_live_caller<E: crate::HerdrCommandExecutor>(
         .panes
         .iter()
         .find(|pane| pane.pane_id == caller.pane)
-        .and_then(|pane| pane.agent_session_id.as_ref())
+        .and_then(|pane| pane.agent_session_id())
         != Some(&caller.session)
     {
         return Err("deferred command does not match the live native Agent Session".into());
@@ -759,9 +872,9 @@ fn validate_live_caller<E: crate::HerdrCommandExecutor>(
     Ok(discovered)
 }
 
-fn recover_committed<E: crate::HerdrCommandExecutor, C: Clock, I: IdGenerator>(
+fn recover_committed<M: crate::mux::Mux, C: Clock, I: IdGenerator>(
     request: &Request,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Option<Value>, String> {
     match request.operation {
         Operation::Send | Operation::Reply => crate::message::recover_deferred_message(
@@ -814,6 +927,7 @@ fn recover_committed<E: crate::HerdrCommandExecutor, C: Clock, I: IdGenerator>(
                 let _ = crate::reminder::ensure_clock(
                     runtime.state_directory,
                     Some(runtime.session_socket_id),
+                    crate::daemon::Starter::Caller,
                 );
             }
             Ok(recovered.map(|r| json!(r)))
@@ -834,3 +948,144 @@ fn recover_committed<E: crate::HerdrCommandExecutor, C: Clock, I: IdGenerator>(
 
 #[cfg(test)]
 mod caller_race_tests;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        SpaceId,
+        mux::{
+            PaneId,
+            home::{Deferral, Place},
+            rex::Caller as BlockCaller,
+        },
+    };
+
+    fn place(caller: Option<BlockCaller>) -> Home {
+        Home::Rex(Place {
+            endpoint: Endpoint::parse("rex:/tmp/r.sock"),
+            space: Some(SpaceId::new("session:s")),
+            pane: Some(PaneId::new("block:b")),
+            caller: caller.map(Box::new),
+        })
+    }
+
+    fn located(home: &Home) -> Option<Location> {
+        match home {
+            Home::Rex(place) => Some(Location {
+                endpoint: Some(place.endpoint.clone()),
+                space: place.space.clone(),
+                pane: place.pane.clone(),
+                names: crate::locator::Name::Neutral,
+            }),
+            _ => None,
+        }
+    }
+
+    fn queued(socket: &str, space: &str, pane: &str, probe: bool) -> Option<Target> {
+        Some(Target {
+            socket: socket.into(),
+            space: Some(space.into()),
+            pane: Some(pane.into()),
+            probe,
+        })
+    }
+
+    /// A denial the home proved through the block's binding queues for the
+    /// binding's block with no second probe. A place from flags still
+    /// probes its socket, as Herdr's flags do, and a verified block, whose
+    /// socket answered, never defers.
+    #[test]
+    fn a_denied_command_queues_for_the_place_its_home_names() {
+        let none = RuntimeOptions::default();
+        let deferred = Home::RexDeferred(Deferral {
+            endpoint: Endpoint::parse("rex:/tmp/r.sock"),
+            space: SpaceId::new("session:bound"),
+            pane: PaneId::new("block:bound"),
+        });
+        assert_eq!(
+            target(&none, Some(&deferred), None),
+            queued("rex:/tmp/r.sock", "session:bound", "block:bound", false)
+        );
+        let flagged = place(None);
+        assert_eq!(
+            target(&none, Some(&flagged), located(&flagged)),
+            queued("rex:/tmp/r.sock", "session:s", "block:b", true)
+        );
+        let verified = place(Some(BlockCaller::default()));
+        assert_eq!(target(&none, Some(&verified), located(&verified)), None);
+        let herdr = Location {
+            endpoint: Some(Endpoint::parse("/tmp/h.sock")),
+            space: Some(SpaceId::new("w1")),
+            pane: Some(PaneId::new("w1:p1")),
+            names: crate::locator::Name::Herdr,
+        };
+        assert_eq!(
+            target(&none, Some(&Home::Herdr), Some(herdr)),
+            queued("/tmp/h.sock", "w1", "w1:p1", true)
+        );
+        assert_eq!(target(&none, None, None), None);
+        let explicit = RuntimeOptions {
+            pane: Some("block:flag".into()),
+            ..RuntimeOptions::default()
+        };
+        assert_eq!(
+            target(&explicit, Some(&deferred), None),
+            queued("rex:/tmp/r.sock", "session:bound", "block:flag", false),
+            "a flag names its own value, as everywhere"
+        );
+    }
+
+    #[test]
+    fn a_probe_connects_to_a_herdr_socket_as_named_and_to_a_rex_socket_after_its_scheme() {
+        let directory = env::temp_dir().join(format!("nd-probe-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let socket = directory.join("s.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let path = socket.to_str().unwrap();
+        assert!(probe(path).is_ok());
+        assert!(probe(&format!("rex:{path}")).is_ok());
+        let error = probe("rex:s.sock").unwrap_err();
+        assert_eq!(
+            (error.kind(), error.to_string()),
+            (
+                io::ErrorKind::InvalidInput,
+                "rex:s.sock names no Unix socket".to_owned()
+            )
+        );
+        fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn a_deferred_command_for_a_rex_caller_connects_and_reads_the_state_as_a_herdr_one_does() {
+        let state = env::temp_dir().join(format!("nd-defer-rex-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&state);
+        fs::create_dir_all(&state).unwrap();
+        let request = Request {
+            operation: Operation::AddressList,
+            input: json!({}),
+            caller: Caller {
+                namespace: StateNamespace::for_space("rex:/tmp/r.sock", "session:s"),
+                pane: "block:b".into(),
+                address: PaneAddressId::new("address-1"),
+                session: AgentSessionId::new("session-1"),
+                registration: "registration-1".into(),
+            },
+            cwd: state.clone(),
+            key: "key-1".into(),
+            fingerprint: "fingerprint-1".into(),
+            created_at_ms: 0,
+        };
+        assert_eq!(
+            execute_request(&state, &request),
+            Err("Namedrop state is missing; activate this workspace outside the sandbox before queuing commands".to_owned())
+        );
+        assert_eq!(
+            fs::read_dir(&state).unwrap().count(),
+            0,
+            "no store was made"
+        );
+        fs::remove_dir_all(&state).unwrap();
+    }
+}

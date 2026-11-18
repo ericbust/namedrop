@@ -307,7 +307,7 @@ impl StateTransaction<'_> {
                 .panes
                 .iter()
                 .find(|p| p.pane_id == owner.pane)
-                .and_then(|p| p.agent_session_id.as_ref())
+                .and_then(|p| p.agent_session_id())
                 != Some(&owner.session)
         {
             self.reminder_state(
@@ -505,7 +505,7 @@ impl StateTransaction<'_> {
                         .panes
                         .iter()
                         .find(|p| p.pane_id == reminder.owner.pane)
-                        .and_then(|p| p.agent_session_id.as_ref())
+                        .and_then(|p| p.agent_session_id())
                         != Some(&reminder.owner.session))
             {
                 self.reminder_state(

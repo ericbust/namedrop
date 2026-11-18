@@ -77,10 +77,11 @@ The Channels movie is a silent keynote film built from one continuous take of th
 
 You need the Namedrop testbed, Chromium, Node.js, ffmpeg, and Python 3 with Pillow. Keep the take and renders outside `/tmp`; a take is about 1 GB. Run the commands from the repository root.
 
-1. Build a `test-` profile from the product revision. The testbed isolates `HOME` and `XDG_CONFIG_HOME` and links your existing login files.
+1. Build a `test-` profile from the product revision. The testbed isolates `HOME` and `XDG_CONFIG_HOME`, links your Codex login, and signs Claude Code in with the testbed token, never your default login ([testbed/README.md](../../testbed/README.md#the-claude-code-account)). The token file defaults to `$TESTBED_HOME/claude-oauth-token`, so the `TESTBED_HOME` below would move it to `~/.cache/channels-video/testbed/claude-oauth-token`. The second line keeps the testbed on your usual token file.
 
    ```sh
    export TESTBED_HOME=~/.cache/channels-video/testbed
+   export NAMEDROP_TESTBED_CLAUDE_TOKEN_FILE=~/.namedrop-testbed/claude-oauth-token
    testbed/testbed test --link . --profile test-channels --codex no-daemon --keep
    ```
 

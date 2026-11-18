@@ -1,5 +1,5 @@
 <p align="center">
-  <a href="docs/assets/namedrop-demo.mp4">
+  <a href="https://github.com/ericbust/namedrop/blob/main/docs/assets/namedrop-demo.mp4">
     <img src="docs/assets/namedrop-demo.webp" width="100%" alt="Namedrop demo: @reviewer in Claude Code and @coder in Codex get names. A lead agent asks @reviewer and @tester for help and merges their replies into one answer. Then @coder in Codex and @tester in Claude Code get their own jobs and work as peers with no lead, each message shown as a card: @coder asks @reviewer for a pinned review and gets findings back, @tester runs its tests on a shell named @build and gets the failure back, and once the code moves the stale review is redone and comes back fresh. Agent status shows who is waiting on whom.">
   </a>
 </p>
@@ -9,7 +9,7 @@
 <p align="center"><strong>@mentions for Codex, Claude Code, and your terminal.</strong></p>
 
 <p align="center">
-  <a href="docs/assets/namedrop-overview.mp4"><img height="36" alt="Watch the 2½-minute narrated overview" src="https://img.shields.io/badge/%E2%96%B6%20Watch%20the%20overview-2%C2%BD%20min%20video-7de2d1?style=for-the-badge"></a>
+  <a href="https://github.com/ericbust/namedrop/blob/main/docs/assets/namedrop-overview.mp4"><img height="36" alt="Watch the 2½-minute narrated overview" src="https://img.shields.io/badge/%E2%96%B6%20Watch%20the%20overview-2%C2%BD%20min%20video-7de2d1?style=for-the-badge"></a>
 </p>
 
 <p align="center">
@@ -30,7 +30,7 @@
   <a href="#update-namedrop">Update</a> ·
   <a href="#troubleshooting">Troubleshooting</a> ·
   <a href="#uninstall">Uninstall</a> ·
-  <a href="docs/assets/namedrop-demo.mp4">Watch the demo in HD</a>
+  <a href="https://github.com/ericbust/namedrop/blob/main/docs/assets/namedrop-demo.mp4">Watch the demo in HD</a>
 </p>
 
 Namedrop is a [Herdr](https://herdr.dev) plugin that lets agents work together across panes. Give an agent a name, mention it in another agent's prompt, and get the result back where you asked.
@@ -39,7 +39,7 @@ Namedrop is a [Herdr](https://herdr.dev) plugin that lets agents work together a
 
 <!-- channels-video -->
 
-[![Watch Channels Beta: ask an agent in a channel, follow up in the thread, watch Claude ask Codex in the open, see who works for whom in All activity, pick who gets a reply, use an agent's skills, set a reminder in a DM, see Needs you, and watch subagents](docs/assets/namedrop-channels.webp)](docs/assets/namedrop-channels.mp4)
+[![Watch Channels Beta: ask an agent in a channel, follow up in the thread, watch Claude ask Codex in the open, see who works for whom in All activity, pick who gets a reply, use an agent's skills, set a reminder in a DM, see Needs you, and watch subagents](docs/assets/namedrop-channels.webp)](https://github.com/ericbust/namedrop/blob/main/docs/assets/namedrop-channels.mp4)
 
 In one agent pane:
 
@@ -83,7 +83,7 @@ The reply comes back to the workspace you sent from. A mention without a label s
 - **Doctor.** `namedrop doctor` and a floating panel explain setup problems and blocked deliveries.
 - **A tour.** A short walkthrough opens once per machine, the first time an agent appears in an activated workspace. **Prefix**, then **Shift-O** opens it again.
 
-The demo above uses real sessions. Every screen is output captured from Claude Code, Codex, a shell, and Herdr in a fresh profile, then restaged in 3D. See [how the demo is made](docs/demo/README.md).
+The demo above uses real sessions. Every screen is output captured from Claude Code, Codex, a shell, and Herdr in a fresh profile, then restaged in 3D. See [how the demo is made](https://github.com/ericbust/namedrop/blob/main/docs/demo/README.md).
 
 ## Install
 
@@ -93,6 +93,8 @@ You need:
 - **[Herdr](https://herdr.dev) 0.7.5 or newer**.
 - **Codex or Claude Code**, and **Python 3.9 or newer** on `PATH`.
 - **Git, Rust 1.97 or newer, and a C compiler and linker**, because Herdr builds Namedrop from source. On macOS, Apple's command-line developer tools provide the compiler. A [release archive](#install-from-a-release-archive) doesn't need these.
+
+To use Namedrop in [Rex](https://www.superlogical.com/rex/docs) without Herdr, see [Run Namedrop on Rex](docs/rex.md) instead. Rex support is experimental. Namedrop 1.12.0 is the first release that includes it.
 
 On Linux, install from a local Herdr workspace. A remote workspace installs Namedrop on the remote host. With Codex on Linux, Agent status summaries and persona suggestions also need Landlock and the official static Codex executable. `namedrop doctor` tells you what's missing. Linux aarch64 builds pass CI but nobody has tested them by hand yet.
 
@@ -366,9 +368,20 @@ namedrop channels --tailscale --no-open
 
 In a terminal, the command draws the one-time HTTPS link as a QR code and prints the link under it. Scan the code with your phone, or open the link on your other device. Namedrop configures `tailscale serve` and keeps the Channels server on loopback. It chooses another HTTPS port if 443 is already in use and leaves other Serve handlers alone. Your tailnet must have HTTPS enabled. Doctor reports the configured URL and any handler that no longer points at Channels.
 
-Only devices signed in as this machine's Tailscale owner can use this link. Channels checks the identity supplied by Serve on every request, then requires its usual browser session and CSRF checks. Shared-device users and tagged devices cannot sign in. This uses private Serve, never public Funnel. Local programs on the server remain trusted. **Type to agent** from your phone sends real input to the agent's pane.
+Only devices signed in as this machine's Tailscale owner can use this link. Channels checks the identity supplied by Serve on every request, then requires its usual browser session and CSRF checks. Shared-device users and tagged devices cannot sign in. This uses private Serve, never public Funnel. Local programs on the server remain trusted. **Type to agent** from your phone sends real input to the agent's pane. **+** and **Add agent** from your phone create real Herdr workspaces and start real agents on this machine.
 
 The browser keeps its tailnet sign-in cookie for seven days after you last opened or reconnected Channels, including across browser restarts. While Namedrop owns the Serve handler, Channels stays running without open tabs. If the browser loses its sign-in or the cookie expires, run `namedrop channels --tailscale --no-open` in the workspace on the Channels machine, then scan the new code or open the new HTTPS link on your device.
+
+While tailnet access is on, the Channels server never stops for having no tab open, so the link on your phone keeps working. When you turn tailnet access off, the idle rule below applies again. An update that migrates the state schema restarts the server on the same port. On macOS, other updates usually leave it running on the old release. [Restart Channels after an update](docs/operations.md#restart-channels-after-an-update) says how to stop it. If the machine restarts or the server is killed, Herdr starts the server again when Herdr next starts, and when a pane opens, moves or closes. Devices that are signed in stay signed in. Until then the link fails, and `namedrop doctor` reports that the Channels server is not running. To start it yourself, run `namedrop channels --no-open`. If another program has taken the server's port meanwhile, Doctor names the port and says how to free it or move Channels. Herdr has to be running: after a restart with nobody logged in, the link stays down until you open Herdr.
+
+Without tailnet access, the server stops 10 minutes after the last tab closes. To change that, pass `--idle` with a number of minutes, or `never`:
+
+```sh
+namedrop channels --idle 60
+namedrop channels --idle never
+```
+
+The setting is saved in Namedrop's state directory and applies until you change it, across restarts and updates. It has no effect while tailnet access is on. `namedrop channels` prints the rule in force each time, and Doctor reports it when tailnet access is on or a setting is saved.
 
 To remove Namedrop's handler and disable tailnet access, run:
 
@@ -382,14 +395,19 @@ The ordinary `namedrop channels` command and Herdr action still open the local p
 
 ### What to try
 
+- Select **+** beside **Channels** to make a new channel. Give it a name and a working folder: type the folder's full path, or pick one of the folders your other workspaces use. Channels creates the Herdr workspace in that folder, activates Namedrop there and opens the channel. The folder must already exist. Namedrop never creates folders.
+- Select **Add agent** in a channel's member row to start Claude Code, Codex or a plain terminal. Give it a name and, if you like, a persona. Channels opens a new tab in that workspace, in the channel's folder, names the pane and runs plain `claude` or `codex` there, as you would by hand. The form shows the folder. It stays the channel's folder wherever you `cd` in its panes. If the agent stops at a first-run screen, such as trusting the folder or logging in, it shows under **Needs you** after 20 seconds. Open its pane from there and answer the screen yourself. Channels never answers it for you. A new Codex connects after its first prompt, so type one in its pane.
 - Post `@name` and a request in a channel, and watch the reply arrive. Replies stay in their thread. The channel shows the top message, reply count, and latest reply.
 - Open a thread with one agent and send a follow-up without `@`. With several agents, pick who receives it with `@name`. Channels keeps the reply unsent until you choose.
 - Post a note without a mention. It stays in the channel and wakes nobody. Embedded agent mentions go through the router described in [Examples](#examples).
 - Choose an agent under **Direct messages**. Your messages go to that agent without a mention and stay out of channels and **All activity**.
 - An agent waiting on permission or a question shows **Needs you** in member chips, the DM sidebar, and DM and Peek headers. Open **Needs you** when an agent waits on an approval or a reply. Handoff warnings offer details and review actions. **All activity** shows work across channels.
 - Select an agent's name to open **Peek**. **Live** shows its terminal, keeps output that scrolls by while you watch, and offers **Expand**. **Text snapshot** gives you a sanitized text view with manual refresh.
-- Use **Type to agent** in Live Peek to submit a prompt or send keys such as Esc and Ctrl-C. This sends input to the real pane. Live Peek keeps streaming through the agent's reply. Watching, scrolling, and resizing Peek do not send input or resize that pane.
+- Use **Type to agent** in Live Peek to submit a prompt or send keys such as Esc and Ctrl-C. This sends input to the real pane. Live Peek keeps streaming through the agent's reply. If Namedrop is typing into that pane at the same moment, for example to deliver a message, nothing is sent and your text stays in the box to send again. Watching, scrolling, and resizing Peek do not send input or resize that pane.
 - Type `/` or `$` in a message box or **Type to agent** to see skills for the addressed agent. Claude Code and Codex have separate lists.
+- Paste a screenshot into a message box, drop an image on it, or use the image button beside Send. The agent gets the image with your message and can open it. A message takes up to 4 images of up to 10 MB each.
+- Hear a sound when an agent messages you, in any open Channels tab. Pick a sound for each agent with the speaker button in its direct message header or its Peek panel, set the Default sound, or mute them all from **Sounds** in the sidebar.
+- Ask an agent for a diagram. A fenced code block tagged `mermaid` in any message is drawn as a diagram in the thread, in the page's light or dark colors. **Show source** and **Copy** sit under it, and a click or tap opens it full size.
 - See how many subagents an agent runs on its member chip and Peek header.
 - Ask for a reminder. Pending reminders in the thread or DM have **Cancel** buttons. One-time reminders show no repeat count.
 
@@ -399,7 +417,7 @@ An agent's final message is its answer to your Channels message. It appears in t
 
 Beta means the interface and workflows may still change. Status for Codex agents is limited compared with Claude Code. A name created before its session starts can look like an offline agent. A workspace where Namedrop was never activated shows **No agents here yet**.
 
-Channels listens on `127.0.0.1`. Use `--tailscale` to open it from your other devices. Any process running as your user that can open the page can post as you. Live Peek shows terminal content that can contain secrets. **Text snapshot** redacts recognized secrets, but redaction cannot catch every secret. See [Channels operations](docs/operations.md#channels) for authentication and server details.
+Channels listens on `127.0.0.1`. Use `--tailscale` to open it from your other devices. Any process running as your user that can open the page can post as you. It can also create channels and start agents, as you can from the page. Live Peek shows terminal content that can contain secrets. **Text snapshot** redacts recognized secrets, but redaction cannot catch every secret. See [Channels operations](docs/operations.md#channels) for authentication and server details.
 
 [Report a problem](https://github.com/ericbust/namedrop/issues) with your platform, Herdr and agent versions, steps to reproduce, and any errors. Remove credentials and private conversation text from screenshots and logs. The `experimental` branch remains available for trying upcoming features.
 
@@ -473,6 +491,8 @@ For more detail, see these guides:
 - [Operations and recovery](docs/operations.md) covers names, groups, delivery states, and every command.
 - [Upgrades and backups](docs/operations.md#upgrade) covers replacing an installation, restoring state, and removing Namedrop.
 - [Compatibility](docs/compatibility.md) lists supported platforms, tested versions, and known gaps.
+- [Run Namedrop on Rex](docs/rex.md) installs a release archive in Rex without Herdr, and sets up mentions to agents on another machine. Rex support is experimental, and releases include it from 1.12.0.
+- [Namedrop on Rex reference](docs/rex-reference.md) lists Rex's palette actions and keys, the files the installer writes, update settings, Doctor's Rex diagnostics, and known limits.
 
 ## Data and privacy
 

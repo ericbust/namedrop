@@ -30,37 +30,51 @@ fn claude_delivery_guidance_matches_managed_rules_for_every_automatic_operation(
                 .filter(|op| op.automatic_permission),
         )
         .collect::<Vec<_>>();
-    let tool = json!({
-        "executable":executable,
-        "environment":{"HERDR_PLUGIN_STATE_DIR":state,"HERDR_SOCKET_PATH":"socket-a","HERDR_WORKSPACE_ID":"workspace-1","HERDR_PANE_ID":"pane-agent"},
-        "input_flag":"--input-json",
-        "operations":operations.iter().map(|op| json!({"token":op.token,"argv":op.argv,"input":{}})).collect::<Vec<_>>()
-    });
-    // A context reference is what gives context.inspect a line.
-    let guidance = guidance_of(&json!({"context_references":[{}], "tool": tool})).unwrap();
     let settings: Value =
         serde_json::from_slice(&fs::read(home.join(".claude/settings.json")).unwrap()).unwrap();
     let rules = settings["permissions"]["allow"].as_array().unwrap();
     assert_eq!(operations.len(), 22);
-    for operation in operations {
-        let prefix = format!("{}: ", operation.token);
-        let command = guidance.lines().find_map(|line| line.strip_prefix(&prefix));
-        if ["reminder.set", "handoff.preview"].contains(&operation.token.as_str()) {
+    let herdr = json!({"HERDR_PLUGIN_STATE_DIR":state,"HERDR_SOCKET_PATH":"socket-a","HERDR_WORKSPACE_ID":"workspace-1","HERDR_PANE_ID":"pane-agent"});
+    let neutral = json!({"NAMEDROP_STATE_DIR":state,"NAMEDROP_ENDPOINT":"socket-a","NAMEDROP_SPACE_ID":"workspace-1","NAMEDROP_PANE_ID":"pane-agent"});
+    for (environment, location) in [
+        (
+            herdr,
+            " --herdr-socket 'socket-a' --herdr-workspace 'workspace-1' --herdr-pane 'pane-agent' ",
+        ),
+        (
+            neutral,
+            " --endpoint 'socket-a' --space 'workspace-1' --pane 'pane-agent' ",
+        ),
+    ] {
+        let tool = json!({
+            "executable":executable,
+            "environment":environment,
+            "input_flag":"--input-json",
+            "operations":operations.iter().map(|op| json!({"token":op.token,"argv":op.argv,"input":{}})).collect::<Vec<_>>()
+        });
+        // A context reference is what gives context.inspect a line.
+        let guidance = guidance_of(&json!({"context_references":[{}], "tool": tool})).unwrap();
+        for operation in &operations {
+            let prefix = format!("{}: ", operation.token);
+            let command = guidance.lines().find_map(|line| line.strip_prefix(&prefix));
+            if ["reminder.set", "handoff.preview"].contains(&operation.token.as_str()) {
+                assert!(
+                    command.is_none(),
+                    "{} was rendered: {guidance}",
+                    operation.token
+                );
+                continue;
+            }
+            let command = command.unwrap();
+            assert!(command.contains(location), "{command}");
             assert!(
-                command.is_none(),
-                "{} was rendered: {guidance}",
+                rules
+                    .iter()
+                    .any(|rule| bash_rule_matches(rule.as_str().unwrap(), command)),
+                "{} guidance has no managed permission: {command}",
                 operation.token
             );
-            continue;
         }
-        let command = command.unwrap();
-        assert!(
-            rules
-                .iter()
-                .any(|rule| bash_rule_matches(rule.as_str().unwrap(), command)),
-            "{} guidance has no managed permission: {command}",
-            operation.token
-        );
     }
     fs::remove_dir_all(root).unwrap();
 }
@@ -325,10 +339,10 @@ fn a_final_reply_delivery_says_what_the_stop_does_and_shows_only_the_other_line(
         template: Value::Null,
         tracked: false,
     };
-    let claude = final_reply_guidance(&control, &reply).unwrap();
+    let claude = final_reply_guidance(&control, &reply, None).unwrap();
     assert!(
         claude.starts_with(
-            "Namedrop commands: your final message is your reply to @lead. Namedrop sends it when your turn ends, so run no settle command and write no status line. If your turn ends while you wait on a helper, Namedrop sends nothing and you reply later. If it ends while background work you started this turn runs, Namedrop holds your final message, and your final message in the turn that work's notice starts is the reply. If the notice arrives during another turn, or another delivery reaches the turn it starts, answer with the line Namedrop shows. For no reply, run this line first."
+            "Namedrop commands: your final message is your reply to @lead. Namedrop sends it when your turn ends, so run no settle command and write no status line. If your turn ends while you wait on a helper, Namedrop sends nothing, and your final message in the turn that the helper's answer starts is the reply. If it ends while background work you started this turn runs, Namedrop holds your final message, and your final message in the turn that work's notice starts is the reply. Whenever a later turn shows a line to answer this delivery, answer with that line. For no reply, run this line first."
         ),
         "{claude}"
     );
@@ -344,6 +358,7 @@ fn a_final_reply_delivery_says_what_the_stop_does_and_shows_only_the_other_line(
             template: Value::Null,
             tracked: true,
         },
+        None,
     )
     .unwrap();
     assert!(tracked.contains(FINAL_REPLY_OUTCOME), "{tracked}");
@@ -352,7 +367,8 @@ fn a_final_reply_delivery_says_what_the_stop_does_and_shows_only_the_other_line(
         "{tracked}"
     );
 
-    let own = final_reply_guidance(&control, &Armed::NoReply(NoReplyCase::AnswersOwn)).unwrap();
+    let own =
+        final_reply_guidance(&control, &Armed::NoReply(NoReplyCase::AnswersOwn), None).unwrap();
     assert!(
         own.contains("To answer @lead instead, run this line."),
         "{own}"
@@ -363,26 +379,70 @@ fn a_final_reply_delivery_says_what_the_stop_does_and_shows_only_the_other_line(
         "{own}"
     );
 
-    for (case, text) in [
-        (NoReplyCase::ReportToHuman, REPORT_TO_HUMAN_GUIDANCE),
-        (NoReplyCase::ResultSet, RESULT_SET_GUIDANCE),
+    let held = crate::DeliveryAttemptId::new("attempt-held");
+    let woken = final_reply_guidance(
+        &control,
+        &Armed::NoReply(NoReplyCase::AnswersOwn),
+        Some(&held),
+    )
+    .unwrap();
+    // What the final message does comes first, and the line, which goes to
+    // the helper, is described right before it.
+    assert!(
+        woken.starts_with(
+            "Namedrop commands: this answers your message. Delivery attempt-held from an earlier turn waited on it, so your final message is your answer to delivery attempt-held, and Namedrop sends it there: run no settle command and write no status line. If this does not answer delivery attempt-held yet, send a new request rather than a reply, and end your turn while you wait for its answer. If your turn ends while you wait on a helper, Namedrop sends nothing, and your final message in the turn that the helper's answer starts is the reply. If it ends while background work you started this turn runs, Namedrop holds your final message, and your final message in the turn that work's notice starts is the reply. Whenever a later turn shows a line to answer delivery attempt-held, answer with that line. Namedrop closes this answer without a reply when your turn ends. To reply to @lead as well, run this line: it goes only to @lead, and your final message still answers delivery attempt-held."
+        ),
+        "{woken}"
+    );
+    assert_eq!(rendered_tokens(&woken), ["reply"]);
+    for (case, text, woken) in [
+        (
+            NoReplyCase::ReportToHuman,
+            REPORT_TO_HUMAN_GUIDANCE,
+            REPORT_TO_HUMAN_WOKEN,
+        ),
+        (
+            NoReplyCase::ResultSet,
+            RESULT_SET_GUIDANCE,
+            RESULT_SET_GUIDANCE,
+        ),
     ] {
         assert_eq!(
-            final_reply_guidance(&control, &Armed::NoReply(case)).unwrap(),
+            final_reply_guidance(&control, &Armed::NoReply(case), None).unwrap(),
             text
         );
+        assert_eq!(
+            final_reply_guidance(&control, &Armed::NoReply(case), Some(&held)).unwrap(),
+            format!("{woken} {}", woken_sentence(&held, false))
+        );
     }
+    // A terminal's result answers the held delivery, which another agent may
+    // have asked: the text never sends that answer to the person. It shows
+    // no line that replies, so it asks again only with a new request.
+    let result = final_reply_guidance(
+        &control,
+        &Armed::NoReply(NoReplyCase::ReportToHuman),
+        Some(&held),
+    )
+    .unwrap();
+    assert!(!result.contains("the person"), "{result}");
+    assert!(
+        result.contains("yet, send a new request, and end your turn")
+            && !result.contains("rather than a reply"),
+        "{result}"
+    );
     let relayed = Armed::NoReply(NoReplyCase::Relayed);
     assert_eq!(
-        final_reply_guidance(&control, &relayed).unwrap(),
-        format!("{RELAYED_GUIDANCE} {FINAL_REPLY_WAITING}")
+        final_reply_guidance(&control, &relayed, None).unwrap(),
+        format!("{RELAYED_GUIDANCE} {}", final_reply_waiting(THIS_DELIVERY))
     );
     let mut channel = control.clone();
     channel["reply_mode"] = json!("channel");
-    let channel = final_reply_guidance(&channel, &relayed).unwrap();
+    let channel = final_reply_guidance(&channel, &relayed, None).unwrap();
     assert!(
         channel.starts_with(&format!(
-            "{RELAYED_GUIDANCE} {FINAL_REPLY_WAITING}{RELAYED_CHANNEL}"
+            "{RELAYED_GUIDANCE} {}{RELAYED_CHANNEL}",
+            final_reply_waiting(THIS_DELIVERY)
         )),
         "{channel}"
     );
@@ -580,4 +640,115 @@ fn an_armed_direct_message_or_channel_rule_never_asks_for_the_bound_reply() {
         assert!(pointer_details(&control, false).contains("bound reply"));
         assert!(trusted_delivery_instruction(&control).contains("bound reply"));
     }
+}
+
+/// What Namedrop writes for a Rex endpoint uses the neutral names: the
+/// envelope's keys, the registration line and its Codex sentence, every
+/// rendered line, and the unrendered-line sentence. A Herdr endpoint keeps
+/// Herdr's, byte for byte.
+#[test]
+fn a_rex_endpoint_s_envelope_and_lines_use_the_neutral_names() {
+    let state = Path::new("/state dir");
+    let herdr = tool_environment(state, "/tmp/h.sock", "w1", "w1:p1");
+    assert_eq!(
+        herdr,
+        BTreeMap::from([
+            ("HERDR_PANE_ID".to_owned(), "w1:p1".to_owned()),
+            ("HERDR_PLUGIN_STATE_DIR".to_owned(), "/state dir".to_owned()),
+            ("HERDR_SOCKET_PATH".to_owned(), "/tmp/h.sock".to_owned()),
+            ("HERDR_WORKSPACE_ID".to_owned(), "w1".to_owned()),
+        ])
+    );
+    let rex = tool_environment(state, "rex:/tmp/r.sock", "s1", "b1");
+    assert_eq!(
+        rex,
+        BTreeMap::from([
+            ("NAMEDROP_ENDPOINT".to_owned(), "rex:/tmp/r.sock".to_owned()),
+            ("NAMEDROP_PANE_ID".to_owned(), "b1".to_owned()),
+            ("NAMEDROP_SPACE_ID".to_owned(), "s1".to_owned()),
+            ("NAMEDROP_STATE_DIR".to_owned(), "/state dir".to_owned()),
+        ])
+    );
+
+    let executable = Path::new("/bin/namedrop");
+    let register = |endpoint, space, pane| {
+        registration_command(
+            state,
+            endpoint,
+            space,
+            pane,
+            executable,
+            AgentRuntime::Codex,
+            "n1",
+        )
+        .unwrap()
+    };
+    let input = shell_single_quote(
+        &json!({
+            "runtime": AgentRuntime::Codex,
+            "protocol_version": INTEGRATION_PROTOCOL_VERSION,
+            "nonce": "n1",
+            "capabilities": complete_capability_profile(),
+        })
+        .to_string(),
+    );
+    assert_eq!(
+        register("/tmp/h.sock", "w1", "w1:p1"),
+        format!(
+            "'/bin/namedrop' --plugin-state '/state dir' register --herdr-socket '/tmp/h.sock' --herdr-workspace 'w1' --herdr-pane 'w1:p1' --input-json {input}"
+        )
+    );
+    assert_eq!(
+        register("rex:/tmp/r.sock", "s1", "b1"),
+        format!(
+            "'/bin/namedrop' --plugin-state '/state dir' register --endpoint 'rex:/tmp/r.sock' --space 's1' --pane 'b1' --input-json {input}"
+        )
+    );
+    let sentence = |endpoint| {
+        registration_prompt(
+            state,
+            endpoint,
+            "s1",
+            "b1",
+            executable,
+            AgentRuntime::Codex,
+            "n1",
+        )
+        .unwrap()
+    };
+    assert!(
+        sentence("/tmp/h.sock").contains(" This command writes to HERDR_PLUGIN_STATE_DIR outside")
+    );
+    assert!(
+        sentence("rex:/tmp/r.sock").contains(" This command writes to NAMEDROP_STATE_DIR outside")
+    );
+
+    let control = |environment: &BTreeMap<String, String>| {
+        json!({"tool":{
+            "executable":"/bin/namedrop","environment":environment,"input_flag":"--input-json",
+            "operations":[
+                {"token":"reply","argv":["reply"],"input":{}},
+                {"token":"reminder.set","argv":["reminder","set"],"input":{}}
+            ]
+        }})
+    };
+    let herdr_guidance = guidance_of(&control(&herdr)).unwrap();
+    assert!(herdr_guidance.contains(
+        "its argv, `--herdr-socket`, `--herdr-workspace`, `--herdr-pane`, then the input flag"
+    ));
+    assert!(herdr_guidance.contains(
+        "reply: '/bin/namedrop' --plugin-state '/state dir' reply --herdr-socket '/tmp/h.sock' --herdr-workspace 'w1' --herdr-pane 'w1:p1' --input-json '{}'"
+    ));
+    let rex_guidance = guidance_of(&control(&rex)).unwrap();
+    assert!(
+        rex_guidance.contains("its argv, `--endpoint`, `--space`, `--pane`, then the input flag"),
+        "{rex_guidance}"
+    );
+    assert!(
+        rex_guidance.contains(
+            "reply: '/bin/namedrop' --plugin-state '/state dir' reply --endpoint 'rex:/tmp/r.sock' --space 's1' --pane 'b1' --input-json '{}'"
+        ),
+        "{rex_guidance}"
+    );
+    assert!(!rex_guidance.contains("herdr"), "{rex_guidance}");
 }

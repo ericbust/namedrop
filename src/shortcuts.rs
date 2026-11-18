@@ -1,5 +1,5 @@
 //! Shared shortcut installation for activation and the explicit repair command.
-use crate::HerdrCommandExecutor;
+use crate::mux::{Applied, Effect, MuxAct, MuxKind};
 use std::{
     env, fs,
     io::Write,
@@ -58,15 +58,18 @@ fn contains_key(item: &Item, key: &str) -> bool {
     })
 }
 
+/// Whether `home` is this process's own `HOME`. `HERDR_CONFIG_PATH` and
+/// `XDG_CONFIG_HOME` belong to that user, so activating for another home
+/// (tests, isolated profiles) never touches this user's configuration.
+fn own_home(home: &Path) -> bool {
+    env::var_os("HOME").is_some_and(|value| Path::new(&value) == home)
+}
+
 /// Herdr reads `$XDG_CONFIG_HOME/herdr/config.toml` when that is an absolute
-/// path, otherwise `~/.config/herdr/config.toml`. XDG_CONFIG_HOME belongs to
-/// this process's own user, so it only applies when `home` is that user's
-/// HOME; activating for another home (tests, isolated profiles) never touches
-/// this user's configuration.
+/// path, otherwise `~/.config/herdr/config.toml`.
 fn default_config(home: &Path) -> PathBuf {
-    let own_home = env::var_os("HOME").is_some_and(|value| Path::new(&value) == home);
     env::var_os("XDG_CONFIG_HOME")
-        .filter(|_| own_home)
+        .filter(|_| own_home(home))
         .map(PathBuf::from)
         .filter(|directory| directory.is_absolute())
         .unwrap_or_else(|| home.join(".config"))
@@ -82,7 +85,11 @@ pub fn install_shortcuts(
 ) -> Result<serde_json::Value, String> {
     let path = config
         .map(Path::to_path_buf)
-        .or_else(|| env::var_os("HERDR_CONFIG_PATH").map(PathBuf::from))
+        .or_else(|| {
+            env::var_os("HERDR_CONFIG_PATH")
+                .filter(|_| home.is_none_or(own_home))
+                .map(PathBuf::from)
+        })
         .or_else(|| home.map(default_config))
         .ok_or("Could not locate Herdr configuration; use --config PATH")?;
     let metadata = match fs::symlink_metadata(&path) {
@@ -199,14 +206,20 @@ pub fn install_shortcuts(
     result
 }
 
-pub(crate) fn activate_shortcuts(
-    home: Option<&Path>,
-    herdr: &impl HerdrCommandExecutor,
-) -> serde_json::Value {
+pub(crate) fn activate_shortcuts(home: Option<&Path>, mux: &impl MuxAct) -> serde_json::Value {
+    if mux.endpoint().kind == MuxKind::Rex {
+        return crate::rex_ui::shortcuts(home, mux.endpoint());
+    }
     match install_shortcuts(None, home) {
         Ok(mut report) => {
-            match herdr.execute(&["server", "reload-config"]) {
-                Ok(_) => {
+            match mux.apply(&Effect::ReloadKeybindings) {
+                Ok(Applied::Unsupported) => {
+                    report["reloaded"] = serde_json::json!(false);
+                    report["error"] = serde_json::json!(
+                        "Shortcuts saved, but this host does not support reloading key bindings."
+                    );
+                }
+                Ok(Applied::Done | Applied::Opened(_)) => {
                     report["reloaded"] = serde_json::json!(true);
                     report.as_object_mut().unwrap().remove("next_step");
                 }

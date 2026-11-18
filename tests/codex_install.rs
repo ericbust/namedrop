@@ -1,3 +1,6 @@
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/executable.rs"]
@@ -7,7 +10,6 @@ use namedrop::{AgentRuntime, install_integration_package, operation_catalog};
 use std::{
     fs,
     path::PathBuf,
-    process::Command,
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -130,10 +132,10 @@ fn codex_policy_conflicts_are_refused_before_package_changes() {
 #[test]
 fn direct_cli_input_file_and_state_binding_cannot_be_overridden() {
     let f = Fixture::new();
-    let executable = env!("CARGO_BIN_EXE_namedrop");
+    let executable = crate::binary::namedrop_path();
     let input = f.0.join("input.json");
     fs::write(&input, "{}").unwrap();
-    let output = Command::new(executable)
+    let output = crate::binary::command(executable)
         .args([
             "--plugin-state",
             f.state().to_str().unwrap(),
@@ -153,7 +155,7 @@ fn direct_cli_input_file_and_state_binding_cannot_be_overridden() {
         vec!["--plugin-state=/wrong"],
         vec!["--input-json", "{}"],
     ] {
-        let result = Command::new(executable)
+        let result = crate::binary::command(executable)
             .args([
                 "--plugin-state",
                 f.state().to_str().unwrap(),
@@ -181,7 +183,7 @@ fn cli_context_targets_the_bound_host_instead_of_inherited_environment() {
         "#!/bin/sh\nprintf '%s\\n' \"socket=$HERDR_SOCKET_PATH args=$*\" >&2\nexit 1\n",
     );
     for timeout in ["", "1000"] {
-        let output = Command::new(env!("CARGO_BIN_EXE_namedrop"))
+        let output = crate::binary::namedrop()
             .args([
                 "--plugin-state",
                 f.state().to_str().unwrap(),
@@ -216,7 +218,7 @@ fn codex_policy_checker_accepts_only_installed_collaboration_commands() {
     let f = Fixture::new();
     f.install().unwrap();
     let check = |args: Vec<String>| {
-        let result = Command::new("codex")
+        let result = crate::binary::command("codex")
             .args(["execpolicy", "check", "--rules"])
             .arg(f.rules())
             .arg("--")

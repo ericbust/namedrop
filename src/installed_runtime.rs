@@ -1,4 +1,13 @@
 //! Stable command paths and shared-package ownership across compatible updates.
+pub(crate) mod helpers;
+pub(crate) mod packages;
+pub(crate) mod retirement;
+pub(crate) use packages::{PackageLease, Writer, package_guard};
+pub use retirement::{Retirement, begin_removal, retirement, standalone};
+#[cfg(test)]
+pub(crate) fn test_package_lease() -> PackageLease {
+    PackageLease::development()
+}
 use sha2::Digest;
 use std::{fs, os::unix::fs::OpenOptionsExt, path::PathBuf};
 
@@ -9,6 +18,22 @@ pub fn command_guard(
     state: &std::path::Path,
     wait: Option<std::time::Duration>,
 ) -> Result<Option<fs::File>, String> {
+    command_guard_inner(state, wait, false)
+}
+
+pub fn command_guard_allow_removed(
+    state: &std::path::Path,
+    wait: Option<std::time::Duration>,
+) -> Result<Option<fs::File>, String> {
+    command_guard_inner(state, wait, true)
+}
+
+fn command_guard_inner(
+    state: &std::path::Path,
+    wait: Option<std::time::Duration>,
+    allow_removed: bool,
+) -> Result<Option<fs::File>, String> {
+    retirement::check(state, allow_removed)?;
     let runtime = state.join("runtime");
     if !runtime.is_dir() {
         return Ok(None);
@@ -62,10 +87,21 @@ pub fn command_guard(
             }
         }
     }
+    retirement::check(state, allow_removed)?;
     if fs::symlink_metadata(runtime.join("migration.json")).is_ok() {
-        return Err("Namedrop activation was interrupted. Reopen Update Namedrop to finish; this command made no changes.".into());
+        return Err(interrupted(state));
     }
     Ok(Some(guard))
+}
+
+/// The refusal while `migration.json` waits for the next runtime.py run,
+/// worded for the host whose install that run is.
+fn interrupted(state: &std::path::Path) -> String {
+    if retirement::standalone(state).unwrap_or(false) {
+        "Namedrop installation was interrupted. Run sh scripts/install.sh again to finish; this command made no changes.".into()
+    } else {
+        "Namedrop activation was interrupted. Reopen Update Namedrop to finish; this command made no changes.".into()
+    }
 }
 
 /// A long-lived process that holds the command gate calls this right after
@@ -75,17 +111,33 @@ pub fn command_guard(
 /// reason the selected one could not start.
 pub fn reexec_if_replaced(state: &std::path::Path) -> Result<(), String> {
     use std::os::unix::process::CommandExt;
-    let launcher = state.join("runtime/namedrop");
-    if launcher.is_file()
-        && fs::canonicalize(state.join("runtime/current/namedrop")).ok()
-            != std::env::current_exe().and_then(fs::canonicalize).ok()
-    {
-        return Err(std::process::Command::new(launcher)
-            .args(std::env::args_os().skip(1))
-            .exec()
-            .to_string());
+    match replacement(state) {
+        Some(mut command) => Err(command.exec().to_string()),
+        None => Ok(()),
     }
-    Ok(())
+}
+
+/// The command that runs the selected runtime with this process's own
+/// arguments, once an update has selected another runtime.
+pub(crate) fn replacement(state: &std::path::Path) -> Option<std::process::Command> {
+    let launcher = state.join("runtime/namedrop");
+    (launcher.is_file()
+        && fs::canonicalize(state.join("runtime/current/namedrop")).ok()
+            != std::env::current_exe().and_then(fs::canonicalize).ok())
+    .then(|| {
+        let mut command = std::process::Command::new(launcher);
+        command.args(std::env::args_os().skip(1));
+        command
+    })
+}
+
+/// The state directory this installed runtime belongs to, or `None` for a
+/// build that runs outside a runtime directory.
+pub fn own_state() -> Option<PathBuf> {
+    directory()
+        .ok()
+        .flatten()
+        .and_then(|runtime| runtime.parent().map(std::path::Path::to_path_buf))
 }
 
 pub(crate) fn directory() -> Result<Option<PathBuf>, String> {
@@ -189,34 +241,6 @@ pub fn executable() -> Result<PathBuf, String> {
     }
 }
 
-/// Serialize pointer publication with package refresh. A command already running
-/// from an older compatible snapshot may finish its work, but cannot overwrite
-/// the current runtime's shared integration packages afterwards.
-pub(crate) fn package_guard() -> Result<(Option<fs::File>, bool), String> {
-    let Some(runtime) = directory()? else {
-        return Ok((None, true));
-    };
-    let path = runtime.join("packages.lock");
-    if fs::symlink_metadata(&path).is_ok_and(|metadata| !metadata.is_file()) {
-        return Err("runtime package lock is not a regular file".into());
-    }
-    let guard = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .mode(0o600)
-        .open(path)
-        .map_err(|error| error.to_string())?;
-    guard.lock().map_err(|error| error.to_string())?;
-    let active =
-        fs::canonicalize(runtime.join("current/namedrop")).map_err(|error| error.to_string())?;
-    let running = std::env::current_exe()
-        .and_then(fs::canonicalize)
-        .map_err(|error| error.to_string())?;
-    Ok((Some(guard), active == running))
-}
-
 /// A live update must keep every host entrypoint behind the stable launcher.
 pub fn validate_update_manifest(path: &std::path::Path) -> Result<(), String> {
     let manifest = fs::read_to_string(path)
@@ -254,4 +278,10 @@ pub fn validate_update_manifest(path: &std::path::Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// The `ND-INSTALL-002` refusal this runtime's package refresh would report,
+/// read without a lock or a write, for the status hook to print.
+pub fn package_refusal(home: Option<&std::path::Path>, state: &std::path::Path) -> Option<String> {
+    packages::refusal_notice(home, state)
 }

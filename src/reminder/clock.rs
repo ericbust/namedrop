@@ -1,10 +1,10 @@
-use crate::{Clock, LifecycleRuntime, ProcessHerdr, ProcessIds, StateStore, SystemClock};
+use crate::{Clock, LifecycleRuntime, ProcessIds, StateStore, SystemClock, mux::Budget};
 use rusqlite::{Connection, OpenFlags};
 use std::{
     fs,
     os::unix::{fs::OpenOptionsExt, process::CommandExt},
     path::Path,
-    process::{Command, Stdio},
+    process::Command,
     thread,
     time::Duration,
 };
@@ -132,7 +132,16 @@ fn claim_clock(lock: &fs::File) -> bool {
     }
 }
 
-pub fn ensure_clock(state: &Path, socket: Option<&str>) -> Result<(), String> {
+/// Starts the clock when reminders are pending and none runs. `starter` says
+/// whether the clock keeps this process's multiplexer timeouts.
+pub fn ensure_clock(
+    state: &Path,
+    socket: Option<&str>,
+    starter: crate::daemon::Starter,
+) -> Result<(), String> {
+    if crate::installed_runtime::retirement::check(state, false).is_err() {
+        return Ok(());
+    }
     let pending = pending(state, 0, false);
     if pending.as_ref().is_ok_and(|pending| pending.count == 0) || clock_running(state) {
         return Ok(());
@@ -145,32 +154,32 @@ pub fn ensure_clock(state: &Path, socket: Option<&str>) -> Result<(), String> {
     let socket = socket
         .or(persisted_socket.as_deref())
         .ok_or("pending reminders have no Herdr socket")?;
-    let executable = selected_executable(state)?;
-    let mut command = Command::new(executable);
-    command
-        .args(["reminder-clock"])
-        .arg(state)
-        .arg(socket)
-        .env_remove("HERDR_PANE_ID")
-        .env_remove("HERDR_WORKSPACE_ID")
-        .env_remove("CLAUDE_CODE_SESSION_ID")
-        .env_remove("CODEX_SESSION_ID")
-        .env_remove("CLAUDE_SESSION_ID")
-        .env_remove("CODEX_THREAD_ID")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .process_group(0);
-    command.spawn().map_err(|e| e.to_string())?;
+    crate::daemon::command(
+        &selected_executable(state)?,
+        crate::daemon::Scope::Endpoint(&crate::mux::Endpoint::parse(socket)),
+        starter,
+    )
+    .args(["reminder-clock"])
+    .arg(state)
+    .arg(socket)
+    .spawn()
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
 pub(super) fn signal_clock(state: &Path, socket: &str) -> Result<(), String> {
     fs::write(state.join("reminder-clock.wake"), []).map_err(|e| e.to_string())?;
-    ensure_clock(state, Some(socket))
+    ensure_clock(state, Some(socket), crate::daemon::Starter::Caller)
 }
 
 pub fn run_clock(state: &Path, socket: &str) -> Result<(), String> {
+    let initial_gate = match crate::runtime_command_guard(state, None) {
+        Ok(gate) => gate,
+        Err(_) => return Ok(()),
+    };
+    if crate::installed_runtime::retirement::check(state, false).is_err() {
+        return Ok(());
+    }
     let lock = fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -184,8 +193,17 @@ pub fn run_clock(state: &Path, socket: &str) -> Result<(), String> {
         return Ok(());
     }
     let mut catch_up = CatchUp::default();
+    drop(initial_gate);
     loop {
+        if crate::installed_runtime::retirement::check(state, false).is_err() {
+            return Ok(());
+        }
+        let wake_gate = match crate::runtime_command_guard(state, None) {
+            Ok(gate) => gate,
+            Err(_) => return Ok(()),
+        };
         let _ = fs::remove_file(state.join("reminder-clock.wake"));
+        drop(wake_gate);
         let plan = match pending(state, SystemClock.now_unix_ms(), catch_up.0.is_none()) {
             Ok(plan) => plan,
             Err(error) if transient(&error) => {
@@ -196,7 +214,7 @@ pub fn run_clock(state: &Path, socket: &str) -> Result<(), String> {
         };
         if plan.count == 0 {
             lock.unlock().map_err(|e| e.to_string())?;
-            return ensure_clock(state, Some(socket));
+            return ensure_clock(state, Some(socket), crate::daemon::Starter::Caller);
         }
         let selected = selected_executable(state)?;
         let changed = fs::canonicalize(&selected).ok()
@@ -227,7 +245,14 @@ pub fn run_clock(state: &Path, socket: &str) -> Result<(), String> {
                 state,
                 &SystemClock,
                 &ProcessIds::default(),
-                |ns| ProcessHerdr::default().with_socket(Some(ns.session_socket_id.clone())),
+                |ns| {
+                    crate::mux::connect(
+                        state,
+                        &crate::mux::Endpoint::parse(&ns.session_socket_id),
+                        Budget::ADAPTER_DEFAULT,
+                        Default::default(),
+                    )
+                },
                 &mut catch_up,
             ) {
                 Ok(_) => {}
@@ -255,6 +280,9 @@ pub fn run_clock(state: &Path, socket: &str) -> Result<(), String> {
         let wait_ms = wait_ms(&plan, SystemClock.now_unix_ms());
         let mut waited = 0;
         while waited < wait_ms && !state.join("reminder-clock.wake").exists() {
+            if crate::installed_runtime::retirement::check(state, false).is_err() {
+                return Ok(());
+            }
             let step = (wait_ms - waited).min(100);
             thread::sleep(Duration::from_millis(step));
             waited += step;
@@ -270,11 +298,11 @@ pub(crate) fn cycle_with<E, C, I>(
     state: &Path,
     clock: &C,
     ids: &I,
-    mut herdr_for: impl FnMut(&crate::StateNamespace) -> E,
+    mut herdr_for: impl FnMut(&crate::StateNamespace) -> Result<E, crate::mux::MuxError>,
     catch_up: &mut CatchUp,
 ) -> Result<bool, String>
 where
-    E: crate::HerdrCommandExecutor,
+    E: crate::mux::Mux,
     C: Clock,
     I: crate::IdGenerator,
 {
@@ -283,7 +311,9 @@ where
     let remaining = catch_up.0.get_or_insert(plan.catch_up);
     let mut drains = remaining.clone();
     for ns in plan.due {
-        let herdr = herdr_for(&ns);
+        let Ok(herdr) = herdr_for(&ns) else {
+            continue;
+        };
         let live = match crate::lifecycle::discover_reminder_workspace(state, &ns, &herdr) {
             Ok(live) => live,
             Err(error)
@@ -312,20 +342,22 @@ where
         }
     }
     for ns in drains {
-        let herdr = herdr_for(&ns);
-        let runtime = LifecycleRuntime {
-            state_directory: state,
-            home_directory: None,
-            agent_config: crate::AgentConfigDirectories::default(),
-            cwd: state,
-            workspace_id: Some(ns.space_id.as_str()),
-            current_pane_id: None,
-            session_socket_id: &ns.session_socket_id,
-            herdr: &herdr,
-            clock,
-            ids,
-        };
-        let result = crate::drain_mailboxes(&runtime);
+        let result = herdr_for(&ns)
+            .map_err(|error| error.to_string())
+            .and_then(|herdr| {
+                crate::drain_mailboxes(&LifecycleRuntime {
+                    state_directory: state,
+                    home_directory: None,
+                    agent_config: crate::AgentConfigDirectories::default(),
+                    cwd: state,
+                    workspace_id: Some(ns.space_id.as_str()),
+                    current_pane_id: None,
+                    session_socket_id: &ns.session_socket_id,
+                    mux: &herdr,
+                    clock,
+                    ids,
+                })
+            });
         #[cfg(test)]
         crate::work_counters::drain_result(&result);
         if result.as_ref().err().is_none_or(|error| {
@@ -397,14 +429,14 @@ mod tests {
         fs::create_dir(&root).unwrap();
         assert_eq!(pending_count(&root), 0);
         assert!(!clock_running(&root));
-        ensure_clock(&root, None).unwrap();
+        ensure_clock(&root, None, crate::daemon::Starter::Caller).unwrap();
         assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
         let store = StateStore::open(&root).unwrap();
         drop(store);
         let connection = Connection::open(root.join("namedrop.sqlite3")).unwrap();
         connection.execute_batch("BEGIN IMMEDIATE").unwrap();
         assert_eq!(pending_count(&root), 0);
-        ensure_clock(&root, None).unwrap();
+        ensure_clock(&root, None, crate::daemon::Starter::Caller).unwrap();
         assert!(!root.join("reminder-clock.lock").exists());
         connection.execute_batch("ROLLBACK").unwrap();
         drop(connection);

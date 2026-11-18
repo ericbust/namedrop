@@ -73,7 +73,7 @@ pub(crate) struct HerdrWorkspaces<'a, E> {
     listed: std::cell::OnceCell<Vec<crate::lifecycle::ListedWorkspace>>,
 }
 
-impl<'a, E: crate::HerdrCommandExecutor> HerdrWorkspaces<'a, E> {
+impl<'a, E: crate::mux::MuxRead> HerdrWorkspaces<'a, E> {
     pub(crate) fn new(herdr: &'a E) -> Self {
         Self {
             herdr,
@@ -108,6 +108,7 @@ impl<'a, E: crate::HerdrCommandExecutor> HerdrWorkspaces<'a, E> {
 #[derive(Clone, Debug)]
 pub(crate) struct SpaceDirectory {
     entries: Vec<SpaceEntry>,
+    kind: crate::mux::MuxKind,
 }
 
 #[derive(Clone, Debug)]
@@ -137,7 +138,7 @@ impl SpaceEntry {
 }
 
 impl SpaceDirectory {
-    pub(crate) fn load<E: crate::HerdrCommandExecutor>(
+    pub(crate) fn load<E: crate::mux::MuxRead>(
         store: &mut crate::StateStore,
         workspaces: &HerdrWorkspaces<'_, E>,
         socket: &str,
@@ -170,7 +171,11 @@ impl SpaceDirectory {
                     })
             });
         if !looks_elsewhere {
-            return Ok(Self::new(here_entry(None, None), Vec::new()));
+            return Ok(Self::new(
+                workspaces.herdr.endpoint().kind,
+                here_entry(None, None),
+                Vec::new(),
+            ));
         }
         let listed = workspaces.list()?;
         let entry = |workspace: &crate::lifecycle::ListedWorkspace| {
@@ -197,6 +202,7 @@ impl SpaceDirectory {
             .map(entry)
             .collect();
         Ok(Self::new(
+            workspaces.herdr.endpoint().kind,
             here_entry(
                 here_listed.map(|workspace| workspace.label.as_str()),
                 here_listed.and_then(|workspace| workspace.repo.as_deref()),
@@ -205,10 +211,14 @@ impl SpaceDirectory {
         ))
     }
 
-    pub(crate) fn new(here: SpaceEntry, others: Vec<SpaceEntry>) -> Self {
+    pub(crate) fn new(
+        kind: crate::mux::MuxKind,
+        here: SpaceEntry,
+        others: Vec<SpaceEntry>,
+    ) -> Self {
         let mut entries = vec![here];
         entries.extend(others);
-        Self { entries }
+        Self { entries, kind }
     }
 
     fn here(&self) -> &SpaceEntry {
@@ -247,6 +257,7 @@ impl SpaceDirectory {
         let exact = match exact.as_slice() {
             [] if family.is_empty() => {
                 return Err(RouteRefusal::UnknownWorkspace {
+                    kind: self.kind,
                     label: label.clone(),
                     known: self
                         .entries
@@ -260,6 +271,7 @@ impl SpaceDirectory {
             [entry] => Some(*entry),
             many => {
                 return Err(RouteRefusal::DuplicateLabel {
+                    kind: self.kind,
                     label: label.clone(),
                     workspaces: many
                         .iter()
@@ -325,7 +337,7 @@ impl LiveSpaces {
 
     /// Reads each listed workspace once. An empty list issues no Herdr
     /// command, so work that stays in one workspace reads exactly what it did.
-    pub(crate) fn load<E: crate::HerdrCommandExecutor>(
+    pub(crate) fn load<E: crate::mux::MuxRead>(
         herdr: &E,
         here: crate::DiscoveredWorktree,
         spaces: &[SpaceId],
@@ -465,7 +477,7 @@ impl RoutePlan {
     }
 }
 
-pub(crate) fn route<E: crate::HerdrCommandExecutor>(
+pub(crate) fn route<E: crate::mux::MuxRead>(
     store: &mut crate::StateStore,
     workspaces: &HerdrWorkspaces<'_, E>,
     namespace: &StateNamespace,
@@ -687,7 +699,9 @@ fn local_participant(
     participant: &RoutingAddressSnapshot,
 ) -> Result<RoutingAddressSnapshot, crate::StoreError> {
     let alias = &participant.alias;
-    if transaction.is_operator_address(namespace, &participant.address_id)? {
+    if transaction.is_operator_address(namespace, &participant.address_id)?
+        || transaction.is_relay_author(namespace, &participant.address_id)?
+    {
         return transaction.routing_address_by_id(namespace, &participant.address_id);
     }
     if transaction.alias_holder(namespace, alias)?.as_ref() == Some(&participant.address_id) {
@@ -730,10 +744,12 @@ pub(crate) enum RouteRefusal {
         retry: ReplyRetry,
     },
     UnknownWorkspace {
+        kind: crate::mux::MuxKind,
         label: WorkspaceLabel,
         known: Vec<WorkspaceLabel>,
     },
     DuplicateLabel {
+        kind: crate::mux::MuxKind,
         label: WorkspaceLabel,
         workspaces: Vec<(String, WorkspaceLabel)>,
     },
@@ -907,18 +923,32 @@ impl fmt::Display for RouteRefusal {
                      space, and the message text"
                 )
             }
-            Self::UnknownWorkspace { label, known } if known.is_empty() => {
-                write!(formatter, "no workspace is labelled {label}")
+            Self::UnknownWorkspace { kind, label, known } if known.is_empty() => {
+                write!(
+                    formatter,
+                    "{} {label}",
+                    kind.text("no workspace is labelled", "no Rex session is labelled")
+                )
             }
-            Self::UnknownWorkspace { label, known } => write!(
+            Self::UnknownWorkspace { kind, label, known } => write!(
                 formatter,
-                "no workspace is labelled {label}; activated workspaces: {}",
+                "{} {label}; {} {}",
+                kind.text("no workspace is labelled", "no Rex session is labelled"),
+                kind.text("activated workspaces:", "activated Rex sessions:"),
                 joined(known, ", ")
             ),
-            Self::DuplicateLabel { label, workspaces } => write!(
+            Self::DuplicateLabel {
+                kind,
+                label,
+                workspaces,
+            } => write!(
                 formatter,
-                "{label} matches more than one workspace ({}); use the token shown, or rename one in \
-                 Herdr",
+                "{label} {} ({}); use the token shown, or rename one in \
+                 {}",
+                kind.text(
+                    "matches more than one workspace",
+                    "matches more than one Rex session"
+                ),
                 workspaces
                     .iter()
                     .map(|(display, id)| format!(
@@ -926,7 +956,8 @@ impl fmt::Display for RouteRefusal {
                         serde_json::Value::String(display.clone())
                     ))
                     .collect::<Vec<_>>()
-                    .join(" and ")
+                    .join(" and "),
+                kind.title()
             ),
             Self::NotActivated { label } => write!(
                 formatter,
@@ -1184,11 +1215,11 @@ pub(crate) fn plan_route(
 mod tests {
     use super::*;
 
-    struct NoHerdr;
-    impl crate::HerdrCommandExecutor for NoHerdr {
-        fn execute(&self, args: &[&str]) -> Result<crate::HerdrCommandOutput, String> {
-            panic!("no Herdr command was expected: {args:?}")
-        }
+    /// Fails the test on any read, as the old fake panicked on any command.
+    fn no_herdr() -> crate::mux::fake::StrictSpace {
+        let mux = crate::mux::fake::FakeMux::world().build();
+        mux.on_read(|_, read| panic!("no Herdr command was expected: {read:?}"));
+        crate::mux::fake::StrictSpace::new(mux, &[], crate::mux::fake::Takes::nothing())
     }
 
     #[test]
@@ -1201,14 +1232,15 @@ mod tests {
             branch: None,
             panes: Vec::new(),
         };
-        let live = LiveSpaces::load(&NoHerdr, here.clone(), &[SpaceId::new("w1")]);
+        let no_herdr = no_herdr();
+        let live = LiveSpaces::load(&*no_herdr, here.clone(), &[SpaceId::new("w1")]);
         assert_eq!(live.of(&SpaceId::new("w1")), Some(&here));
         assert_eq!(
             live.of(&SpaceId::new("w2")),
             None,
             "an unread workspace is unknown"
         );
-        LiveSpaces::load(&NoHerdr, here, &[]);
+        LiveSpaces::load(&*no_herdr, here, &[]);
     }
 
     fn label(token: &str) -> WorkspaceLabel {
@@ -1229,6 +1261,7 @@ mod tests {
 
     fn directory() -> SpaceDirectory {
         SpaceDirectory::new(
+            crate::mux::MuxKind::Herdr,
             SpaceEntry {
                 retired: BTreeSet::from(["old".to_owned()]),
                 ..entry("w1", "ws1", &["lead"])
@@ -1395,6 +1428,7 @@ mod tests {
     /// `tools` is a repository whose main checkout is activated.
     fn repositories() -> SpaceDirectory {
         SpaceDirectory::new(
+            crate::mux::MuxKind::Herdr,
             entry("w1", "ws1", &["lead"]),
             vec![
                 SpaceEntry {
@@ -1508,6 +1542,7 @@ mod tests {
     #[test]
     fn a_repository_name_alone_reaches_its_one_worktree() {
         let directory = SpaceDirectory::new(
+            crate::mux::MuxKind::Herdr,
             entry("w1", "ws1", &["lead"]),
             vec![
                 worktree("w2", "catchup-again", "namestack", &["claude"]),
@@ -1526,6 +1561,7 @@ mod tests {
     #[test]
     fn a_duplicate_label_refuses_before_its_repository_is_consulted() {
         let directory = SpaceDirectory::new(
+            crate::mux::MuxKind::Herdr,
             entry("w1", "ws1", &[]),
             vec![
                 worktree("w2", "namestack", "namestack", &[]),
@@ -1636,6 +1672,7 @@ mod tests {
     #[test]
     fn duplicate_folded_labels_name_both_workspaces() {
         let directory = SpaceDirectory::new(
+            crate::mux::MuxKind::Herdr,
             entry("w1", "ws1", &[]),
             vec![
                 entry("w2", "Dash Board", &["lead"]),
@@ -1657,6 +1694,7 @@ mod tests {
     #[test]
     fn a_workspace_is_always_reachable_by_its_id() {
         let directory = SpaceDirectory::new(
+            crate::mux::MuxKind::Herdr,
             entry("w1", "ws1", &[]),
             vec![entry("w2", "All", &["lead"]), entry("w3", "", &["lead"])],
         );

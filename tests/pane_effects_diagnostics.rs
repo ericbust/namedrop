@@ -1,9 +1,12 @@
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 
 mod support;
 
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use support::TestDirectory;
 
 const RECORD: &str = "pane-effects: retrying directory open after ENOENT for pane source=runtime\n";
@@ -28,7 +31,7 @@ fn fixture_cleanup_child() {
 
 #[test]
 fn fixture_cleanup_preserves_retry_records_in_raw_stderr() {
-    let output = Command::new(std::env::current_exe().unwrap())
+    let output = crate::binary::command(std::env::current_exe().unwrap())
         .args(["--exact", "fixture_cleanup_child", "--ignored"])
         .env("NAMEDROP_RETRY_DIAGNOSTIC_CHILD", "1")
         .stdout(Stdio::null())
