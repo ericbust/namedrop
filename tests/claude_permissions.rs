@@ -413,7 +413,7 @@ fn doctor_reports_missing_claude_rules_with_activation_repair_without_writing() 
     let issue = report
         .issues
         .iter()
-        .find(|issue| issue.explanation.contains("settings.json"))
+        .find(|issue| issue.code != "ND-MODEL-002" && issue.explanation.contains("settings.json"))
         .expect("doctor must diagnose missing Claude rules");
     let serialized = serde_json::to_value(issue).unwrap();
     assert_eq!(serialized["repair"]["operation"], "activate");
@@ -537,7 +537,8 @@ fn settings_linked_inside_home_are_written_through_and_the_link_is_kept() {
             !f.doctor()
                 .issues
                 .iter()
-                .any(|issue| issue.explanation.contains("settings.json")),
+                .any(|issue| issue.code != "ND-MODEL-002"
+                    && issue.explanation.contains("settings.json")),
             "{linked_directory}"
         );
         f.deactivate();
@@ -576,6 +577,88 @@ fn a_settings_file_replaced_by_a_link_after_activation_is_refreshed_through_it()
     f.deactivate();
     assert_eq!(f.read()["permissions"]["allow"], json!(["Read"]));
     assert!(fs::symlink_metadata(f.settings()).unwrap().is_symlink());
+}
+
+/// Deactivation, with no activation in between, after the recorded file
+/// was moved into `~/.claude` and replaced by a link to it.
+#[test]
+fn deactivation_removes_rules_through_a_link_that_replaced_the_recorded_file() {
+    let mut f = Fixture::new();
+    f.claude = f.home.join(".config/accounts/personal");
+    fs::create_dir_all(&f.claude).unwrap();
+    fs::write(
+        f.settings(),
+        json!({"permissions":{"allow":["Read"]}}).to_string(),
+    )
+    .unwrap();
+    f.activate();
+    let real = f.home.join(".claude/settings.json");
+    fs::rename(f.settings(), &real).unwrap();
+    std::os::unix::fs::symlink(&real, f.settings()).unwrap();
+    let report = f.run_for("workspace-1", "deactivate", json!({}));
+    assert_eq!(report["claude_permissions"]["removed"], true, "{report}");
+    assert_eq!(f.read()["permissions"]["allow"], json!(["Read"]));
+    assert!(fs::symlink_metadata(f.settings()).unwrap().is_symlink());
+}
+
+/// `HOME` is itself reached through a link, as a macOS temporary directory
+/// is through `/var`, and two Claude Code accounts share one state: one reads
+/// `~/.claude` directly, the other links its settings there.
+#[test]
+fn a_direct_and_a_linked_account_through_a_linked_home_share_one_file() {
+    for linked_first in [false, true] {
+        let mut f = Fixture::new();
+        let linked_home = f.root.join("linked-home");
+        std::os::unix::fs::symlink(&f.home, &linked_home).unwrap();
+        f.home = linked_home;
+        let direct = f.home.join(".claude");
+        let personal = f.home.join(".config/accounts/personal");
+        fs::create_dir_all(&personal).unwrap();
+        fs::write(
+            direct.join("settings.json"),
+            json!({"permissions":{"allow":["Read"]}}).to_string(),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(direct.join("settings.json"), personal.join("settings.json"))
+            .unwrap();
+        let order = if linked_first {
+            [personal.clone(), direct.clone()]
+        } else {
+            [direct.clone(), personal.clone()]
+        };
+        for account in order {
+            f.claude = account;
+            let result = f.activate();
+            let permissions = &result["integration_packages"]["claude-code"]["permissions"];
+            assert_eq!(permissions["current"], true, "{linked_first}: {result}");
+            assert!(
+                !f.doctor()
+                    .issues
+                    .iter()
+                    .any(|issue| issue.code != "ND-MODEL-002"
+                        && issue.explanation.contains("settings.json")),
+                "{linked_first}"
+            );
+        }
+        let mut expected = vec![json!("Read")];
+        expected.extend(f.expected());
+        assert_eq!(
+            f.read()["permissions"]["allow"],
+            json!(expected),
+            "{linked_first}"
+        );
+        f.deactivate();
+        assert_eq!(
+            f.read()["permissions"]["allow"],
+            json!(["Read"]),
+            "{linked_first}"
+        );
+        assert!(
+            fs::symlink_metadata(personal.join("settings.json"))
+                .unwrap()
+                .is_symlink()
+        );
+    }
 }
 
 #[test]
@@ -1106,7 +1189,7 @@ fn assert_permission_fallback(f: &Fixture, activation: &Value) {
     let issue = report
         .issues
         .iter()
-        .find(|issue| issue.explanation.contains("settings.json"))
+        .find(|issue| issue.code != "ND-MODEL-002" && issue.explanation.contains("settings.json"))
         .unwrap();
     assert!(
         issue.explanation.contains("Claude agents will be prompted"),

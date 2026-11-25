@@ -1252,7 +1252,7 @@ pub(crate) fn remove_all(
     config: AgentConfigDirectories<'_>,
 ) -> Result<(), String> {
     lease.require_write()?;
-    remove_claude_permissions(lease, state)?;
+    remove_claude_permissions(lease, Some(home), state)?;
     codex_sandbox::remove(lease, state)?;
     let codex = config.codex(home);
     let policy = codex.join("rules/namedrop.rules");
