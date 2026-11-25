@@ -345,12 +345,7 @@ fn herdr_deferred_state(root: &Path) {
         fn peer(&self, _: &Path) -> std::io::Result<u32> {
             Err(std::io::ErrorKind::PermissionDenied.into())
         }
-        fn claimed(
-            &self,
-            _: &Path,
-            _: &str,
-            _: &str,
-        ) -> Result<namedrop::mux::home::Claimed, String> {
+        fn claimed(&self, _: &Path, _: &str) -> Result<namedrop::mux::home::Claimed, String> {
             Err("no claim".into())
         }
         fn incarnation(&self, _: u32) -> Option<String> {

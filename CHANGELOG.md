@@ -8,7 +8,7 @@ Namedrop now runs in Rex as well as in Herdr. Rex support is experimental. In He
 
 ### Added
 
-- Namedrop runs in [Rex](https://www.superlogical.com/rex/docs) without Herdr. It supports Rex preview.14, preview.18 and preview.19, at Rex control API revisions 12 to 14. [Run Namedrop on Rex](https://github.com/ericbust/namedrop/blob/main/docs/rex.md) gives the setup steps, and [Namedrop on Rex reference](https://github.com/ericbust/namedrop/blob/main/docs/rex-reference.md) gives the details.
+- Namedrop runs in [Rex](https://www.superlogical.com/rex/docs) without Herdr. It supports Rex preview.14, preview.18, preview.19 and preview.23, at Rex control API revisions 12 to 14. [Run Namedrop on Rex](https://github.com/ericbust/namedrop/blob/main/docs/rex.md) gives the setup steps, and [Namedrop on Rex reference](https://github.com/ericbust/namedrop/blob/main/docs/rex-reference.md) gives the details.
 - The release archive has an installer for Rex. In a Rex pane, run `sh scripts/install.sh` from the extracted archive. The installer lists what it will write and changes nothing until you answer `y`. Then it installs the Namedrop module for Rex, adds one line to `init.lua`, and installs the Claude Code and Codex packages and the `namedrop` command in `~/.local/bin`. `install.sh` runs on macOS on Apple silicon and on Linux with glibc, and needs Python 3.9 or newer. To remove the install and keep your names and messages, run `namedrop install --remove --input-json '{"confirmed":true}'`.
 - The Namedrop module for Rex adds eleven actions to the `Namedrop` category of Rex's command palette: **Activate Namedrop**, **Name this pane**, **Manage Namedrop names and agents**, **Namedrop Doctor**, **Agent status**, **Namedrop tour**, **Open Namedrop Channels**, **Pause Namedrop**, **Resume Namedrop**, **Deactivate Namedrop** and **About Namedrop**. Their screens open in floating layers. The module gives five of the actions keys, such as <kbd>Option</kbd>+<kbd>Shift</kbd>+<kbd>Command</kbd>+<kbd>I</kbd> for **Name this pane**, and binds a key only when no other binding holds it.
 - In a Rex session, Namedrop names panes and delivers mentions and replies between Claude Code, Codex and terminals. Its bridge, a background process that reads Rex's events, keeps the names current and starts when Rex loads the module. Names survive a Rex server restart. Each agent's hooks record which Rex pane its session runs in.
@@ -19,7 +19,7 @@ Namedrop now runs in Rex as well as in Herdr. Rex support is experimental. In He
 - Rex support has known limits. [Limits of Rex support](https://github.com/ericbust/namedrop/blob/main/docs/rex-reference.md#limits-of-rex-support) lists them all. These matter most:
 	- Channels' setup and Doctor hints tell a Rex user to open Herdr, and **New channel** and **Add agent** refuse in a Rex session.
 	- After a reboot, the Channels tailnet link stays down on Rex until you run `namedrop channels --no-open`.
-	- The actions were tested with `rex do --origin palette`, not in the Rex app's own palette or with its keys.
+	- The Rex app's own palette and keys were tried only on Rex Server preview.23, where Open Namedrop Channels and Deactivate Namedrop were not run. On the other builds, the actions were tested with `rex do --origin palette`.
 	- Real agents were tested on macOS only. A Linux Rex server was tested only as the machine that receives relayed mentions.
 
 ### Changed

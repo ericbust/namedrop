@@ -746,13 +746,9 @@ impl InBlock {
         let caller = hook.place.caller.as_deref().unwrap().clone();
         let server = *caller.ancestors.last().unwrap();
         Self {
-            vars: [
-                ("REX_BLOCK", BLOCK),
-                ("REX_SESSION", "session:s"),
-                ("REX_SERVER", "unix:///tmp/r.sock"),
-            ]
-            .map(|(name, value)| (name.to_owned(), value.to_owned()))
-            .into(),
+            vars: [("REX_BLOCK", BLOCK), ("REX_SERVER", "unix:///tmp/r.sock")]
+                .map(|(name, value)| (name.to_owned(), value.to_owned()))
+                .into(),
             ancestors: caller.ancestors.clone(),
             peer: Ok(server),
             caller,
@@ -798,10 +794,11 @@ impl Inherited for InBlock {
         self.peer.map_err(io::Error::from_raw_os_error)
     }
 
-    fn claimed(&self, _: &Path, session: &str, block: &str) -> Result<Claimed, String> {
-        assert_eq!((session, block), ("session:s", BLOCK));
+    fn claimed(&self, _: &Path, block: &str) -> Result<Claimed, String> {
+        assert_eq!(block, BLOCK);
         Ok(Claimed {
             endpoint: Endpoint::parse(ENDPOINT),
+            session: "session:s".to_owned(),
             server: *self.ancestors.last().unwrap(),
             child: self.ancestors[self.ancestors.len() - 2],
             caller: self.caller.clone(),

@@ -1708,6 +1708,18 @@ mod prompt_box_tests {
                 codex,
                 PromptBox::Draft,
             ),
+            (
+                "codex-empty-ech",
+                include_str!("mux/rex/fixtures/vt/codex-empty-ech.vt"),
+                codex,
+                PromptBox::Empty,
+            ),
+            (
+                "codex-draft-ech",
+                include_str!("mux/rex/fixtures/vt/codex-draft-ech.vt"),
+                codex,
+                PromptBox::Draft,
+            ),
         ] {
             let screen = crate::mux::rex::wire::port_ansi(vt).unwrap();
             assert_eq!(prompt_box(&screen, agent), held, "{name}");

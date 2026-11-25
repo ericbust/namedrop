@@ -213,8 +213,9 @@ pub(super) fn mux_error(fault: Fault, gone: Gone) -> MuxError {
 
 /// Rex's `vt` screen in the port's ANSI shape. Each `ESC[nC` becomes n
 /// spaces, because Rex writes a run of blank cells, a tab among them, that
-/// way and the port's reader drops every CSI but SGR. SGR and OSC 8 links
-/// pass through, and `\r\n` becomes `\n`. Any other escape sequence or
+/// way and the port's reader drops every CSI but SGR. Each `ESC[nX` is
+/// dropped, as its own comment below says. SGR and OSC 8 links pass
+/// through, and `\r\n` becomes `\n`. Any other escape sequence or
 /// control character is refused, and the error names it, so a screen the
 /// reader would misread is never read at all.
 pub(crate) fn port_ansi(vt: &str) -> Result<String, String> {
@@ -245,6 +246,12 @@ pub(crate) fn port_ansi(vt: &str) -> Result<String, String> {
                             screen.push_str(&format!("\u{1b}[{parameters}m"));
                         }
                         ('C', Some(count)) => screen.extend(std::iter::repeat_n(' ', count)),
+                        // Rex 0.1.0-preview.23 erases a run that has a
+                        // background, such as the sent prompt Codex draws in
+                        // its transcript, before the `C` that moves over it. The dump draws onto a blank
+                        // screen, so the erase changes nothing the `C` leaves
+                        // out, and the cursor stays.
+                        ('X', Some(_)) => {}
                         _ => return refuse(&format!("\u{1b}[{parameters}{last}")),
                     }
                 }

@@ -62,6 +62,7 @@ Namedrop speaks Rex's control protocol, `rex.control.v1`, at API revisions 12, 1
 | `0.1.0-preview.14`, commit `7e460d0` | 12, supports 0 to 12 | Supported, at revision 12. The spike and the adapter's design probes ran on it |
 | `0.1.0-preview.18`, commit `baf79e0` | 13, supports 0 to 13 | Supported, at revision 13. The installer, the palette actions, both install orders, and agents were tested on it through pre-release round B, and the relay to a Linux host in the remote-host lab. Round C did not run on preview.18 |
 | `0.1.0-preview.19`, commit `ad5a836` | 14, supports 0 to 14 | Supported, at revision 14. Tested as preview.18 was, except that the remote-host lab ran it only as B. Also tested with Herdr inside Rex, and in pre-release round C |
+| `0.1.0-preview.23`, commit `c67cc2d` | 19, supports 0 to 19 | Supported, at revision 14. The installer, the palette actions, the Rex app's own palette and keys, and agents were tested on it. It sets no `REX_SESSION` in a pane, and it writes a blank run that has a background as an erase before the move. Earlier builds of 1.12.0 could not bind an agent or read Codex's screen on it |
 
 Rex has been tested with real agents only on macOS on Apple silicon. A Linux Rex server was tested only as the receiving machine in the remote-host lab, in a Docker container, with no real agent. The testbed's Rex lanes use the `rex` that the testbed finds, and their logs do not record its version, except where an entry below names it.
 
@@ -85,6 +86,7 @@ Rex has been tested with real agents only on macOS on Apple silicon. A Linux Rex
 	- Namedrop's Linux process reads passed on B, and a Codex stand-in bound in a pane on B.
 	- Replacing B's executable under a running bridge made B answer every relayed message with a retry until the bridge restarted.
 - **Pre-release round C, 2026-11-16**, at commit `376b99c7` on round C's branch, on Rex preview.14 and preview.19 only. No preview.18 build was left on the test machine, because the Rex app had updated itself to preview.19. The scripted install, runtime, and update lanes passed on both. All five install-order scenarios passed with real Codex and Claude Code, including adoption of a Herdr install that Herdr lists and a relayed mention to Codex on a second Rex server. A mention each way between Claude Code and Codex got its reply back. The testbed's Herdr-inside-Rex lane passed 10 of 10 on preview.19.
+- **Rex preview.23, 2026-11-24 and 2026-11-25.** In a new macOS account, an operator installed Namedrop 1.12.0 at commit `7fab0cdb` from its release archive into the Rex app's own server. The app's palette listed the eleven Namedrop actions. Activate Namedrop and Name this pane ran from the palette, and the Name this pane, Manage, Agent status and tour keys opened their screens. Doctor confirmed the module. Agents got no session identity, so a mention from Claude Code to Codex was not delivered, and `namedrop doctor` run in a Rex shell failed with `failed to run herdr`. Doctor after Pause Namedrop did not show `ND-SPACE-001`. The testbed's Rex lane showed the binding failure at commit `6d032c2a`: Claude Code's block was named but never bound. At commit `f66ff105` both agents bound, and Namedrop could not read Codex's screen. At commit `75bd0a6e`, with both fixes for preview.23, the lane's step 6 check passed all 17 checks with Claude Code 2.1.332 and Codex 0.169.0, and a mention each way got its reply back. On the lane at that commit, `namedrop address list` and `namedrop doctor` in a shell block read the Rex session with no flags, and Pause Namedrop from the palette added `ND-SPACE-001` and Resume cleared it. The operator's rerun of the agents and of Pause with the fixed build has not happened yet. Rex preview.14, preview.18 and preview.19 were not run again after the fixes, because no build of them was left on the test machine.
 
 These have not been tested on Rex:
 
@@ -94,7 +96,7 @@ These have not been tested on Rex:
 - A real Claude Code or Codex on a Linux B, or on a B on another machine.
 - sshd's per-source penalties on a real B, which can refuse A for a while after a dropped connection.
 - An update of Namedrop on B while B's bridge runs.
-- The Rex app's own command palette and keys.
+- The Rex app's own command palette and keys on Rex builds other than preview.23.
 - A restart of the Rex app, as opposed to its server.
 - Windows, which is out of scope.
 

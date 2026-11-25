@@ -1553,7 +1553,7 @@ mod tests {
         fn peer(&self, _socket: &Path) -> io::Result<u32> {
             Err(io::ErrorKind::NotFound.into())
         }
-        fn claimed(&self, _socket: &Path, _session: &str, _block: &str) -> Result<Claimed, String> {
+        fn claimed(&self, _socket: &Path, _block: &str) -> Result<Claimed, String> {
             Err("no Rex claim".to_owned())
         }
         fn incarnation(&self, _pid: u32) -> Option<String> {
@@ -1576,7 +1576,6 @@ mod tests {
     fn a_rex_status_layer_observes_its_own_block_not_the_target() {
         let layer = [
             ("REX_BLOCK", "block:layer"),
-            ("REX_SESSION", "session:s"),
             ("NAMEDROP_TARGET_PANE", "block:target"),
         ];
         assert_eq!(

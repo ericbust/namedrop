@@ -1145,7 +1145,7 @@
       "file": "src/mux/home.rs",
       "reason": "Herdr's default socket path.",
       "literals": [
-        [389, "herdr/herdr.sock"]
+        [392, "herdr/herdr.sock"]
       ]
     },
     {

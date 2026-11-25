@@ -107,21 +107,17 @@ pub(crate) fn config_errors(reply: &Value) -> bool {
     ui::has_errors(reply)
 }
 
-/// What the Rex server at `socket` says about `block` of `session`, over one
-/// connection that proves the server local.
-pub(crate) fn claimed(socket: &Path, session: &str, block: &str) -> Result<Claimed, String> {
+/// What the Rex server at `socket` says about `block`, over one connection
+/// that proves the server local.
+pub(crate) fn claimed(socket: &Path, block: &str) -> Result<Claimed, String> {
     let wire = Socket::new(socket.to_owned(), Budget::ADAPTER_DEFAULT, Arc::default());
-    claimed_over(&wire, socket, session, block).map_err(|error| error.to_string())
+    claimed_over(&wire, socket, block).map_err(|error| error.to_string())
 }
 
-/// `server.status` for the local proof, `session.attach`, and the block's
-/// `process` and `program_status`, on one connection.
-fn claimed_over(
-    wire: &impl Wire,
-    dial: &Path,
-    session: &str,
-    block: &str,
-) -> Result<Claimed, MuxError> {
+/// `server.status` for the local proof, the block's session from
+/// `target.resolve` and `session.attach`, and the block's `process` and
+/// `program_status`, on one connection.
+fn claimed_over(wire: &impl Wire, dial: &Path, block: &str) -> Result<Claimed, MuxError> {
     let (control, peer) = wire
         .open(Narrower::none())
         .map_err(|fault| mux_error(fault, Gone::Pane))?;
@@ -131,14 +127,15 @@ fn claimed_over(
     };
     let server = local::prove_local(dial, &mut *call.control, peer)
         .map_err(|fault| mux_error(fault, Gone::Pane))?;
-    call.attach(session)?;
-    let process: ProcessReply = wire::parse(call.block(session, block, "process", json!({}))?)?;
-    let record = wire::root_record(call.block(session, block, "program_status", json!({}))?)?;
+    let (session, _) = call.attach_block(block)?;
+    let process: ProcessReply = wire::parse(call.block(&session, block, "process", json!({}))?)?;
+    let record = wire::root_record(call.block(&session, block, "program_status", json!({}))?)?;
     let child = process
         .child
         .ok_or_else(|| MuxError::Protocol(format!("Rex named no child process for {block}")))?;
     Ok(Claimed {
         endpoint: server.endpoint,
+        session,
         server: server.pid,
         child: child.pid,
         caller: Caller {

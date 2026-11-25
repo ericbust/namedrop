@@ -390,7 +390,8 @@ impl Home {
 /// 1. An explicit endpoint value decides by Endpoint::parse, with no probe. With a Rex
 ///    endpoint, --space and --pane are trusted as --herdr-pane is today, and the place
 ///    has no caller, so it cannot bind. try_defer probes its socket itself.
-/// 2. With REX_BLOCK and REX_SESSION set, the nearest server ancestor decides (below).
+/// 2. With REX_BLOCK set, the nearest server ancestor decides (below). The server names the
+///    block's session: Rex preview.23 sets no REX_SESSION.
 ///    A Rex home reads its place from the verified claim and ignores every HERDR_*
 ///    and NAMEDROP_* location name.
 /// 3. Otherwise step 3's locator::home runs: a HERDR_* location name means Herdr, and
