@@ -35,6 +35,7 @@ Namedrop now runs in Rex as well as in Herdr. Rex support is beta and under acti
 
 ### Fixed
 
+- Activation and `install.sh` now add Namedrop's Claude Code permissions when `settings.json` in `CLAUDE_CONFIG_DIR` is a symbolic link, or sits in a directory that is one, and the link leads to a regular file inside your home directory. This is the layout of a Claude Code account directory that links its settings to `~/.claude/settings.json`. Namedrop writes the file the link leads to and keeps the link. Before, it refused any such link and skipped the permissions, so Claude agents asked before each Namedrop command. A link that leads outside your home directory, to nothing, or to a directory is still refused.
 - On macOS, agent-status summaries and persona suggestions now work in three more setups. The worker that runs Codex for them stopped with `failed to canonicalize CODEX_HOME` when `CODEX_HOME` named another directory, such as one under `~/.config`. The worker also could not read Codex's sign-in when `~/.codex` was a symbolic link, as a dotfiles manager makes it, or when `HOME` was reached through a symbolic link.
 - When the worker fails, its error shows the line where Codex says why it stopped. Before, the error kept the first 200 characters of Codex's output, which could cut the reason to "Er".
 - A reminder clock that an agent's Stop hook started gave each `herdr` command that it ran to fire a reminder only 250 ms, the Stop hook's own time limit. The clock now uses the default limit of 10 seconds.

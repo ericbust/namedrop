@@ -63,6 +63,59 @@ pub(super) fn settings_path(directory: &Path) -> Result<PathBuf, String> {
     }
     Ok(directory.join("settings.json"))
 }
+/// The file the permissions are read from and written to. `settings.json`, or
+/// the directory that holds it, may be a symbolic link to a place inside
+/// `home`, as when one Claude Code account's directory links its settings to
+/// another's. The link is followed to a regular file, and that file is
+/// replaced in place, so the link itself stays. A link that leads outside
+/// `home` or to nothing is refused, as is any other link `verify_path` finds.
+fn target(directory: &Path, home: &Path) -> Result<PathBuf, String> {
+    followed(settings_path(directory)?, home)
+}
+/// `path` itself, or, when it or its directory is a symbolic link, the file
+/// [`target`] allows it to lead to.
+fn followed(path: PathBuf, home: &Path) -> Result<PathBuf, String> {
+    let (Some(directory), Some(name)) = (path.parent(), path.file_name()) else {
+        return Ok(path);
+    };
+    let linked = [path.as_path(), directory]
+        .into_iter()
+        .any(|entry| fs::symlink_metadata(entry).is_ok_and(|metadata| metadata.is_symlink()));
+    if !linked {
+        return Ok(path);
+    }
+    let home = home.canonicalize().map_err(|error| {
+        conflict(
+            &path,
+            &format!("is reached through a symbolic link, and HOME cannot be resolved: {error}"),
+        )
+    })?;
+    let resolved = match fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            directory.canonicalize().map(|real| real.join(name))
+        }
+        _ => path.canonicalize(),
+    }
+    .map_err(|error| {
+        conflict(
+            &path,
+            &format!("is reached through a symbolic link that leads nowhere: {error}"),
+        )
+    })?;
+    if !resolved.starts_with(&home) {
+        return Err(conflict(
+            &path,
+            "is reached through a symbolic link that leads outside HOME",
+        ));
+    }
+    verify_path(&resolved).map_err(|error| {
+        conflict(
+            &path,
+            &format!("is reached through a symbolic link, and {error}"),
+        )
+    })?;
+    Ok(resolved)
+}
 fn verify_path(path: &Path) -> Result<(), String> {
     for parent in path.ancestors().take(2) {
         match fs::symlink_metadata(parent) {
@@ -394,20 +447,28 @@ fn publish(
 }
 pub(super) fn refresh(
     lease: &PackageLease,
+    home: &Path,
     directory: &Path,
     executable: &Path,
     state: &Path,
 ) -> Result<(), String> {
     lease.require_write()?;
     let desired = claude_allow_rules(executable, state)?;
-    let path = settings_path(directory)?;
+    let path = target(directory, home)?;
     let _guard = lock(state)?;
     let owned = recover(lease, state)?;
     let mut settings = Settings::read(&path)?;
     let mut updates = Vec::new();
     let mut entries = Vec::new();
-    if !owned.entries.is_empty() && owned.settings_path != path {
-        let mut previous = Settings::read(&owned.settings_path)?;
+    // A recorded file that has since been replaced by a link is the file the
+    // link leads to.
+    let previous_path = if owned.entries.is_empty() {
+        owned.settings_path.clone()
+    } else {
+        followed(owned.settings_path.clone(), home)?
+    };
+    if !owned.entries.is_empty() && previous_path != path {
+        let mut previous = Settings::read(&previous_path)?;
         for entry in &owned.entries {
             previous.remove(entry);
         }
@@ -470,13 +531,23 @@ pub(crate) fn remove_claude_permissions(
     publish(lease, state, owned, vec![settings.update()?])?;
     Ok(removed)
 }
-pub(super) fn inspect(directory: &Path, executable: &Path, state: &Path) -> Result<(), String> {
-    inspect_rules(directory, executable, state)
+pub(super) fn inspect(
+    home: &Path,
+    directory: &Path,
+    executable: &Path,
+    state: &Path,
+) -> Result<(), String> {
+    inspect_rules(home, directory, executable, state)
         .map_err(|error| format!("{error}; {REPAIR_GUIDANCE}"))
 }
 
-fn inspect_rules(directory: &Path, executable: &Path, state: &Path) -> Result<(), String> {
-    let path = settings_path(directory)?;
+fn inspect_rules(
+    home: &Path,
+    directory: &Path,
+    executable: &Path,
+    state: &Path,
+) -> Result<(), String> {
+    let path = target(directory, home)?;
     let desired = claude_allow_rules(executable, state)?;
     let owned = read_record(state)?;
     if owned.pending.is_some() {
@@ -557,6 +628,7 @@ mod tests {
         super::super::FAIL_DIRECTORY_SYNC.with(|fault| *fault.borrow_mut() = Some(path.clone()));
         let result = refresh(
             &crate::installed_runtime::test_package_lease(),
+            &root,
             &directory,
             Path::new("/opt/namedrop"),
             &root,

@@ -502,6 +502,130 @@ fn settings_symlinks_and_invalid_ownership_are_refused_untouched() {
     assert_eq!(fs::read_to_string(f.settings()).unwrap(), "{}\n");
 }
 
+/// A Claude Code account whose directory links its settings, or is itself a
+/// link, into the default account's `~/.claude`.
+#[test]
+fn settings_linked_inside_home_are_written_through_and_the_link_is_kept() {
+    for linked_directory in [false, true] {
+        let mut f = Fixture::new();
+        let real = f.home.join(".claude/settings.json");
+        fs::write(&real, json!({"permissions":{"allow":["Read"]}}).to_string()).unwrap();
+        let link = if linked_directory {
+            f.claude = f.home.join("linked-account");
+            std::os::unix::fs::symlink(f.home.join(".claude"), &f.claude).unwrap();
+            f.claude.clone()
+        } else {
+            f.claude = f.home.join(".config/accounts/personal");
+            fs::create_dir_all(&f.claude).unwrap();
+            std::os::unix::fs::symlink(&real, f.settings()).unwrap();
+            f.settings()
+        };
+        let link_target = fs::read_link(&link).unwrap();
+        let result = f.activate();
+        let permissions = &result["integration_packages"]["claude-code"]["permissions"];
+        assert_eq!(permissions["current"], true, "{linked_directory}: {result}");
+        assert_eq!(
+            fs::read_link(&link).unwrap(),
+            link_target,
+            "{linked_directory}"
+        );
+        let written: Value = serde_json::from_str(&fs::read_to_string(&real).unwrap()).unwrap();
+        let allow = written["permissions"]["allow"].as_array().unwrap();
+        assert_eq!(allow[0], "Read", "{linked_directory}");
+        assert_eq!(&allow[1..], f.expected(), "{linked_directory}");
+        assert!(
+            !f.doctor()
+                .issues
+                .iter()
+                .any(|issue| issue.explanation.contains("settings.json")),
+            "{linked_directory}"
+        );
+        f.deactivate();
+        assert_eq!(
+            fs::read_link(&link).unwrap(),
+            link_target,
+            "{linked_directory}"
+        );
+        assert_eq!(f.read()["permissions"]["allow"], json!(["Read"]));
+    }
+}
+
+/// The rules were written to a real `settings.json`, which was then moved
+/// into `~/.claude` and replaced by a link to it.
+#[test]
+fn a_settings_file_replaced_by_a_link_after_activation_is_refreshed_through_it() {
+    let mut f = Fixture::new();
+    f.claude = f.home.join(".config/accounts/personal");
+    fs::create_dir_all(&f.claude).unwrap();
+    fs::write(
+        f.settings(),
+        json!({"permissions":{"allow":["Read"]}}).to_string(),
+    )
+    .unwrap();
+    f.activate();
+    let real = f.home.join(".claude/settings.json");
+    fs::rename(f.settings(), &real).unwrap();
+    std::os::unix::fs::symlink(&real, f.settings()).unwrap();
+    let result = f.activate();
+    let permissions = &result["integration_packages"]["claude-code"]["permissions"];
+    assert_eq!(permissions["current"], true, "{result}");
+    assert!(fs::symlink_metadata(f.settings()).unwrap().is_symlink());
+    let mut expected = vec![json!("Read")];
+    expected.extend(f.expected());
+    assert_eq!(f.read()["permissions"]["allow"], json!(expected));
+    f.deactivate();
+    assert_eq!(f.read()["permissions"]["allow"], json!(["Read"]));
+    assert!(fs::symlink_metadata(f.settings()).unwrap().is_symlink());
+}
+
+#[test]
+fn settings_links_outside_home_dangling_or_to_a_directory_are_refused_untouched() {
+    for case in ["directory outside HOME", "dangling", "to a directory"] {
+        let mut f = Fixture::new();
+        let link = match case {
+            "directory outside HOME" => {
+                let outside = f.root.join("outside");
+                fs::create_dir(&outside).unwrap();
+                fs::write(outside.join("settings.json"), "{}\n").unwrap();
+                f.claude = f.home.join("linked-account");
+                std::os::unix::fs::symlink(&outside, &f.claude).unwrap();
+                f.claude.clone()
+            }
+            "dangling" => {
+                std::os::unix::fs::symlink(f.home.join(".claude/missing.json"), f.settings())
+                    .unwrap();
+                f.settings()
+            }
+            _ => {
+                fs::create_dir(f.home.join(".claude/a-directory")).unwrap();
+                std::os::unix::fs::symlink(f.home.join(".claude/a-directory"), f.settings())
+                    .unwrap();
+                f.settings()
+            }
+        };
+        let link_target = fs::read_link(&link).unwrap();
+        let result = f.activate();
+        assert_eq!(result["activated"], true, "{case}");
+        let permissions = &result["integration_packages"]["claude-code"]["permissions"];
+        assert_eq!(permissions["current"], false, "{case}: {result}");
+        assert_eq!(fs::read_link(&link).unwrap(), link_target, "{case}");
+        match case {
+            "directory outside HOME" => assert_eq!(
+                fs::read_to_string(f.root.join("outside/settings.json")).unwrap(),
+                "{}\n"
+            ),
+            "dangling" => assert!(!f.home.join(".claude/missing.json").exists()),
+            _ => assert_eq!(
+                fs::read_dir(f.home.join(".claude/a-directory"))
+                    .unwrap()
+                    .count(),
+                0
+            ),
+        }
+        assert_permission_fallback(&f, &result);
+    }
+}
+
 #[test]
 fn deactivation_does_not_recreate_settings_or_allow_removed_by_the_user() {
     for deleted_file in [false, true] {
