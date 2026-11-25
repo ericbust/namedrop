@@ -248,7 +248,8 @@ fn settle_stop(state: &Path, captured: &CapturedStop, inherited: &dyn Inherited)
 /// the session waits on.
 fn wake_waiting_mail(state: &Path, socket: &str, space: &str, session: &str) {
     if namedrop::mail_waits_for_session(state, socket, space, session) {
-        let _ = crate::schedule_mailbox_workers(state, socket, space, false);
+        let _ =
+            crate::schedule_mailbox_workers(state, socket, space, crate::AfterScheduling::Return);
     }
 }
 

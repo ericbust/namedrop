@@ -1,5 +1,5 @@
 use crate::lifecycle::PaneLabel;
-use crate::mux::{AgentState, Badge, Effect, InputOutcome, PaneId, Retry};
+use crate::mux::{AgentState, Badge, Effect, Gone, InputOutcome, MuxError, PaneId, Retry};
 use crate::store::LostSettle;
 use crate::{
     ActorKind, Clock, DeliveryAttemptId, DeliveryState, DiscoveredPane, DispatchCandidate,
@@ -433,9 +433,52 @@ where
     Ok(())
 }
 
+/// Why a drain failed, in the words of what failed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DrainError {
+    /// The multiplexer says the space is gone: a closed Herdr workspace or
+    /// Rex session. Draining it again cannot help.
+    SpaceGone(String),
+    Failed(String),
+}
+
+impl From<String> for DrainError {
+    fn from(text: String) -> Self {
+        Self::Failed(text)
+    }
+}
+
+impl From<MuxError> for DrainError {
+    fn from(error: MuxError) -> Self {
+        match error {
+            MuxError::Gone(Gone::Space, text) => Self::SpaceGone(text),
+            error => Self::Failed(error.to_string()),
+        }
+    }
+}
+
+impl From<DrainError> for String {
+    fn from(error: DrainError) -> Self {
+        let (DrainError::SpaceGone(text) | DrainError::Failed(text)) = error;
+        text
+    }
+}
+
 pub fn drain_mailboxes<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<DrainReport, String>
+where
+    M: crate::mux::Mux,
+    C: Clock,
+    I: IdGenerator,
+{
+    drain_space_mailboxes(runtime).map_err(String::from)
+}
+
+/// `drain_mailboxes`, with an error that says when the space is gone.
+pub fn drain_space_mailboxes<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
+) -> Result<DrainReport, DrainError>
 where
     M: crate::mux::Mux,
     C: Clock,
@@ -448,7 +491,7 @@ where
 
 fn drain_mailboxes_here<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
-) -> Result<DrainReport, String>
+) -> Result<DrainReport, DrainError>
 where
     M: crate::mux::Mux,
     C: Clock,
@@ -926,17 +969,17 @@ where
 
 fn discover<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
-) -> Result<crate::DiscoveredWorktree, String>
+) -> Result<crate::DiscoveredWorktree, DrainError>
 where
     M: crate::mux::Mux,
 {
     match runtime.workspace_id {
-        Some(workspace_id) => crate::lifecycle::discover_reminder_workspace(
+        Some(workspace_id) => crate::lifecycle::discover_drained_space(
             runtime.state_directory,
             &StateNamespace::for_space(runtime.session_socket_id, workspace_id),
             runtime.mux,
         ),
-        None => discover_worktree(runtime.mux, runtime.cwd),
+        None => Ok(discover_worktree(runtime.mux, runtime.cwd)?),
     }
 }
 
@@ -1183,14 +1226,14 @@ where
 pub fn recheck_drafts<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
     held: Vec<DraftHold>,
-) -> Result<DrainReport, String>
+) -> Result<DrainReport, DrainError>
 where
     M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
     let Some(space) = runtime.workspace_id else {
-        return drain_mailboxes(runtime);
+        return drain_space_mailboxes(runtime);
     };
     let namespace = StateNamespace::for_space(runtime.session_socket_id, space);
     let waiting = match StateStore::open_read_only(runtime.state_directory) {
@@ -1198,7 +1241,7 @@ where
             .transaction(|transaction| transaction.queued_mailbox_addresses(&namespace))
             .map_err(|error| error.to_string())?,
         Ok(None) => Vec::new(),
-        Err(error) => return Err(error.to_string()),
+        Err(error) => return Err(error.to_string().into()),
     };
     let held: Vec<DraftHold> = held
         .into_iter()
@@ -1212,7 +1255,7 @@ where
             ..DrainReport::default()
         });
     }
-    drain_mailboxes(runtime)
+    drain_space_mailboxes(runtime)
 }
 
 /// What an agent pane's prompt box holds.

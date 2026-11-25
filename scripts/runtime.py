@@ -190,13 +190,21 @@ def busy_gate_message(path):
     # waited for rather than stopped.
     old_workers = [pid for pid, what, per_job in holders
                    if pid not in popups and 'agent-status-worker' in what and per_job is False]
-    working = [pid for pid, _, _ in holders if pid not in popups + old_workers]
+    # A mailbox wake waits for the status worker it started, which can retry for
+    # hours, and before 1.12.0 it kept the lock while it waited. The worker
+    # keeps running without it, so stopping the waiting hook loses nothing.
+    wakes = [pid for pid, what, _ in holders
+             if pid not in popups + old_workers and 'hook mailbox-wake' in what]
+    working = [pid for pid, _, _ in holders if pid not in popups + old_workers + wakes]
     steps = []
     if popups:
         steps.append(f'close the open Namedrop {screen}, such as the tour')
     if old_workers:
         steps.append("stop the status worker from the earlier version with `kill "
                      + ' '.join(map(str, old_workers)) + '`, which loses nothing because its events stay queued')
+    if wakes:
+        steps.append('stop the waiting mailbox wake with `kill ' + ' '.join(map(str, wakes))
+                     + '`, which loses nothing because the worker it started keeps running and the mention stays queued')
     if working:
         steps.append('wait a moment for the command that is still working to finish')
     return (f'Namedrop commands are still finishing. {named} To continue, ' + '; '.join(steps)

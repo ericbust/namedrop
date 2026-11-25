@@ -129,7 +129,7 @@
         "install.sh"
       ],
       "sources": [
-        {"file": "scripts/runtime.py", "line": 881, "source": "Namedrop is moving to Herdr. Run Activate Namedrop in Herdr again."},
+        {"file": "scripts/runtime.py", "line": 889, "source": "Namedrop is moving to Herdr. Run Activate Namedrop in Herdr again."},
         {"file": "scripts/install.sh", "line": 161, "source": "Namedrop is moving to Herdr. Run Activate Namedrop in Herdr again."}
       ],
       "reason": "A Rex state that Herdr is taking over refuses the install. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
@@ -586,10 +586,10 @@
       "file": "scripts/runtime.py",
       "reason": "Codex's or Claude Code's own plugin, or Namedrop's --plugin-state flag, which a Rex home uses as a Herdr home does.",
       "literals": [
-        [821, "plugin"],
-        [822, "plugin"],
-        [832, "Installing the Namedrop Codex plugin…"],
-        [843, "Codex installation finished but its installed plugin cache could not be verified."]
+        [829, "plugin"],
+        [830, "plugin"],
+        [840, "Installing the Namedrop Codex plugin…"],
+        [851, "Codex installation finished but its installed plugin cache could not be verified."]
       ]
     },
     {
@@ -613,8 +613,8 @@
       "file": "scripts/runtime.py",
       "reason": "run.sh's argv form; install.sh always passes the explicit --state-dir form.",
       "literals": [
-        [1247, "--herdr-pane"],
-        [1248, "Expected activate or --herdr-pane after ROOT; explicit calls need --state-dir DIR --verify activate|install."]
+        [1255, "--herdr-pane"],
+        [1256, "Expected activate or --herdr-pane after ROOT; explicit calls need --state-dir DIR --verify activate|install."]
       ]
     },
     {
@@ -622,10 +622,10 @@
       "file": "scripts/runtime.py",
       "reason": "A value of runtime/owner or retired.json's reason, read and written, never printed.",
       "literals": [
-        [886, "herdr_handoff"],
-        [977, "herdr_handoff"],
-        [1036, "herdr_handoff"],
-        [1154, "herdr\n"]
+        [894, "herdr_handoff"],
+        [985, "herdr_handoff"],
+        [1044, "herdr_handoff"],
+        [1162, "herdr\n"]
       ]
     },
     {
@@ -633,13 +633,13 @@
       "file": "scripts/runtime.py",
       "reason": "An environment or config name read or set, never printed.",
       "literals": [
-        [342, "HERDR_PLUGIN_STATE_DIR"],
-        [444, "HERDR_PLUGIN_STATE_DIR"],
-        [444, "HERDR_SOCKET_PATH"],
-        [444, "HERDR_WORKSPACE_ID"],
-        [1074, "HERDR_PLUGIN_STATE_DIR"],
-        [1165, "HERDR_WORKSPACE_ID"],
-        [1244, "HERDR_PLUGIN_STATE_DIR"]
+        [350, "HERDR_PLUGIN_STATE_DIR"],
+        [452, "HERDR_PLUGIN_STATE_DIR"],
+        [452, "HERDR_SOCKET_PATH"],
+        [452, "HERDR_WORKSPACE_ID"],
+        [1082, "HERDR_PLUGIN_STATE_DIR"],
+        [1173, "HERDR_WORKSPACE_ID"],
+        [1252, "HERDR_PLUGIN_STATE_DIR"]
       ]
     },
     {
@@ -1031,7 +1031,7 @@
       "file": "src/lifecycle.rs",
       "reason": "A check of with_herdr_runtime, which only a Herdr home runs.",
       "literals": [
-        [2180, "Herdr has no pane {pane_id}, so its space is unknown. Pass --herdr-workspace <space-id>."]
+        [2200, "Herdr has no pane {pane_id}, so its space is unknown. Pass --herdr-workspace <space-id>."]
       ]
     },
     {
@@ -1053,11 +1053,11 @@
       "file": "src/main.rs",
       "reason": "Herdr's plugin event hook, which Herdr alone sends.",
       "literals": [
-        [1366, "HERDR_PLUGIN_EVENT_JSON"],
-        [1380, "HERDR_PLUGIN_EVENT"],
-        [1381, "HERDR_PLUGIN_EVENT is required for an event hook"],
-        [1765, "HERDR_PLUGIN_EVENT_JSON"],
-        [1766, "HERDR_PLUGIN_EVENT_JSON is required for an event hook"]
+        [1379, "HERDR_PLUGIN_EVENT_JSON"],
+        [1393, "HERDR_PLUGIN_EVENT"],
+        [1394, "HERDR_PLUGIN_EVENT is required for an event hook"],
+        [1787, "HERDR_PLUGIN_EVENT_JSON"],
+        [1788, "HERDR_PLUGIN_EVENT_JSON is required for an event hook"]
       ]
     },
     {
@@ -1065,7 +1065,7 @@
       "file": "src/main.rs",
       "reason": "An environment or config name read or set, never printed.",
       "literals": [
-        [1619, "PLUGIN_ROOT"]
+        [1632, "PLUGIN_ROOT"]
       ]
     },
     {
@@ -1073,7 +1073,7 @@
       "file": "src/main.rs",
       "reason": "An internal invariant that no input reaches.",
       "literals": [
-        [1473, "a Herdr home has a location"]
+        [1486, "a Herdr home has a location"]
       ]
     },
     {
@@ -1081,7 +1081,7 @@
       "file": "src/main.rs",
       "reason": "The hidden dashboard-server's own argv, which `channels` builds with a state.",
       "literals": [
-        [1715, "--plugin-state, HERDR_PLUGIN_STATE_DIR or NAMEDROP_STATE_DIR is required"]
+        [1728, "--plugin-state, HERDR_PLUGIN_STATE_DIR or NAMEDROP_STATE_DIR is required"]
       ]
     },
     {

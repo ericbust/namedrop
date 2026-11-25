@@ -562,7 +562,7 @@ fn main() -> ExitCode {
         return run_context_hook(state_directory, inherited, execute_session_start_hook);
     }
     if let Some(state_directory) = cli.mailbox_wake_hook_state_directory() {
-        return run_mailbox_wake_hook(state_directory, inherited);
+        return run_mailbox_wake_hook(state_directory, inherited, command_guard.take().flatten());
     }
     if cli.is_agent_status_changed_hook() {
         return run_agent_status_changed_hook(inherited);
@@ -1034,8 +1034,20 @@ fn wake_runtime_mailboxes(runtime: &Runtime<'_>) -> Result<(), String> {
         runtime.state_directory,
         runtime.session_socket_id,
         &current_space(runtime)?,
-        false,
+        AfterScheduling::Return,
     )
+}
+
+/// What the caller of `schedule_mailbox_workers` does once the workers start.
+enum AfterScheduling {
+    Return,
+    /// Wait for them, without the command gate. Each worker takes the gate for
+    /// its own units, and while one retries, an update or `install --remove`
+    /// needs the gate exclusively, so a hook that kept it while waiting left
+    /// them busy for as long as the worker retried.
+    Wait {
+        gate: Option<fs::File>,
+    },
 }
 
 fn current_space(runtime: &Runtime<'_>) -> Result<String, String> {
@@ -1049,7 +1061,7 @@ fn schedule_mailbox_workers(
     state_directory: &Path,
     socket_id: &str,
     here: &str,
-    wait_for_workers: bool,
+    after: AfterScheduling,
 ) -> Result<(), String> {
     let mut failures = Vec::new();
     let mut workers = Vec::new();
@@ -1067,7 +1079,8 @@ fn schedule_mailbox_workers(
             failures.push(format!("{space}: {error}"));
         }
     }
-    if wait_for_workers {
+    if let AfterScheduling::Wait { gate } = after {
+        drop(gate);
         for (space, mut worker) in workers {
             if let Err(error) = worker.wait() {
                 failures.push(format!("{space}: {error}"));
@@ -1719,8 +1732,12 @@ fn state_required() -> String {
 /// sent. Its hook shell has exited by the time it runs, so it is nobody's
 /// pane: it reconciles the whole space and takes no identity from the pane
 /// ID it inherited, which no session ID vouches for under Codex.
-fn run_mailbox_wake_hook(state_directory: &Path, inherited: &dyn Inherited) -> ExitCode {
-    let wake = || -> Result<(), String> {
+fn run_mailbox_wake_hook(
+    state_directory: &Path,
+    inherited: &dyn Inherited,
+    gate: Option<fs::File>,
+) -> ExitCode {
+    let wake = move || -> Result<(), String> {
         let home = home::resolve(&home::Flags::default(), inherited)?;
         if let Home::Rex(place) = &home {
             let space = place
@@ -1731,7 +1748,7 @@ fn run_mailbox_wake_hook(state_directory: &Path, inherited: &dyn Inherited) -> E
                 state_directory,
                 &place.endpoint.key,
                 space.as_str(),
-                true,
+                AfterScheduling::Wait { gate },
             );
         }
         let location = home
@@ -1750,7 +1767,12 @@ fn run_mailbox_wake_hook(state_directory: &Path, inherited: &dyn Inherited) -> E
                 namedrop::discover_worktree(&herdr, &cwd)?.workspace_id
             }
         };
-        schedule_mailbox_workers(state_directory, &socket_id, &space_id, true)
+        schedule_mailbox_workers(
+            state_directory,
+            &socket_id,
+            &space_id,
+            AfterScheduling::Wait { gate },
+        )
     };
     match wake() {
         Ok(()) => ExitCode::SUCCESS,
@@ -2036,15 +2058,15 @@ fn run_unit(
     let options = RuntimeOptions::default();
     match Marker::parse(input).map_err(judged)? {
         Marker::Wake => with_runtime_options(&options, inherited, |runtime| {
-            namedrop::drain_mailboxes(runtime)
-                .and_then(|report| serde_json::to_value(report).map_err(|error| error.to_string()))
+            Ok(namedrop::drain_space_mailboxes(runtime))
         })
-        .map_err(judged),
+        .map_err(judged)
+        .and_then(drained),
         Marker::DraftRecheck(held) => with_runtime_options(&options, inherited, |runtime| {
-            namedrop::recheck_drafts(runtime, held)
-                .and_then(|report| serde_json::to_value(report).map_err(|error| error.to_string()))
+            Ok(namedrop::recheck_drafts(runtime, held))
         })
-        .map_err(judged),
+        .map_err(judged)
+        .and_then(drained),
         Marker::Event(event) => with_runtime_options(&options, inherited, |runtime| {
             Ok(namedrop::handle_mux_event(runtime, &event))
         })
@@ -2052,6 +2074,19 @@ fn run_unit(
         Marker::Herdr(data) => {
             run_lifecycle("event.agent-status-changed", data, &options, inherited).map_err(judged)
         }
+    }
+}
+
+/// A drain's report for the queue. A space that is gone is definitive: a
+/// wake for a closed Herdr workspace or Rex session ends, so its worker
+/// finishes, rather than wait for the space to come back.
+fn drained(
+    result: Result<namedrop::DrainReport, namedrop::DrainError>,
+) -> Result<serde_json::Value, namedrop::EventError> {
+    match result {
+        Ok(report) => serde_json::to_value(report).map_err(|error| judged(error.to_string())),
+        Err(namedrop::DrainError::SpaceGone(text)) => Err(namedrop::EventError::Definitive(text)),
+        Err(namedrop::DrainError::Failed(text)) => Err(judged(text)),
     }
 }
 
@@ -2998,7 +3033,8 @@ mod worker_shutdown_tests {
     }
 
     /// A queued wake, such as the one activation writes for a restarted
-    /// worker, carries a delivery's retry. It waits out any error.
+    /// worker, carries a delivery's retry. It waits out any error a retry
+    /// can clear.
     #[test]
     fn a_queued_wake_is_never_set_aside() {
         let queue = QueueFixture::new("queued-wake");
@@ -3028,6 +3064,75 @@ mod worker_shutdown_tests {
         assert!(!wake.exists() && !queue.0.join("rejected-pending-activation-1").exists());
         assert!(namedrop::status_queue::health(&queue.0).1.is_none());
         queue.lock();
+    }
+
+    /// A wake for a space the multiplexer says is gone, such as a Rex session
+    /// someone killed while a delivery was in flight, ends at once: the worker
+    /// finishes and lets go of its queue. A wake that fails for a reason a
+    /// retry can clear still waits it out, past the bound that sets other
+    /// events aside.
+    #[test]
+    fn a_wake_for_a_gone_space_ends_and_a_transient_failure_still_retries() {
+        use namedrop::mux::{MuxError, fake::Op};
+        let root = env::temp_dir().join(format!("nd-gone-wake-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let fake = namedrop::mux::fake::FakeMux::world()
+            .endpoint("rex:/tmp/gone-wake.sock")
+            .space("session:open")
+            .pane("block:p1")
+            .build();
+        let mux: Arc<dyn Mux> = Arc::new(fake.clone());
+        let ids = ProcessIds::default();
+        let state = root.join("state");
+        for (space, transient, expected) in [("session:killed", 0, 1), ("session:open", 3, 4)] {
+            let queue = QueueFixture::new(&format!("gone-wake-{transient}"));
+            let wake = queue.0.join("pending-1-wake");
+            fs::write(&wake, br#"{"operation":"mailbox-wake"}"#).unwrap();
+            for _ in 0..transient {
+                fake.fail(
+                    Op::Survey,
+                    MuxError::Unavailable("Rex request timed out after 5000ms".into()),
+                );
+            }
+            let runtime = LifecycleRuntime {
+                state_directory: &state,
+                home_directory: None,
+                agent_config: namedrop::AgentConfigDirectories::default(),
+                cwd: &root,
+                workspace_id: Some(space),
+                current_pane_id: None,
+                session_socket_id: "rex:/tmp/gone-wake.sock",
+                mux: &mux,
+                clock: &SystemClock,
+                ids: &ids,
+            };
+            let mut attempts = 0;
+            assert_eq!(
+                serve_queue(
+                    &queue.0,
+                    queue.lock(),
+                    None,
+                    pending_agent_status_reconciliations,
+                    |path| fs::read(path),
+                    |input| {
+                        assert_eq!(input, serde_json::json!({"operation":"mailbox-wake"}));
+                        attempts += 1;
+                        // Bounds the test if the wake would retry forever.
+                        if attempts > expected {
+                            return Ok(serde_json::json!({}));
+                        }
+                        drained(namedrop::drain_space_mailboxes(&runtime))
+                    },
+                    Duration::ZERO,
+                ),
+                ExitCode::SUCCESS
+            );
+            assert_eq!(attempts, expected, "{space}");
+            assert!(!wake.exists() && !queue.0.join("rejected-pending-1-wake").exists());
+            assert!(namedrop::status_queue::health(&queue.0).0.is_none());
+            queue.lock();
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     /// A marker that vanishes while it fails ends its failure, so Doctor
