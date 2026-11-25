@@ -746,13 +746,9 @@ impl InBlock {
         let caller = hook.place.caller.as_deref().unwrap().clone();
         let server = *caller.ancestors.last().unwrap();
         Self {
-            vars: [
-                ("REX_BLOCK", BLOCK),
-                ("REX_SESSION", "session:s"),
-                ("REX_SERVER", "unix:///tmp/r.sock"),
-            ]
-            .map(|(name, value)| (name.to_owned(), value.to_owned()))
-            .into(),
+            vars: [("REX_BLOCK", BLOCK), ("REX_SERVER", "unix:///tmp/r.sock")]
+                .map(|(name, value)| (name.to_owned(), value.to_owned()))
+                .into(),
             ancestors: caller.ancestors.clone(),
             peer: Ok(server),
             caller,

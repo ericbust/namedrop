@@ -1,6 +1,7 @@
 //! Which multiplexer this process runs in. An explicit endpoint decides by its
-//! kind. A process that inherited a Rex claim (`REX_BLOCK`) is served by the multiplexer whose server is its nearest ancestor, proved
-//! by the peer pid of each claimed socket with no request sent. Any doubt
+//! kind. A process that inherited a Rex claim (`REX_BLOCK`) is served by the
+//! multiplexer whose server is its nearest ancestor, proved by the peer pid
+//! of each claimed socket with no request sent. Any doubt
 //! about Herdr is resolved as Herdr, so every Herdr process keeps today's
 //! path. Everything else reads step 3's set of names.
 

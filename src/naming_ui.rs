@@ -1576,7 +1576,6 @@ mod tests {
     fn a_rex_status_layer_observes_its_own_block_not_the_target() {
         let layer = [
             ("REX_BLOCK", "block:layer"),
-            ("REX_SESSION", "session:s"),
             ("NAMEDROP_TARGET_PANE", "block:target"),
         ];
         assert_eq!(

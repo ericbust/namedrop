@@ -676,6 +676,7 @@ fn port_ansi_turns_blank_runs_into_spaces_and_refuses_what_the_reader_would_misr
         include_str!("fixtures/vt/codex-draft.vt"),
         include_str!("fixtures/vt/codex-draft-fresh.vt"),
         include_str!("fixtures/vt/codex-empty-ech.vt"),
+        include_str!("fixtures/vt/codex-draft-ech.vt"),
     ] {
         let screen = port_ansi(vt).unwrap();
         assert!(!screen.contains("C\u{1b}") && !screen.contains("\u{1b}[1C"));
