@@ -165,9 +165,20 @@ When Rex loads the module, it also starts `namedrop rex ensure --from-server`, w
 | How it checks | `git ls-remote --tags` lists the source's `v*` tags |
 | Releases offered | Newer than the installed version, at or above the first release that ships `install.sh`, and on the install's channel. A stable install is offered stable releases. A pre-release is offered the later pre-releases of its own version and newer stable releases |
 | Settings file | `~/.config/namedrop/settings.json` for a standalone install. A Herdr install reads `$XDG_CONFIG_HOME/herdr/plugins/config/namedrop/settings.json`, else `~/.config/herdr/plugins/config/namedrop/settings.json` |
-| Setting | `check_for_updates`, `true` or `false`. A missing file means `true`. Any other key makes the file invalid, and Doctor reports `ND-UPDATE-002` |
+| Setting | `check_for_updates`, `true` or `false`. A missing file means `true`. A key other than `check_for_updates` and [`claude_command`](#settings) makes the file invalid, and Doctor reports `ND-UPDATE-002` |
 | Agent notice | At the start of a session, at most once a day for each version: `Namedrop <version> is available (you have <installed>). Update: download Namedrop <version> and run sh scripts/install.sh` |
 | macOS without the developer tools | The bridge starts no check when the first `python3` on its `PATH` is `/usr/bin/python3`, by name or through a link, and `xcode-select -p` fails. It runs `xcode-select -p` only when the setting and the daily limit allow a check. A check that runs anyway records `skipped` with `developer_tools_missing`, and runs no `git` |
+
+## Settings
+
+The settings file is the one [Updates](#updates) names. It holds two settings.
+
+| Setting | Value |
+|---|---|
+| `check_for_updates` | `true` or `false`. [Updates](#updates) gives the rules |
+| `claude_command` | The program Namedrop runs for its own Claude Code calls: agent-status summaries, persona suggestions and channel routing. It is a program name, looked up on the `PATH` of the Rex server, or an absolute path, with no arguments. Without it, Namedrop runs `claude`. Namedrop gives the program the arguments it gives `claude`, so a launcher must pass them on |
+
+When `claude_command` names no executable file, is not a string, or the file is invalid, Namedrop's Claude Code calls fail with the reason. They never run `claude` instead. Doctor reports `ND-MODEL-002`. Codex calls have no such setting: their sandbox lets exactly one Codex executable run, so a launcher script cannot start Codex.
 
 ## One machine with Herdr and Rex
 
@@ -358,6 +369,17 @@ Doctor on Rex reports `ND-INTEGRATION-003` when an installed Codex or Claude Cod
 |---|---|---|---|
 | `ND-UPDATE-001` | `info` | "Namedrop `<version>` is available (you have `<installed>`)." | For a standalone install, "Update: download Namedrop `<version>` and run sh scripts/install.sh". A Herdr install keeps Herdr's text |
 | `ND-UPDATE-002` | `info` | "Namedrop update checks are disabled by invalid settings." | "Set check_for_updates to true or false in the Namedrop settings file." |
+
+### ND-MODEL-002
+
+`ND-MODEL-002` is not Rex-only. Doctor reports it when the settings file sets `claude_command`, or cannot be read. Doctor looks the program up on its own `PATH`.
+
+| Field | Text |
+|---|---|
+| Severity | `info` |
+| Summary | "Namedrop's own Claude Code calls run `<program>`." or "Namedrop's own Claude Code calls cannot run." |
+| Explanation | For a program that cannot run, "Summaries, persona suggestions, and channel routing fail until you fix it: `<reason>`" |
+| Repair | "Set claude_command in the Namedrop settings file to a program name on PATH or an absolute path." |
 
 ### ND-SESSION-002
 

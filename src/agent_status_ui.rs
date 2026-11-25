@@ -136,7 +136,7 @@ fn run_popup(
             )
         };
         let summarize = |snapshot: &Value, cancelled: &AtomicBool| {
-            namedrop::summarize_agent_status(snapshot, cancelled)
+            namedrop::summarize_agent_status(runtime.state_directory, snapshot, cancelled)
         };
         let recheck = |cancelled: &AtomicBool| {
             latest_identity(

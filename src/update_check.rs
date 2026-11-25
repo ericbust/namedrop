@@ -18,6 +18,9 @@ pub(crate) const UPDATE_COMMAND: &str = "herdr plugin action invoke update --plu
 struct Settings {
     #[serde(default = "enabled")]
     check_for_updates: bool,
+    /// The program Namedrop runs for its own Claude Code calls.
+    #[serde(default)]
+    claude_command: Option<String>,
 }
 
 fn enabled() -> bool {
@@ -62,12 +65,24 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
     serde_json::from_slice(&data).map_err(|error| error.to_string())
 }
 
-pub(crate) fn settings(state: &Path) -> Result<bool, String> {
+fn read_settings(state: &Path) -> Result<Settings, String> {
     let path = settings_path(state)?;
     if !path.try_exists().map_err(|error| error.to_string())? {
-        return Ok(true);
+        return Ok(Settings {
+            check_for_updates: true,
+            claude_command: None,
+        });
     }
-    read_json::<Settings>(&path).map(|settings| settings.check_for_updates)
+    read_json::<Settings>(&path)
+}
+
+pub(crate) fn settings(state: &Path) -> Result<bool, String> {
+    read_settings(state).map(|settings| settings.check_for_updates)
+}
+
+/// The `claude_command` setting as written, or none when it is absent.
+pub(crate) fn claude_command(state: &Path) -> Result<Option<String>, String> {
+    read_settings(state).map(|settings| settings.claude_command)
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]

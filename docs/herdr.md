@@ -126,6 +126,8 @@ The **Update Namedrop** tab checks your installed branch or ref for new commits,
 
 To turn off both background checks and notices, put `{"check_for_updates":false}` in `settings.json` inside the directory printed by `herdr plugin config-dir namedrop`. Create the file and directory if needed. Set it to `true`, or remove that setting, to enable checks again. Invalid settings disable checks; Doctor explains the error without marking Namedrop unhealthy. This setting survives updates and `namedrop purge`.
 
+Agent-status summaries, persona suggestions and channel routing run `claude` with the environment of the Herdr server. To use another Claude Code account for them, set `claude_command` in the same `settings.json` to a program name or an absolute path, such as `{"claude_command":"claude-personal"}` for a launcher that selects another account. [Choose the Claude Code program](operations.md#choose-the-claude-code-program) gives the rules.
+
 - **Older installations.** An upgrade from an older installation may need one session refresh. The tab lists the affected sessions by workspace, tab, and pane. Choose **Wait here** or **Later**, and refresh them when you're ready. Complete any Codex cache-refresh steps that setup prints.
 - **Nothing is forced.** An update keeps your installed source and ref, including a fixed pin. It stops and cancels nothing. If activation fails, Namedrop selects the previous runtime again. Build and setup details go to `last-update.log` in Namedrop's state directory.
 - **Other workspaces.** Other workspaces keep their activation. Run `namedrop doctor` in each one, and open setup if Doctor reports a problem.

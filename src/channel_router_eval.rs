@@ -194,6 +194,7 @@ pub(super) fn real_host_router_corpus() {
                     }
                     let started = Instant::now();
                     let capture = capture_worker(
+                        std::path::Path::new(super::tests::STATE),
                         host,
                         &WorkerPrompt {
                             instructions: INSTRUCTIONS,

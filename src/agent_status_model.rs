@@ -4,17 +4,17 @@ pub(crate) mod channel_router;
 use crate::MAX_PERSONA_CHARS;
 use crate::runtime::stop_process_group;
 use serde_json::{Map, Value, json};
-#[cfg(target_os = "macos")]
-use std::path::Path;
 use std::{
     collections::HashMap,
-    env, fs,
+    env,
+    ffi::OsString,
+    fs,
     io::{Read, Seek, SeekFrom, Write},
     os::unix::{
-        fs::{DirBuilderExt, OpenOptionsExt},
+        fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
         process::CommandExt,
     },
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
         Mutex, OnceLock,
@@ -338,10 +338,56 @@ fn digest(input: &WorkerInput, model: &str) -> String {
     crate::lower_hex(&hasher.finalize())
 }
 
-/// Resolves the worker binary, allowing tests to substitute a fake CLI the same
-/// way `HERDR_BIN_PATH` substitutes the Herdr binary.
-fn claude_binary() -> String {
-    env::var("NAMEDROP_AGENT_STATUS_CLAUDE_BIN").unwrap_or_else(|_| "claude".to_owned())
+/// The program for Namedrop's own Claude Code calls: a fake CLI a test names
+/// in `NAMEDROP_AGENT_STATUS_CLAUDE_BIN`, as `HERDR_BIN_PATH` names a fake
+/// Herdr, else the `claude_command` setting, else `claude` on `PATH`. A
+/// setting that cannot be read or run is an error, never plain `claude`,
+/// which could sign in to another account.
+fn claude_binary(state: &Path) -> Result<OsString, String> {
+    if let Some(binary) = env::var_os("NAMEDROP_AGENT_STATUS_CLAUDE_BIN") {
+        return Ok(binary);
+    }
+    Ok(claude_command(state)?.map_or_else(|| "claude".into(), PathBuf::into_os_string))
+}
+
+/// The program the `claude_command` setting names, found as the worker will
+/// run it, or none when the setting is absent.
+pub(crate) fn claude_command(state: &Path) -> Result<Option<PathBuf>, String> {
+    let Some(command) = crate::update_check::claude_command(state)
+        .map_err(|error| format!("Namedrop's settings.json is invalid: {error}"))?
+    else {
+        return Ok(None);
+    };
+    let executable = |path: &Path| {
+        fs::metadata(path)
+            .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+    };
+    if command.trim().is_empty() {
+        return Err("claude_command in settings.json is empty".to_owned());
+    }
+    let path = PathBuf::from(&command);
+    if path.is_absolute() {
+        return if executable(&path) {
+            Ok(Some(path))
+        } else {
+            Err(format!(
+                "claude_command {command} is not an executable file"
+            ))
+        };
+    }
+    if command.contains('/') {
+        return Err(format!(
+            "claude_command {command} must be a program name or an absolute path"
+        ));
+    }
+    env::var_os("PATH")
+        .and_then(|paths| {
+            env::split_paths(&paths)
+                .map(|directory| directory.join(&command))
+                .find(|candidate| candidate.is_absolute() && executable(candidate))
+        })
+        .map(Some)
+        .ok_or_else(|| format!("claude_command {command} is not on PATH"))
 }
 
 fn codex_binary() -> String {
@@ -810,12 +856,13 @@ fn codex_plan(
 }
 
 fn claude_plan(
+    state: &Path,
     prompt: &WorkerPrompt,
     payload: &str,
     structured: bool,
 ) -> Result<WorkerPlan, String> {
+    let mut command = Command::new(claude_binary(state)?);
     let directory = reserve_worker_directory()?;
-    let mut command = Command::new(claude_binary());
     command
         .args(["--print", "--model", CLAUDE_MODEL])
         // Verified against the real outbound request: an empty tool list.
@@ -854,12 +901,13 @@ fn claude_plan(
 }
 
 fn run_worker(
+    state: &Path,
     host: &str,
     prompt: &WorkerPrompt,
     payload: &str,
     cancelled: &AtomicBool,
 ) -> Result<String, String> {
-    capture_worker(host, prompt, payload, cancelled, None, true).result
+    capture_worker(state, host, prompt, payload, cancelled, None, true).result
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -905,6 +953,7 @@ pub fn runs_in_agent_session() -> bool {
 }
 
 fn capture_worker(
+    state: &Path,
     host: &str,
     prompt: &WorkerPrompt,
     payload: &str,
@@ -917,7 +966,7 @@ fn capture_worker(
     let result = (|| {
         let mut plan = match host {
             "codex" => codex_plan(prompt, payload, structured)?,
-            _ => claude_plan(prompt, payload, structured)?,
+            _ => claude_plan(state, prompt, payload, structured)?,
         };
         let worker_directory = plan.directory.0.clone();
         let command = &mut plan.command;
@@ -1255,8 +1304,14 @@ fn validate_summary(response: &Value, input: &WorkerInput, model: &str) -> Resul
 ///
 /// Returns the summary described by the agent status contract. Any failure is
 /// an `Err` carrying a short reason: callers render the snapshot's facts
-/// without descriptions rather than showing invented prose.
-pub fn summarize_agent_status(snapshot: &Value, cancelled: &AtomicBool) -> Result<Value, String> {
+/// without descriptions rather than showing invented prose. `state` is the
+/// state directory, whose install owns the settings that name the Claude Code
+/// program.
+pub fn summarize_agent_status(
+    state: &Path,
+    snapshot: &Value,
+    cancelled: &AtomicBool,
+) -> Result<Value, String> {
     if cancelled.load(Ordering::Relaxed) {
         return Err("agent status summary cancelled".to_owned());
     }
@@ -1303,6 +1358,7 @@ pub fn summarize_agent_status(snapshot: &Value, cancelled: &AtomicBool) -> Resul
     // One worker per origin and no automatic retry: a failure falls back to
     // facts rather than spending again.
     let raw = run_worker(
+        state,
         host.as_deref().unwrap_or_default(),
         &WorkerPrompt {
             instructions: STATUS_INSTRUCTIONS,
@@ -1351,8 +1407,10 @@ fn validate_suggestion(response: &Value) -> Result<String, String> {
 /// Only `alias` and `description` reach the model: no snapshot, no transcript,
 /// no context or Herdr identifier. The result is draft text for the user to
 /// accept or discard, so nothing is stored and nothing is cached; a failure is
-/// an `Err` carrying a short reason and is not retried.
+/// an `Err` carrying a short reason and is not retried. `state` is as for
+/// [`summarize_agent_status`].
 pub fn suggest_agent_persona(
+    state: &Path,
     alias: &str,
     description: &str,
     host: &str,
@@ -1372,6 +1430,7 @@ pub fn suggest_agent_persona(
 
     let payload = persona_payload(alias, description)?;
     let raw = run_worker(
+        state,
         host,
         &WorkerPrompt {
             instructions: PERSONA_INSTRUCTIONS,

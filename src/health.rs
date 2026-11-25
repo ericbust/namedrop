@@ -538,6 +538,36 @@ where
             }
         }
     }
+    // Only a set or unreadable `claude_command` is reported: without one,
+    // Claude Code calls run `claude` as they always have.
+    let claude = match crate::agent_status_model::claude_command(runtime.state_directory) {
+        Ok(None) => None,
+        Ok(Some(program)) => Some((
+            format!(
+                "Namedrop's own Claude Code calls run {}.",
+                program.display()
+            ),
+            "Summaries, persona suggestions, and channel routing use this program from claude_command in settings.json.".to_owned(),
+        )),
+        Err(error) => Some((
+            "Namedrop's own Claude Code calls cannot run.".to_owned(),
+            format!("Summaries, persona suggestions, and channel routing fail until you fix it: {error}"),
+        )),
+    };
+    if let Some((summary, explanation)) = claude {
+        let mut claude_issue = issue(
+            "ND-MODEL-002",
+            HealthSeverity::Info,
+            &summary,
+            &explanation,
+            HealthRepairKind::HumanDecision,
+            "Set claude_command in the Namedrop settings file to a program name on PATH or an absolute path.",
+        );
+        claude_issue.diagnostic = serde_json::json!({
+            "path": crate::update_check::settings_path(runtime.state_directory).ok(),
+        });
+        issues.push(claude_issue);
+    }
 
     let served = crate::codex_app_server::served_codex_panes(runtime, &setup.panes);
     if let Some(served) = &served {

@@ -163,6 +163,70 @@ fn invalid_update_settings_are_visible_in_doctor_without_a_health_failure() {
     );
 }
 
+#[test]
+fn doctor_names_the_claude_command_namedrop_runs() {
+    let f = Fixture::new();
+    if update_profile::isolate(&f.root, &f.home) {
+        return;
+    }
+    f.register();
+    let claude = |report: &HealthReport| {
+        report
+            .issues
+            .iter()
+            .find(|issue| issue.code == "ND-MODEL-002")
+            .cloned()
+    };
+    let unset = diagnose_collaboration(&f.runtime());
+    assert!(claude(&unset).is_none(), "{unset:?}");
+    let path = f
+        .home
+        .join(".config/herdr/plugins/config/namedrop/settings.json");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let launcher = f.home.join("claude-launcher");
+    fs::write(&launcher, "#!/bin/sh\n").unwrap();
+    fs::set_permissions(
+        &launcher,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    fs::write(&path, json!({"claude_command": launcher}).to_string()).unwrap();
+    let report = diagnose_collaboration(&f.runtime());
+    assert_eq!(report.status, HealthStatus::Healthy, "{report:?}");
+    assert!(
+        !report
+            .issues
+            .iter()
+            .any(|issue| issue.code == "ND-UPDATE-002"),
+        "claude_command is a known setting: {report:?}"
+    );
+    let set = claude(&report).unwrap();
+    assert_eq!(set.severity, HealthSeverity::Info);
+    assert_eq!(
+        set.summary,
+        format!(
+            "Namedrop's own Claude Code calls run {}.",
+            launcher.display()
+        )
+    );
+    assert_eq!(set.diagnostic["path"], path.to_string_lossy().as_ref());
+    fs::write(&path, r#"{"claude_command":""}"#).unwrap();
+    let report = diagnose_collaboration(&f.runtime());
+    assert_eq!(report.status, HealthStatus::Healthy, "{report:?}");
+    let invalid = claude(&report).unwrap();
+    assert_eq!(invalid.severity, HealthSeverity::Info);
+    assert_eq!(
+        invalid.summary,
+        "Namedrop's own Claude Code calls cannot run."
+    );
+    assert!(
+        invalid
+            .explanation
+            .contains("claude_command in settings.json is empty"),
+        "{invalid:?}"
+    );
+}
+
 /// The U10 review's F5: an owner that is not `standalone` or `herdr`, an
 /// empty one, or a directory, keeps Herdr's settings file and notice. Doctor
 /// names Herdr's file for invalid settings and never blames an owner it

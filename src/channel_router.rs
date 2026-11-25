@@ -3,7 +3,7 @@ use super::{
     capture_worker, env, extract_response, json, sanitize_text, truncate_chars, worker_usage,
 };
 use crate::{AgentRuntime, RoutingAddressSnapshot, store::dashboard::DashboardRows};
-use std::{collections::HashSet, ops::Range};
+use std::{collections::HashSet, ops::Range, path::Path};
 
 const DEADLINE: Duration = Duration::from_secs(17);
 const MAX_POST_CHARS: usize = 4_000;
@@ -122,10 +122,15 @@ pub(crate) struct RouteRun {
 
 #[cfg(test)]
 pub(crate) fn route(request: RouterRequest<'_>) -> RouteRun {
-    route_with_cancel(request, &AtomicBool::new(false))
+    route_with_cancel(request, Path::new(tests::STATE), &AtomicBool::new(false))
 }
 
-pub(crate) fn route_with_cancel(request: RouterRequest<'_>, cancelled: &AtomicBool) -> RouteRun {
+/// `state` is the state directory, whose settings name the Claude Code program.
+pub(crate) fn route_with_cancel(
+    request: RouterRequest<'_>,
+    state: &Path,
+    cancelled: &AtomicBool,
+) -> RouteRun {
     if request.candidates.is_empty()
         || env::var("NAMEDROP_CHANNEL_ROUTER").is_ok_and(|value| value == "off")
     {
@@ -153,15 +158,22 @@ pub(crate) fn route_with_cancel(request: RouterRequest<'_>, cancelled: &AtomicBo
         }
     };
     let structured = input.host == "codex";
-    run_input_cancellable(input, DEADLINE, structured, cancelled)
+    run_input_cancellable(state, input, DEADLINE, structured, cancelled)
 }
 
 #[cfg(test)]
 fn run_input(input: RouterInput, deadline: Duration, structured: bool) -> RouteRun {
-    run_input_cancellable(input, deadline, structured, &AtomicBool::new(false))
+    run_input_cancellable(
+        Path::new(tests::STATE),
+        input,
+        deadline,
+        structured,
+        &AtomicBool::new(false),
+    )
 }
 
 fn run_input_cancellable(
+    state: &Path,
     input: RouterInput,
     deadline: Duration,
     structured: bool,
@@ -180,6 +192,7 @@ fn run_input_cancellable(
     }
     let started = Instant::now();
     let output = capture_worker(
+        state,
         input.host,
         &WorkerPrompt {
             instructions: INSTRUCTIONS,

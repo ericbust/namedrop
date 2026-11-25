@@ -16,6 +16,10 @@ use std::{
     sync::atomic::AtomicBool,
 };
 
+/// A state directory no test creates. The fake CLI comes from
+/// `NAMEDROP_AGENT_STATUS_CLAUDE_BIN`, so its settings are never read.
+const STATE: &str = "/nonexistent/namedrop-test-state";
+
 const STAND_IN: &str = r#"
 #include <dirent.h>
 #include <errno.h>
@@ -205,7 +209,13 @@ fn the_worker_resolves_a_codex_home_it_was_given() {
         } else {
             "Reviews the parser changes."
         };
-        match suggest_agent_persona("reviewer", "", "codex", &AtomicBool::new(false)) {
+        match suggest_agent_persona(
+            Path::new(STATE),
+            "reviewer",
+            "",
+            "codex",
+            &AtomicBool::new(false),
+        ) {
             Ok(suggestion) if suggestion == expected => {}
             outcome => failures.push(format!("{}: {outcome:?}", layout.name)),
         }

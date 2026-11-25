@@ -5,6 +5,10 @@ use crate::{
 };
 use std::{fs, path::Path, process::Command};
 
+/// A state directory no test creates. Workers here run the fake CLI that
+/// `NAMEDROP_AGENT_STATUS_CLAUDE_BIN` names, so its settings are never read.
+pub(super) const STATE: &str = "/nonexistent/namedrop-router-test-state";
+
 pub(super) fn rows() -> DashboardRows {
     let addresses = [
         ("claude", PaneType::Agent, false),
@@ -824,7 +828,7 @@ fn fake_cli_routes_with_isolation_receipts_and_deadline() {
         let run = if matches!(case.as_str(), "plainclaude" | "plaincodex") {
             run_input(build_input(request).unwrap(), DEADLINE, false)
         } else if case == "cancelled" {
-            route_with_cancel(request, &AtomicBool::new(true))
+            route_with_cancel(request, Path::new(STATE), &AtomicBool::new(true))
         } else {
             route(request)
         };

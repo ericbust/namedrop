@@ -429,7 +429,12 @@ fn name_prompt(runtime: &Runtime<'_>, terminal: &str) -> Result<Option<String>, 
                 .map_err(|e| e.to_string())?,
             None => None,
         };
-        persona_editor(&alias, saved.as_deref(), &persona_host(&origin))?
+        persona_editor(
+            runtime.state_directory,
+            &alias,
+            saved.as_deref(),
+            &persona_host(&origin),
+        )?
     } else {
         Persona::Keep
     };
@@ -769,21 +774,31 @@ fn manage_prompt(runtime: &Runtime<'_>, terminal: &str) -> Result<(), String> {
                     // here, so a rename alone never redefines the agent.
                     clear_screen();
                     let host = persona_host(&target_pane(runtime)?);
-                    follow_up = persona_editor(&alias, address.persona.as_deref(), &host)?
-                        .description()
-                        .map(|description| {
-                            serde_json::json!({
-                                "address_id": address.id,
-                                "description": description,
-                            })
-                        });
+                    follow_up = persona_editor(
+                        runtime.state_directory,
+                        &alias,
+                        address.persona.as_deref(),
+                        &host,
+                    )?
+                    .description()
+                    .map(|description| {
+                        serde_json::json!({
+                            "address_id": address.id,
+                            "description": description,
+                        })
+                    });
                 }
                 ("address.rename", None)
             }
             b'p' if is_agent => {
                 clear_screen();
                 let host = persona_host(&target_pane(runtime)?);
-                let choice = persona_editor(&address.alias, address.persona.as_deref(), &host)?;
+                let choice = persona_editor(
+                    runtime.state_directory,
+                    &address.alias,
+                    address.persona.as_deref(),
+                    &host,
+                )?;
                 let Some(description) = choice.description() else {
                     notice = if choice == Persona::Cancel {
                         "Cancelled. The saved persona is unchanged.".into()
@@ -1114,7 +1129,12 @@ fn persona_host(pane: &namedrop::DiscoveredPane) -> String {
 ///
 /// `saved` is the persona already stored; `host` is the invoking pane's own
 /// CLI, and an unsupported one simply reports that it has no suggestions.
-fn persona_editor(alias: &str, saved: Option<&str>, host: &str) -> Result<Persona, String> {
+fn persona_editor(
+    state: &Path,
+    alias: &str,
+    saved: Option<&str>,
+    host: &str,
+) -> Result<Persona, String> {
     let interactive = io::stdin().is_terminal();
     let _mode = InputMode::polling()?;
     let draft = saved.unwrap_or_default().as_bytes().to_vec();
@@ -1137,7 +1157,8 @@ fn persona_editor(alias: &str, saved: Option<&str>, host: &str) -> Result<Person
             let alias = alias.to_owned();
             let host = host.to_owned();
             scope.spawn(move || {
-                let suggestion = namedrop::suggest_agent_persona(&alias, &draft, &host, &cancelled);
+                let suggestion =
+                    namedrop::suggest_agent_persona(state, &alias, &draft, &host, &cancelled);
                 let _ = sender.send((generation, suggestion));
             });
         };

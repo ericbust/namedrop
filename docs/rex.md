@@ -146,6 +146,7 @@ Run **Namedrop Doctor** from the palette, press `alt+shift+cmd+h`, or run `named
 | `ND-SESSION-004`, Namedrop refused to bind the agent session | Start the agent as the pane's own program, at its shell, then send it one prompt |
 | `ND-INTEGRATION-003`, a hook wrapper does not name its agent | Run **Activate Namedrop** again, then restart the agent |
 | `ND-SPACE-001`, Namedrop is paused in this Rex session | Run **Resume Namedrop** |
+| `ND-MODEL-002`, Namedrop's own Claude Code calls cannot run | Fix `claude_command` in the settings file that `ND-UPDATE-002` names. Use a program name on the Rex server's `PATH` or an absolute path |
 | `ND-UPDATE-002`, update checks are disabled by invalid settings | Set `check_for_updates` to `true` or `false` in the settings file. For an install that `install.sh` made, that is `~/.config/namedrop/settings.json`. If Herdr owns the install, it is `$XDG_CONFIG_HOME/herdr/plugins/config/namedrop/settings.json`, else `~/.config/herdr/plugins/config/namedrop/settings.json` |
 
 Other problems:
@@ -181,6 +182,14 @@ To turn off the check, create `~/.config/namedrop/settings.json` with this conte
 ```json
 {"check_for_updates": false}
 ```
+
+Agent-status summaries and persona suggestions run `claude` with the environment of the Rex server. To use another Claude Code account for them, add `claude_command` to the same file. Set it to a program name on the server's `PATH` or an absolute path, such as a launcher that selects another Claude Code account:
+
+```json
+{"check_for_updates": false, "claude_command": "claude-personal"}
+```
+
+Doctor then shows `ND-MODEL-002` with the program it found. [Settings](rex-reference.md#settings) gives the rules.
 
 On a Mac without the developer tools, the check does not run, because Apple's `/usr/bin/python3` and `/usr/bin/git` only offer to install them. Run `xcode-select --install` to turn the check on. [Updates](rex-reference.md#updates) gives the full rules.
 
