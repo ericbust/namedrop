@@ -162,7 +162,26 @@ enum Lock {
     Forget,
 }
 
-fn lock(path: &Path, mode: Lock) -> Option<File> {
+/// An open memory file under its lock. Unlocking explicitly on drop frees the
+/// lock at once: closing would not while a child this process is spawning
+/// still holds a copy of the descriptor between its fork and exec.
+struct Locked(File);
+
+impl std::ops::Deref for Locked {
+    type Target = File;
+
+    fn deref(&self) -> &File {
+        &self.0
+    }
+}
+
+impl Drop for Locked {
+    fn drop(&mut self) {
+        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
+fn lock(path: &Path, mode: Lock) -> Option<Locked> {
     if mode == Lock::Record {
         fs::DirBuilder::new()
             .recursive(true)
@@ -186,7 +205,7 @@ fn lock(path: &Path, mode: Lock) -> Option<File> {
         Lock::Record => libc::LOCK_EX | libc::LOCK_NB,
         Lock::Forget => libc::LOCK_EX,
     };
-    (unsafe { libc::flock(file.as_raw_fd(), operation) } == 0).then_some(file)
+    (unsafe { libc::flock(file.as_raw_fd(), operation) } == 0).then_some(Locked(file))
 }
 
 fn read(file: &File) -> Shown {
