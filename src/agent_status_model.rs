@@ -356,7 +356,13 @@ pub(crate) enum ClaudeSource {
 /// else `claude` on `PATH`. A value that cannot run and a setting that
 /// cannot be read are errors, never plain `claude`, which could sign in to
 /// another account.
-pub(crate) fn claude_program(state: &Path) -> Result<(OsString, ClaudeSource), String> {
+///
+/// `roots` locate the settings files: this process's own for a worker, and
+/// the runtime's for Doctor.
+pub(crate) fn claude_program(
+    state: &Path,
+    roots: &crate::update_check::ConfigRoots,
+) -> Result<(OsString, ClaudeSource), String> {
     if let Some(value) = env::var_os(CLAUDE_OVERRIDE) {
         let value = value
             .into_string()
@@ -364,7 +370,7 @@ pub(crate) fn claude_program(state: &Path) -> Result<(OsString, ClaudeSource), S
         return locate(CLAUDE_OVERRIDE, &value)
             .map(|program| (program.into_os_string(), ClaudeSource::Override));
     }
-    let setting = crate::update_check::claude_command(state)?;
+    let setting = crate::update_check::claude_command(state, roots)?;
     match setting.command {
         Some(command) => locate("claude_command", &command).map(|program| {
             (
@@ -888,7 +894,8 @@ fn claude_plan(
             "a test must name its fake Claude Code in {CLAUDE_OVERRIDE}"
         ));
     }
-    let mut command = Command::new(claude_program(state)?.0);
+    let mut command =
+        Command::new(claude_program(state, &crate::update_check::ConfigRoots::environment())?.0);
     let directory = reserve_worker_directory()?;
     command
         .args(["--print", "--model", CLAUDE_MODEL])

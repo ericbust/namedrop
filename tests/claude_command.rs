@@ -236,6 +236,54 @@ fn claude_command_picks_the_program_for_namedrops_own_claude_calls() {
     assert_eq!(ran, "", "XDG_CONFIG_HOME");
     unsafe { env::remove_var("XDG_CONFIG_HOME") };
 
+    // A value set differently in both files fails, and says how to settle it.
+    f.write_settings(&herdr, r#"{"claude_command":"claude-personal"}"#);
+    f.write_settings(
+        &standalone,
+        &format!(r#"{{"claude_command":"{}"}}"#, launcher.display()),
+    );
+    let (result, ran) = f.suggest();
+    let error = result.expect_err("claude_command set differently in both files");
+    assert!(
+        error.contains(&format!(
+            "claude_command is set in {} and in {}, which this install reads, to different programs; make them match, or remove it from {}",
+            standalone.display(),
+            herdr.display(),
+            standalone.display()
+        )),
+        "{error}"
+    );
+    assert_eq!(ran, "", "a conflicting claude_command must run nothing");
+    // A file this install does not read that cannot be parsed might set it,
+    // so nothing runs.
+    f.write_settings(&standalone, r#"{"claude_command":"claude-personal",}"#);
+    let (result, ran) = f.suggest();
+    let error = result.expect_err("an unreadable unread file");
+    assert!(
+        error.contains(&format!(
+            "{} is invalid, so Namedrop cannot tell whether it sets claude_command",
+            standalone.display()
+        )),
+        "{error}"
+    );
+    assert_eq!(ran, "", "an unreadable unread file must run nothing");
+    fs::remove_file(&standalone).unwrap();
+    // A settings link that leads nowhere is not a missing file, whichever
+    // file it is.
+    for link in [&herdr, &standalone] {
+        let _ = fs::remove_file(link);
+        std::os::unix::fs::symlink(f.root.0.join("nowhere.json"), link).unwrap();
+        let (result, ran) = f.suggest();
+        let error = result.expect_err("a dangling settings link");
+        assert!(
+            error.contains(&format!("{} is invalid", link.display())),
+            "{error}"
+        );
+        assert_eq!(ran, "", "a dangling settings link must run nothing");
+        fs::remove_file(link).unwrap();
+    }
+    f.write_settings(&herdr, r#"{"claude_command":"claude-personal"}"#);
+
     // An owner that cannot be read leaves the file unknown, so nothing runs.
     fs::create_dir_all(f.state.join("runtime")).unwrap();
     fs::write(f.state.join("runtime/owner"), "bogus\n").unwrap();

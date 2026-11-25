@@ -12,8 +12,10 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-/// A state directory no test creates, so the synthetic probe runs `claude`
-/// unless `NAMEDROP_AGENT_STATUS_CLAUDE_BIN` names another program.
+/// A state directory no test creates. The synthetic probe requires
+/// `NAMEDROP_AGENT_STATUS_CLAUDE_BIN` for Claude Code, which then takes the
+/// place of every settings file, so it bills only the account that program
+/// selects.
 const STATE: &str = "/nonexistent/namedrop-test-state";
 static NEXT: AtomicU64 = AtomicU64::new(1);
 
@@ -427,6 +429,10 @@ fn synthetic_worker_reliability_probe() {
     assert_eq!(env::var("NAMEDROP_VERIFY_LIVE").as_deref(), Ok("1"));
     let host = env::var("NAMEDROP_VERIFY_HOST").unwrap();
     assert!(matches!(host.as_str(), "claude" | "codex"));
+    assert!(
+        host == "codex" || env::var_os("NAMEDROP_AGENT_STATUS_CLAUDE_BIN").is_some(),
+        "name the Claude Code program to run, and so its account, in NAMEDROP_AGENT_STATUS_CLAUDE_BIN"
+    );
     let dense = env::var("NAMEDROP_VERIFY_DENSE").as_deref() == Ok("1");
     let mut panes = Vec::new();
     for index in 0..4 {

@@ -483,7 +483,15 @@ where
             )));
         }
     }
-    issues.push(claude_program_issue(runtime.state_directory));
+    // The runtime's own directories, which are this process's in production,
+    // so a test's Doctor never reads the machine's settings.
+    issues.push(claude_program_issue(
+        runtime.state_directory,
+        &crate::update_check::ConfigRoots::new(
+            runtime.home_directory.map(std::path::Path::to_owned),
+            runtime.agent_config.config.map(std::path::Path::to_owned),
+        ),
+    ));
     match crate::update_check::settings(runtime.state_directory) {
         Err(error) => {
             let path = crate::update_check::settings_path(runtime.state_directory).ok();
@@ -1684,7 +1692,10 @@ fn shared_app_server_issue(
 
 /// Which program Namedrop's own Claude Code calls run, so a person can check
 /// which Claude Code account they use.
-fn claude_program_issue(state: &std::path::Path) -> HealthIssue {
+fn claude_program_issue(
+    state: &std::path::Path,
+    roots: &crate::update_check::ConfigRoots,
+) -> HealthIssue {
     use crate::agent_status_model::{ClaudeSource, claude_program, find_on_path};
     const CALLS: &str = "Agent-status summaries, persona suggestions, and channel routing";
     let runs = |program: &std::ffi::OsStr| {
@@ -1693,7 +1704,7 @@ fn claude_program_issue(state: &std::path::Path) -> HealthIssue {
             std::path::Path::new(program).display()
         )
     };
-    let (summary, explanation, file) = match claude_program(state) {
+    let (summary, explanation, file) = match claude_program(state, roots) {
         Ok((program, ClaudeSource::Override)) => (
             runs(&program),
             format!(
@@ -1731,9 +1742,13 @@ fn claude_program_issue(state: &std::path::Path) -> HealthIssue {
                 HealthRepairKind::HumanDecision,
                 "Fix claude_command or the Namedrop settings file that holds it, then run Doctor again. Namedrop never runs claude in its place.",
             );
-            failed.diagnostic = serde_json::json!({
-                "path": crate::update_check::settings_path(state).ok(),
-            });
+            // The file to fix: the owner's when it cannot be read.
+            let path = if crate::installed_runtime::standalone(state).is_err() {
+                Some(state.join("runtime/owner"))
+            } else {
+                crate::update_check::settings_path_in(state, roots).ok()
+            };
+            failed.diagnostic = serde_json::json!({"path": path});
             return failed;
         }
     };

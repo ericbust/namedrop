@@ -661,6 +661,42 @@ fn a_direct_and_a_linked_account_through_a_linked_home_share_one_file() {
     }
 }
 
+/// A record written before settings paths were resolved names the file
+/// through a `HOME` that is itself a link. Doctor and activation still take
+/// it for the same file.
+#[test]
+fn a_record_that_names_the_file_through_a_linked_home_still_matches() {
+    let mut f = Fixture::new();
+    let linked_home = f.root.join("linked-home");
+    std::os::unix::fs::symlink(&f.home, &linked_home).unwrap();
+    f.home = linked_home;
+    f.claude = f.home.join(".claude");
+    fs::write(
+        f.settings(),
+        json!({"permissions":{"allow":["Read"]}}).to_string(),
+    )
+    .unwrap();
+    f.activate();
+    let record_path = f.root.join("claude-permissions.json");
+    let mut record: Value =
+        serde_json::from_str(&fs::read_to_string(&record_path).unwrap()).unwrap();
+    assert_ne!(record["settings_path"], json!(f.settings()), "{record}");
+    record["settings_path"] = json!(f.settings());
+    fs::write(&record_path, record.to_string()).unwrap();
+    assert!(
+        !f.doctor().issues.iter().any(
+            |issue| issue.code != "ND-MODEL-002" && issue.explanation.contains("settings.json")
+        ),
+        "Doctor must take the recorded path for the same file"
+    );
+    let result = f.activate();
+    let permissions = &result["integration_packages"]["claude-code"]["permissions"];
+    assert_eq!(permissions["current"], true, "{result}");
+    let mut expected = vec![json!("Read")];
+    expected.extend(f.expected());
+    assert_eq!(f.read()["permissions"]["allow"], json!(expected));
+}
+
 #[test]
 fn settings_links_outside_home_dangling_or_to_a_directory_are_refused_untouched() {
     for case in ["directory outside HOME", "dangling", "to a directory"] {

@@ -273,6 +273,59 @@ fn doctor_names_the_claude_command_namedrop_runs() {
         )),
         "{misplaced:?}"
     );
+    // And a settings file that exists but cannot be read: one that does not
+    // parse, and a link that leads nowhere.
+    fs::write(&standalone, r#"{"claude_command":"claude-personal",}"#).unwrap();
+    let unreadable = claude(&diagnose_collaboration(&f.runtime())).unwrap();
+    assert_eq!(
+        unreadable.severity,
+        HealthSeverity::Notice,
+        "{unreadable:?}"
+    );
+    assert!(
+        unreadable
+            .explanation
+            .contains("is invalid, so Namedrop cannot tell"),
+        "{unreadable:?}"
+    );
+    fs::remove_file(&standalone).unwrap();
+    std::os::unix::fs::symlink(f.home.join("nowhere.json"), &path).unwrap();
+    let dangling = claude(&diagnose_collaboration(&f.runtime())).unwrap();
+    assert_eq!(dangling.severity, HealthSeverity::Notice, "{dangling:?}");
+    assert!(
+        dangling
+            .explanation
+            .contains(&format!("{} is invalid", path.display())),
+        "{dangling:?}"
+    );
+}
+
+/// Doctor reads the settings under the runtime's home, which is this
+/// process's own in production. A test's Doctor therefore never reads the
+/// machine's settings, which could otherwise turn its status.
+#[test]
+fn doctor_reads_claude_settings_under_the_runtimes_home() {
+    let f = Fixture::new();
+    let machine = f.root.join("machine-home");
+    if update_profile::isolate(&f.root, &machine) {
+        return;
+    }
+    f.register();
+    for broken in [
+        machine.join(".config/herdr/plugins/config/namedrop/settings.json"),
+        machine.join(".config/namedrop/settings.json"),
+    ] {
+        fs::create_dir_all(broken.parent().unwrap()).unwrap();
+        fs::write(&broken, "{").unwrap();
+    }
+    let report = diagnose_collaboration(&f.runtime());
+    let claude = report
+        .issues
+        .iter()
+        .find(|issue| issue.code == "ND-MODEL-002")
+        .unwrap();
+    assert_eq!(claude.severity, HealthSeverity::Info, "{claude:?}");
+    assert_eq!(report.status, HealthStatus::Healthy, "{report:?}");
 }
 
 /// The U10 review's F5: an owner that is not `standalone` or `herdr`, an
@@ -342,6 +395,23 @@ fn doctor_keeps_herdrs_settings_and_notice_under_an_invalid_owner() {
                 ]
                 .map(str::to_owned)[..]
             ),
+            "{label}"
+        );
+        // Namedrop's own Claude Code calls cannot tell which file applies, and
+        // Doctor points at the owner, not at a settings file.
+        let claude = diagnose_collaboration(&f.runtime())
+            .issues
+            .into_iter()
+            .find(|issue| issue.code == "ND-MODEL-002")
+            .unwrap();
+        assert_eq!(
+            claude.severity,
+            HealthSeverity::Notice,
+            "{label}: {claude:?}"
+        );
+        assert_eq!(
+            claude.diagnostic["path"],
+            owner.to_string_lossy().as_ref(),
             "{label}"
         );
         fs::write(&herdr, "{").unwrap();

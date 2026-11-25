@@ -43,21 +43,52 @@ fn standalone(state: &Path) -> bool {
 /// Herdr's settings file, under its config directory.
 const HERDR_SETTINGS: &str = "herdr/plugins/config/namedrop/settings.json";
 
+/// The directories one process finds its settings under: `HOME` and an
+/// absolute `XDG_CONFIG_HOME`.
+pub(crate) struct ConfigRoots {
+    home: Option<PathBuf>,
+    config: Option<PathBuf>,
+}
+
+impl ConfigRoots {
+    /// This process's own.
+    pub(crate) fn environment() -> Self {
+        Self::new(
+            env::var_os("HOME").map(PathBuf::from),
+            env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
+        )
+    }
+
+    pub(crate) fn new(home: Option<PathBuf>, config: Option<PathBuf>) -> Self {
+        Self {
+            home,
+            config: config.filter(|path| path.is_absolute()),
+        }
+    }
+
+    fn absolute_home(&self) -> Option<&Path> {
+        self.home.as_deref().filter(|path| path.is_absolute())
+    }
+}
+
 pub(crate) fn settings_path(state: &Path) -> Result<PathBuf, String> {
+    settings_path_in(state, &ConfigRoots::environment())
+}
+
+pub(crate) fn settings_path_in(state: &Path, roots: &ConfigRoots) -> Result<PathBuf, String> {
     if standalone(state) {
-        return env::var_os("HOME")
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute())
+        return roots
+            .absolute_home()
             .map(|home| home.join(".config/namedrop/settings.json"))
             .ok_or(
                 "Namedrop cannot locate its standalone update settings without an absolute HOME"
                     .into(),
             );
     }
-    let directory = env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+    let directory = roots
+        .config
+        .clone()
+        .or_else(|| roots.home.as_ref().map(|home| home.join(".config")))
         .ok_or("Namedrop cannot locate its update settings without HOME or XDG_CONFIG_HOME")?;
     Ok(directory.join(HERDR_SETTINGS))
 }
@@ -95,54 +126,86 @@ pub(crate) struct ClaudeCommand {
     pub command: Option<String>,
 }
 
-/// The `claude_command` setting this install reads.
+/// The `claude_command` setting this install reads, from the settings files
+/// under `roots`.
 ///
 /// It decides which Claude Code account Namedrop's own calls use, so where
-/// the update check falls back to Herdr's file, this fails: an owner that
-/// cannot be read, a file that cannot be read, and a `claude_command` that
-/// only a settings file this install does not read sets are each an error,
+/// the update check falls back to Herdr's file or to `true`, this fails: an
+/// owner that cannot be read, a known settings file that exists but cannot
+/// be read, including a link that leads nowhere, and a `claude_command` that
+/// a file this install does not read sets differently are each an error,
 /// never `claude`.
-pub(crate) fn claude_command(state: &Path) -> Result<ClaudeCommand, String> {
+pub(crate) fn claude_command(state: &Path, roots: &ConfigRoots) -> Result<ClaudeCommand, String> {
     crate::installed_runtime::standalone(state).map_err(|error| {
         format!("Namedrop cannot tell which settings.json this install reads: {error}")
     })?;
-    let file = settings_path(state)?;
-    let command = read_settings(&file)
-        .map_err(|error| format!("{} is invalid: {error}", file.display()))?
-        .claude_command;
-    for other in unread_settings_paths(&file) {
+    let file = settings_path_in(state, roots)?;
+    let command = match present(&file)? {
+        false => None,
+        true => {
+            read_json::<Settings>(&file)
+                .map_err(|error| format!("{} is invalid: {error}", file.display()))?
+                .claude_command
+        }
+    };
+    for other in unread_settings_paths(&file, roots) {
+        if !present(&other)? {
+            continue;
+        }
         let set = read_json::<Value>(&other)
-            .ok()
-            .and_then(|value| value.get("claude_command").cloned());
-        if set.is_some_and(|set| command.as_ref().is_none_or(|command| set != *command)) {
-            return Err(format!(
-                "claude_command is set in {}, but this install reads {}; move it to {}",
-                other.display(),
-                file.display(),
-                file.display()
-            ));
+            .map_err(|error| {
+                format!(
+                    "{} is invalid, so Namedrop cannot tell whether it sets claude_command: {error}",
+                    other.display()
+                )
+            })?
+            .get("claude_command")
+            .cloned();
+        match (set, &command) {
+            (Some(_), None) => {
+                return Err(format!(
+                    "claude_command is set in {}, but this install reads {}; move it to {}",
+                    other.display(),
+                    file.display(),
+                    file.display()
+                ));
+            }
+            (Some(set), Some(command)) if set != *command => {
+                return Err(format!(
+                    "claude_command is set in {} and in {}, which this install reads, to different programs; make them match, or remove it from {}",
+                    other.display(),
+                    file.display(),
+                    other.display()
+                ));
+            }
+            _ => {}
         }
     }
     Ok(ClaudeCommand { file, command })
 }
 
+/// Whether anything is at `path`, a link that leads nowhere included.
+fn present(path: &Path) -> Result<bool, String> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!("{} cannot be inspected: {error}", path.display())),
+    }
+}
+
 /// The settings files a person may have edited for this install that it
 /// does not read: the standalone file, and Herdr's under `XDG_CONFIG_HOME`
 /// and under `~/.config`.
-fn unread_settings_paths(read: &Path) -> Vec<PathBuf> {
-    let home = env::var_os("HOME")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute());
+fn unread_settings_paths(read: &Path, roots: &ConfigRoots) -> Vec<PathBuf> {
+    let home = roots.absolute_home();
     let mut paths = Vec::new();
     for path in [
-        home.as_ref()
-            .map(|home| home.join(".config/namedrop/settings.json")),
-        env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute())
+        home.map(|home| home.join(".config/namedrop/settings.json")),
+        roots
+            .config
+            .as_ref()
             .map(|config| config.join(HERDR_SETTINGS)),
-        home.as_ref()
-            .map(|home| home.join(".config").join(HERDR_SETTINGS)),
+        home.map(|home| home.join(".config").join(HERDR_SETTINGS)),
     ]
     .into_iter()
     .flatten()
