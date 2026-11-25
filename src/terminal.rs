@@ -245,10 +245,13 @@ pub(crate) fn ancestor_pids(pid: u32) -> impl Iterator<Item = u32> {
     std::iter::successors(parent_pid(pid), |pid| parent_pid(*pid)).take(1024)
 }
 
-/// The pids Herdr reports in a pane's foreground process group, or `None` when
-/// Herdr does not answer.
+/// The pids the host reports in a pane's foreground process group, or `None`
+/// when it names no foreground group. Unlike the shell checks, this needs no
+/// shell: a Rex block can run an agent as its own program, with none.
 pub(crate) fn foreground_process_ids(mux: &impl MuxRead, pane_id: &str) -> Option<Vec<u32>> {
-    process_info(mux, pane_id).map(|info| info.foreground_pids)
+    let process = mux.process(&PaneId::new(pane_id)).ok()?;
+    process.foreground_group?;
+    Some(process.foreground_pids)
 }
 
 /// A process's argv, or `None` when the process is gone or unreadable.
