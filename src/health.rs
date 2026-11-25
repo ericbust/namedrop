@@ -483,6 +483,7 @@ where
             )));
         }
     }
+    issues.push(claude_program_issue(runtime.state_directory));
     match crate::update_check::settings(runtime.state_directory) {
         Err(error) => {
             let path = crate::update_check::settings_path(runtime.state_directory).ok();
@@ -538,37 +539,6 @@ where
             }
         }
     }
-    // Only a set or unreadable `claude_command` is reported: without one,
-    // Claude Code calls run `claude` as they always have.
-    let claude = match crate::agent_status_model::claude_command(runtime.state_directory) {
-        Ok(None) => None,
-        Ok(Some(program)) => Some((
-            format!(
-                "Namedrop's own Claude Code calls run {}.",
-                program.display()
-            ),
-            "Summaries, persona suggestions, and channel routing use this program from claude_command in settings.json.".to_owned(),
-        )),
-        Err(error) => Some((
-            "Namedrop's own Claude Code calls cannot run.".to_owned(),
-            format!("Summaries, persona suggestions, and channel routing fail until you fix it: {error}"),
-        )),
-    };
-    if let Some((summary, explanation)) = claude {
-        let mut claude_issue = issue(
-            "ND-MODEL-002",
-            HealthSeverity::Info,
-            &summary,
-            &explanation,
-            HealthRepairKind::HumanDecision,
-            "Set claude_command in the Namedrop settings file to a program name on PATH or an absolute path.",
-        );
-        claude_issue.diagnostic = serde_json::json!({
-            "path": crate::update_check::settings_path(runtime.state_directory).ok(),
-        });
-        issues.push(claude_issue);
-    }
-
     let served = crate::codex_app_server::served_codex_panes(runtime, &setup.panes);
     if let Some(served) = &served {
         issues.push(shared_app_server_issue(
@@ -1710,6 +1680,73 @@ fn shared_app_server_issue(
         "workspace_id": space_id,
     });
     shared
+}
+
+/// Which program Namedrop's own Claude Code calls run, so a person can check
+/// which Claude Code account they use.
+fn claude_program_issue(state: &std::path::Path) -> HealthIssue {
+    use crate::agent_status_model::{ClaudeSource, claude_program, find_on_path};
+    const CALLS: &str = "Agent-status summaries, persona suggestions, and channel routing";
+    let runs = |program: &std::ffi::OsStr| {
+        format!(
+            "Namedrop's own Claude Code calls run {}.",
+            std::path::Path::new(program).display()
+        )
+    };
+    let (summary, explanation, file) = match claude_program(state) {
+        Ok((program, ClaudeSource::Override)) => (
+            runs(&program),
+            format!(
+                "{CALLS} run the program that NAMEDROP_AGENT_STATUS_CLAUDE_BIN names, not claude_command."
+            ),
+            None,
+        ),
+        Ok((program, ClaudeSource::Setting(file))) => (
+            runs(&program),
+            format!(
+                "{CALLS} run the program that claude_command names in {}.",
+                file.display()
+            ),
+            Some(file),
+        ),
+        Ok((_, ClaudeSource::Default)) => (
+            match find_on_path("claude") {
+                Some(path) => runs(path.as_os_str()),
+                None => {
+                    "Namedrop's own Claude Code calls run claude, which is not on Doctor's PATH."
+                        .to_owned()
+                }
+            },
+            format!(
+                "{CALLS} run claude from PATH, because the Namedrop settings file sets no claude_command."
+            ),
+            None,
+        ),
+        Err(error) => {
+            let mut failed = issue(
+                "ND-MODEL-002",
+                HealthSeverity::Notice,
+                "Namedrop's own Claude Code calls cannot run.",
+                &format!("{CALLS} fail until you fix it: {error}"),
+                HealthRepairKind::HumanDecision,
+                "Fix claude_command or the Namedrop settings file that holds it, then run Doctor again. Namedrop never runs claude in its place.",
+            );
+            failed.diagnostic = serde_json::json!({
+                "path": crate::update_check::settings_path(state).ok(),
+            });
+            return failed;
+        }
+    };
+    let mut reported = issue(
+        "ND-MODEL-002",
+        HealthSeverity::Info,
+        &summary,
+        &explanation,
+        HealthRepairKind::HumanDecision,
+        "To run another program, such as a launcher that selects another Claude Code account, set claude_command in the Namedrop settings file to its name on PATH or its absolute path.",
+    );
+    reported.diagnostic = serde_json::json!({"path": file});
+    reported
 }
 
 fn issue(

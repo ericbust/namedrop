@@ -338,56 +338,75 @@ fn digest(input: &WorkerInput, model: &str) -> String {
     crate::lower_hex(&hasher.finalize())
 }
 
-/// The program for Namedrop's own Claude Code calls: a fake CLI a test names
-/// in `NAMEDROP_AGENT_STATUS_CLAUDE_BIN`, as `HERDR_BIN_PATH` names a fake
-/// Herdr, else the `claude_command` setting, else `claude` on `PATH`. A
-/// setting that cannot be read or run is an error, never plain `claude`,
-/// which could sign in to another account.
-fn claude_binary(state: &Path) -> Result<OsString, String> {
-    if let Some(binary) = env::var_os("NAMEDROP_AGENT_STATUS_CLAUDE_BIN") {
-        return Ok(binary);
-    }
-    Ok(claude_command(state)?.map_or_else(|| "claude".into(), PathBuf::into_os_string))
+/// Names a fake Claude Code for tests, as `HERDR_BIN_PATH` names a fake Herdr.
+const CLAUDE_OVERRIDE: &str = "NAMEDROP_AGENT_STATUS_CLAUDE_BIN";
+
+/// Where the program for Namedrop's own Claude Code calls comes from.
+pub(crate) enum ClaudeSource {
+    /// `NAMEDROP_AGENT_STATUS_CLAUDE_BIN`.
+    Override,
+    /// `claude_command` in this settings file.
+    Setting(PathBuf),
+    /// `claude`, since the settings file sets no `claude_command`.
+    Default,
 }
 
-/// The program the `claude_command` setting names, found as the worker will
-/// run it, or none when the setting is absent.
-pub(crate) fn claude_command(state: &Path) -> Result<Option<PathBuf>, String> {
-    let Some(command) = crate::update_check::claude_command(state)
-        .map_err(|error| format!("Namedrop's settings.json is invalid: {error}"))?
-    else {
-        return Ok(None);
-    };
-    let executable = |path: &Path| {
-        fs::metadata(path)
-            .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
-    };
-    if command.trim().is_empty() {
-        return Err("claude_command in settings.json is empty".to_owned());
+/// The program for Namedrop's own Claude Code calls:
+/// `NAMEDROP_AGENT_STATUS_CLAUDE_BIN`, else the `claude_command` setting,
+/// else `claude` on `PATH`. A value that cannot run and a setting that
+/// cannot be read are errors, never plain `claude`, which could sign in to
+/// another account.
+pub(crate) fn claude_program(state: &Path) -> Result<(OsString, ClaudeSource), String> {
+    if let Some(value) = env::var_os(CLAUDE_OVERRIDE) {
+        let value = value
+            .into_string()
+            .map_err(|_| format!("{CLAUDE_OVERRIDE} is not valid UTF-8"))?;
+        return locate(CLAUDE_OVERRIDE, &value)
+            .map(|program| (program.into_os_string(), ClaudeSource::Override));
     }
-    let path = PathBuf::from(&command);
+    let setting = crate::update_check::claude_command(state)?;
+    match setting.command {
+        Some(command) => locate("claude_command", &command).map(|program| {
+            (
+                program.into_os_string(),
+                ClaudeSource::Setting(setting.file),
+            )
+        }),
+        None => Ok(("claude".into(), ClaudeSource::Default)),
+    }
+}
+
+/// The executable `value` names, found as the worker will run it: an
+/// absolute path, or a name on `PATH`. `name` is where the value came from.
+fn locate(name: &str, value: &str) -> Result<PathBuf, String> {
+    if value.trim().is_empty() {
+        return Err(format!("{name} is empty"));
+    }
+    let path = PathBuf::from(value);
     if path.is_absolute() {
         return if executable(&path) {
-            Ok(Some(path))
+            Ok(path)
         } else {
-            Err(format!(
-                "claude_command {command} is not an executable file"
-            ))
+            Err(format!("{name} {value} is not an executable file"))
         };
     }
-    if command.contains('/') {
+    if value.contains('/') {
         return Err(format!(
-            "claude_command {command} must be a program name or an absolute path"
+            "{name} {value} must be a program name or an absolute path"
         ));
     }
-    env::var_os("PATH")
-        .and_then(|paths| {
-            env::split_paths(&paths)
-                .map(|directory| directory.join(&command))
-                .find(|candidate| candidate.is_absolute() && executable(candidate))
-        })
-        .map(Some)
-        .ok_or_else(|| format!("claude_command {command} is not on PATH"))
+    find_on_path(value).ok_or_else(|| format!("{name} {value} is not on PATH"))
+}
+
+/// The first executable file named `name` in a directory of `PATH`.
+pub(crate) fn find_on_path(name: &str) -> Option<PathBuf> {
+    env::split_paths(&env::var_os("PATH")?)
+        .map(|directory| directory.join(name))
+        .find(|candidate| candidate.is_absolute() && executable(candidate))
+}
+
+fn executable(path: &Path) -> bool {
+    fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
 }
 
 fn codex_binary() -> String {
@@ -861,7 +880,15 @@ fn claude_plan(
     payload: &str,
     structured: bool,
 ) -> Result<WorkerPlan, String> {
-    let mut command = Command::new(claude_binary(state)?);
+    // A unit test that forgot its fake would otherwise run whatever this
+    // machine's settings name.
+    #[cfg(test)]
+    if env::var_os(CLAUDE_OVERRIDE).is_none() {
+        return Err(format!(
+            "a test must name its fake Claude Code in {CLAUDE_OVERRIDE}"
+        ));
+    }
+    let mut command = Command::new(claude_program(state)?.0);
     let directory = reserve_worker_directory()?;
     command
         .args(["--print", "--model", CLAUDE_MODEL])
@@ -1473,6 +1500,23 @@ fn store(key: String, summary: &Value) {
 #[cfg(test)]
 mod response_tests {
     use super::*;
+
+    /// A unit test's Claude Code worker never reads this machine's settings,
+    /// so it cannot run, or bill, the account they name.
+    #[test]
+    fn a_unit_test_worker_without_a_fake_claude_code_fails() {
+        if env::var_os(CLAUDE_OVERRIDE).is_some() {
+            return;
+        }
+        let prompt = WorkerPrompt {
+            instructions: STATUS_INSTRUCTIONS,
+            schema: status_schema(),
+        };
+        let error = claude_plan(Path::new("/nonexistent/state"), &prompt, "{}", true)
+            .err()
+            .expect("no plan without a fake Claude Code");
+        assert!(error.contains(CLAUDE_OVERRIDE), "{error}");
+    }
 
     #[test]
     fn a_failure_is_told_by_its_last_line() {

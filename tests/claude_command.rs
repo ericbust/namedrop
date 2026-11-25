@@ -139,7 +139,7 @@ fn claude_command_picks_the_program_for_namedrops_own_claude_calls() {
     for (settings, reason) in [
         (
             r#"{"claude_command":""}"#.to_owned(),
-            "claude_command in settings.json is empty",
+            "claude_command is empty",
         ),
         (
             r#"{"claude_command":"missing-launcher"}"#.to_owned(),
@@ -165,6 +165,10 @@ fn claude_command_picks_the_program_for_namedrops_own_claude_calls() {
             "settings.json is invalid",
         ),
         (
+            r#"{"claude_command":null}"#.to_owned(),
+            "settings.json is invalid",
+        ),
+        (
             r#"{"claude_command":["claude-personal"]}"#.to_owned(),
             "settings.json is invalid",
         ),
@@ -177,23 +181,74 @@ fn claude_command_picks_the_program_for_namedrops_own_claude_calls() {
         assert_eq!(ran, "", "{settings} must run nothing");
     }
 
-    // The test hook wins over the setting.
+    // The test hook wins over the setting, and is checked the same way.
     f.write_settings(&herdr, r#"{"claude_command":"claude-personal"}"#);
-    // Safety: as in `Fixture::new`.
-    unsafe {
-        env::set_var(
-            "NAMEDROP_AGENT_STATUS_CLAUDE_BIN",
-            f.root.0.join("bin/override"),
-        )
+    let hook = |value: &Path| {
+        // Safety: as in `Fixture::new`.
+        unsafe { env::set_var("NAMEDROP_AGENT_STATUS_CLAUDE_BIN", value) };
+        let suggested = f.suggest();
+        unsafe { env::remove_var("NAMEDROP_AGENT_STATUS_CLAUDE_BIN") };
+        suggested
     };
-    assert_eq!(f.suggest().1, "override\n", "the test hook");
-    unsafe { env::remove_var("NAMEDROP_AGENT_STATUS_CLAUDE_BIN") };
+    assert_eq!(
+        hook(&f.root.0.join("bin/override")).1,
+        "override\n",
+        "the test hook"
+    );
+    let (result, ran) = hook(&f.root.0.join("bin/missing"));
+    let error = result.expect_err("a missing test hook program");
+    assert!(
+        error.contains("NAMEDROP_AGENT_STATUS_CLAUDE_BIN")
+            && error.contains("is not an executable file"),
+        "{error}"
+    );
+    assert_eq!(ran, "", "a missing test hook program must run nothing");
+
+    // A claude_command only in a file this install does not read fails, and
+    // names both files.
+    let standalone = f.root.0.join("home/.config/namedrop/settings.json");
+    fs::remove_file(&herdr).unwrap();
+    f.write_settings(&standalone, r#"{"claude_command":"claude-personal"}"#);
+    let (result, ran) = f.suggest();
+    let error = result.expect_err("a claude_command in the unread file");
+    assert!(
+        error.contains(&format!(
+            "claude_command is set in {}, but this install reads {}; move it to",
+            standalone.display(),
+            herdr.display()
+        )),
+        "{error}"
+    );
+    assert_eq!(ran, "", "an unread claude_command must run nothing");
+    // The same value in both files is no conflict.
+    f.write_settings(&herdr, r#"{"claude_command":"claude-personal"}"#);
+    assert_eq!(f.suggest().1, "claude-personal\n", "the same value in both");
+    fs::remove_file(&standalone).unwrap();
+    // Herdr's file under `~/.config` while this process reads `XDG_CONFIG_HOME`.
+    unsafe { env::set_var("XDG_CONFIG_HOME", f.root.0.join("xdg")) };
+    let (result, ran) = f.suggest();
+    let error = result.expect_err("a claude_command beside XDG_CONFIG_HOME");
+    assert!(error.contains("claude_command is set in"), "{error}");
+    assert!(
+        error.contains(&f.root.0.join("xdg").display().to_string()),
+        "{error}"
+    );
+    assert_eq!(ran, "", "XDG_CONFIG_HOME");
+    unsafe { env::remove_var("XDG_CONFIG_HOME") };
+
+    // An owner that cannot be read leaves the file unknown, so nothing runs.
+    fs::create_dir_all(f.state.join("runtime")).unwrap();
+    fs::write(f.state.join("runtime/owner"), "bogus\n").unwrap();
+    let (result, ran) = f.suggest();
+    let error = result.expect_err("an unreadable owner");
+    assert!(error.contains("cannot tell which settings.json"), "{error}");
+    assert_eq!(ran, "", "an unreadable owner must run nothing");
 
     // An install that `install.sh` made reads its own settings file.
-    fs::create_dir_all(f.state.join("runtime")).unwrap();
+    fs::remove_file(&herdr).unwrap();
     fs::write(f.state.join("runtime/owner"), "standalone\n").unwrap();
     f.write_settings(
-        &f.root.0.join("home/.config/namedrop/settings.json"),
+        &standalone,
         &format!(r#"{{"claude_command":"{}"}}"#, launcher.display()),
     );
     assert_eq!(f.suggest().1, "launcher\n", "standalone");

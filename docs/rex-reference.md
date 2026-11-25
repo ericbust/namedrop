@@ -171,14 +171,21 @@ When Rex loads the module, it also starts `namedrop rex ensure --from-server`, w
 
 ## Settings
 
-The settings file is the one [Updates](#updates) names. It holds two settings.
+The settings file is the one [Updates](#updates) names: `~/.config/namedrop/settings.json` for an install that `install.sh` made, and Herdr's file when Herdr owns the install, as after `install.sh` adopts Herdr's install. It holds two settings.
 
 | Setting | Value |
 |---|---|
 | `check_for_updates` | `true` or `false`. [Updates](#updates) gives the rules |
 | `claude_command` | The program Namedrop runs for its own Claude Code calls: agent-status summaries, persona suggestions and channel routing. It is a program name, looked up on the `PATH` of the Rex server, or an absolute path, with no arguments. Without it, Namedrop runs `claude`. Namedrop gives the program the arguments it gives `claude`, so a launcher must pass them on |
 
-When `claude_command` names no executable file, is not a string, or the file is invalid, Namedrop's Claude Code calls fail with the reason. They never run `claude` instead. Doctor reports `ND-MODEL-002`. Codex calls have no such setting: their sandbox lets exactly one Codex executable run, so a launcher script cannot start Codex.
+Namedrop's Claude Code calls fail with the reason, and never run `claude` instead, when:
+
+- `claude_command` names no executable file, or is not a string. `null` is not a string.
+- The settings file is invalid.
+- Namedrop cannot read the install's owner, so it cannot tell which file applies.
+- The other settings file sets `claude_command`, and the file the install reads does not set it to the same value. The reason names both files.
+
+`NAMEDROP_AGENT_STATUS_CLAUDE_BIN`, which tests use, takes the place of `claude_command`, by the same rules. Doctor reports `ND-MODEL-002`. Codex calls have no such setting: their sandbox lets exactly one Codex executable run, so a launcher script cannot start Codex.
 
 ## One machine with Herdr and Rex
 
@@ -372,14 +379,14 @@ Doctor on Rex reports `ND-INTEGRATION-003` when an installed Codex or Claude Cod
 
 ### ND-MODEL-002
 
-`ND-MODEL-002` is not Rex-only. Doctor reports it when the settings file sets `claude_command`, or cannot be read. Doctor looks the program up on its own `PATH`.
+`ND-MODEL-002` is not Rex-only. Doctor always reports it, to name the program that Namedrop's own Claude Code calls run. Doctor looks the program up on its own `PATH`.
 
 | Field | Text |
 |---|---|
-| Severity | `info` |
+| Severity | `info` when the program can run. `notice` when the calls cannot run |
 | Summary | "Namedrop's own Claude Code calls run `<program>`." or "Namedrop's own Claude Code calls cannot run." |
-| Explanation | For a program that cannot run, "Summaries, persona suggestions, and channel routing fail until you fix it: `<reason>`" |
-| Repair | "Set claude_command in the Namedrop settings file to a program name on PATH or an absolute path." |
+| Explanation | Where the program comes from: `claude_command` in `<file>`, `NAMEDROP_AGENT_STATUS_CLAUDE_BIN`, or `claude` from `PATH` because the settings file sets no `claude_command`. For calls that cannot run, "Agent-status summaries, persona suggestions, and channel routing fail until you fix it: `<reason>`" |
+| Repair | "Fix claude_command or the Namedrop settings file that holds it, then run Doctor again. Namedrop never runs claude in its place." when the calls cannot run |
 
 ### ND-SESSION-002
 

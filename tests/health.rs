@@ -128,7 +128,7 @@ fn standalone_doctor_uses_download_guidance_without_a_herdr_command() {
 }
 
 #[test]
-fn invalid_update_settings_are_visible_in_doctor_without_a_health_failure() {
+fn invalid_update_settings_are_visible_in_doctor_and_stop_namedrops_claude_calls() {
     let f = Fixture::new();
     if update_profile::isolate(&f.root, &f.home) {
         return;
@@ -145,7 +145,22 @@ fn invalid_update_settings_are_visible_in_doctor_without_a_health_failure() {
     ] {
         fs::write(&path, settings).unwrap();
         let report = diagnose_collaboration(&f.runtime());
-        assert_eq!(report.status, HealthStatus::Healthy);
+        // The update check alone is no health failure. Namedrop's own Claude
+        // Code calls fail closed on the same file, which does need attention.
+        assert_eq!(report.status, HealthStatus::NeedsAttention, "{report:?}");
+        let claude = report
+            .issues
+            .iter()
+            .find(|issue| issue.code == "ND-MODEL-002")
+            .unwrap();
+        assert_eq!(claude.severity, HealthSeverity::Notice, "{claude:?}");
+        assert!(
+            report
+                .issues
+                .iter()
+                .all(|issue| issue.code == "ND-MODEL-002" || issue.severity == HealthSeverity::Info),
+            "{report:?}"
+        );
         let setting = report
             .issues
             .iter()
@@ -177,11 +192,24 @@ fn doctor_names_the_claude_command_namedrop_runs() {
             .find(|issue| issue.code == "ND-MODEL-002")
             .cloned()
     };
-    let unset = diagnose_collaboration(&f.runtime());
-    assert!(claude(&unset).is_none(), "{unset:?}");
     let path = f
         .home
         .join(".config/herdr/plugins/config/namedrop/settings.json");
+    // Without the setting, Doctor still says what runs: `claude`.
+    let unset = diagnose_collaboration(&f.runtime());
+    assert_eq!(unset.status, HealthStatus::Healthy, "{unset:?}");
+    let default = claude(&unset).unwrap();
+    assert_eq!(default.severity, HealthSeverity::Info);
+    assert!(
+        default.summary.contains("run claude") || default.summary.ends_with("/claude."),
+        "{default:?}"
+    );
+    assert!(
+        default
+            .explanation
+            .contains("because the Namedrop settings file sets no claude_command"),
+        "{default:?}"
+    );
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     let launcher = f.home.join("claude-launcher");
     fs::write(&launcher, "#!/bin/sh\n").unwrap();
@@ -210,20 +238,40 @@ fn doctor_names_the_claude_command_namedrop_runs() {
         )
     );
     assert_eq!(set.diagnostic["path"], path.to_string_lossy().as_ref());
+    // A program that cannot run needs attention: the calls fail.
     fs::write(&path, r#"{"claude_command":""}"#).unwrap();
     let report = diagnose_collaboration(&f.runtime());
-    assert_eq!(report.status, HealthStatus::Healthy, "{report:?}");
+    assert_eq!(report.status, HealthStatus::NeedsAttention, "{report:?}");
     let invalid = claude(&report).unwrap();
-    assert_eq!(invalid.severity, HealthSeverity::Info);
+    assert_eq!(invalid.severity, HealthSeverity::Notice);
     assert_eq!(
         invalid.summary,
         "Namedrop's own Claude Code calls cannot run."
     );
     assert!(
-        invalid
-            .explanation
-            .contains("claude_command in settings.json is empty"),
+        invalid.explanation.contains("claude_command is empty"),
         "{invalid:?}"
+    );
+    assert!(
+        invalid.repair.prompt.contains("Fix claude_command"),
+        "{invalid:?}"
+    );
+    // So does a claude_command in the file this install does not read.
+    fs::remove_file(&path).unwrap();
+    let standalone = f.home.join(".config/namedrop/settings.json");
+    fs::create_dir_all(standalone.parent().unwrap()).unwrap();
+    fs::write(&standalone, json!({"claude_command": launcher}).to_string()).unwrap();
+    let report = diagnose_collaboration(&f.runtime());
+    assert_eq!(report.status, HealthStatus::NeedsAttention, "{report:?}");
+    let misplaced = claude(&report).unwrap();
+    assert_eq!(misplaced.severity, HealthSeverity::Notice);
+    assert!(
+        misplaced.explanation.contains(&format!(
+            "claude_command is set in {}, but this install reads {}",
+            standalone.display(),
+            path.display()
+        )),
+        "{misplaced:?}"
     );
 }
 

@@ -44,7 +44,7 @@ def enabled(settings):
         # Namedrop reads `claude_command` itself; here it only has to be a string.
         return (isinstance(value, dict) and set(value) <= {'check_for_updates', 'claude_command'}
                 and isinstance(value.get('check_for_updates', True), bool)
-                and isinstance(value.get('claude_command', ''), (str, type(None)))
+                and isinstance(value.get('claude_command', ''), str)
                 and value.get('check_for_updates', True))
     except FileNotFoundError:
         return True

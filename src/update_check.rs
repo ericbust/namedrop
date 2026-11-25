@@ -18,9 +18,15 @@ pub(crate) const UPDATE_COMMAND: &str = "herdr plugin action invoke update --plu
 struct Settings {
     #[serde(default = "enabled")]
     check_for_updates: bool,
-    /// The program Namedrop runs for its own Claude Code calls.
-    #[serde(default)]
+    /// The program Namedrop runs for its own Claude Code calls. `null` is
+    /// not a program, so it makes the file invalid rather than meaning
+    /// `claude`.
+    #[serde(default, deserialize_with = "program")]
     claude_command: Option<String>,
+}
+
+fn program<'de, D: serde::Deserializer<'de>>(value: D) -> Result<Option<String>, D::Error> {
+    String::deserialize(value).map(Some)
 }
 
 fn enabled() -> bool {
@@ -33,6 +39,9 @@ fn enabled() -> bool {
 fn standalone(state: &Path) -> bool {
     crate::installed_runtime::standalone(state) == Ok(true)
 }
+
+/// Herdr's settings file, under its config directory.
+const HERDR_SETTINGS: &str = "herdr/plugins/config/namedrop/settings.json";
 
 pub(crate) fn settings_path(state: &Path) -> Result<PathBuf, String> {
     if standalone(state) {
@@ -50,7 +59,7 @@ pub(crate) fn settings_path(state: &Path) -> Result<PathBuf, String> {
         .filter(|path| path.is_absolute())
         .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
         .ok_or("Namedrop cannot locate its update settings without HOME or XDG_CONFIG_HOME")?;
-    Ok(directory.join("herdr/plugins/config/namedrop/settings.json"))
+    Ok(directory.join(HERDR_SETTINGS))
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
@@ -65,24 +74,84 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
     serde_json::from_slice(&data).map_err(|error| error.to_string())
 }
 
-fn read_settings(state: &Path) -> Result<Settings, String> {
-    let path = settings_path(state)?;
+fn read_settings(path: &Path) -> Result<Settings, String> {
     if !path.try_exists().map_err(|error| error.to_string())? {
         return Ok(Settings {
             check_for_updates: true,
             claude_command: None,
         });
     }
-    read_json::<Settings>(&path)
+    read_json::<Settings>(path)
 }
 
 pub(crate) fn settings(state: &Path) -> Result<bool, String> {
-    read_settings(state).map(|settings| settings.check_for_updates)
+    read_settings(&settings_path(state)?).map(|settings| settings.check_for_updates)
 }
 
-/// The `claude_command` setting as written, or none when it is absent.
-pub(crate) fn claude_command(state: &Path) -> Result<Option<String>, String> {
-    read_settings(state).map(|settings| settings.claude_command)
+/// The `claude_command` setting, from the settings file this install reads.
+pub(crate) struct ClaudeCommand {
+    pub file: PathBuf,
+    /// None when the file does not set it.
+    pub command: Option<String>,
+}
+
+/// The `claude_command` setting this install reads.
+///
+/// It decides which Claude Code account Namedrop's own calls use, so where
+/// the update check falls back to Herdr's file, this fails: an owner that
+/// cannot be read, a file that cannot be read, and a `claude_command` that
+/// only a settings file this install does not read sets are each an error,
+/// never `claude`.
+pub(crate) fn claude_command(state: &Path) -> Result<ClaudeCommand, String> {
+    crate::installed_runtime::standalone(state).map_err(|error| {
+        format!("Namedrop cannot tell which settings.json this install reads: {error}")
+    })?;
+    let file = settings_path(state)?;
+    let command = read_settings(&file)
+        .map_err(|error| format!("{} is invalid: {error}", file.display()))?
+        .claude_command;
+    for other in unread_settings_paths(&file) {
+        let set = read_json::<Value>(&other)
+            .ok()
+            .and_then(|value| value.get("claude_command").cloned());
+        if set.is_some_and(|set| command.as_ref().is_none_or(|command| set != *command)) {
+            return Err(format!(
+                "claude_command is set in {}, but this install reads {}; move it to {}",
+                other.display(),
+                file.display(),
+                file.display()
+            ));
+        }
+    }
+    Ok(ClaudeCommand { file, command })
+}
+
+/// The settings files a person may have edited for this install that it
+/// does not read: the standalone file, and Herdr's under `XDG_CONFIG_HOME`
+/// and under `~/.config`.
+fn unread_settings_paths(read: &Path) -> Vec<PathBuf> {
+    let home = env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute());
+    let mut paths = Vec::new();
+    for path in [
+        home.as_ref()
+            .map(|home| home.join(".config/namedrop/settings.json")),
+        env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .map(|config| config.join(HERDR_SETTINGS)),
+        home.as_ref()
+            .map(|home| home.join(".config").join(HERDR_SETTINGS)),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if path != read && !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    paths
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]

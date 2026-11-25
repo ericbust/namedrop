@@ -5,8 +5,9 @@ use crate::{
 };
 use std::{fs, path::Path, process::Command};
 
-/// A state directory no test creates. Workers here run the fake CLI that
-/// `NAMEDROP_AGENT_STATUS_CLAUDE_BIN` names, so its settings are never read.
+/// A state directory no test creates. A unit test's Claude Code worker runs
+/// only the program `NAMEDROP_AGENT_STATUS_CLAUDE_BIN` names, and fails
+/// without one, so no settings file is read and no account is chosen for it.
 pub(super) const STATE: &str = "/nonexistent/namedrop-router-test-state";
 
 pub(super) fn rows() -> DashboardRows {

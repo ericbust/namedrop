@@ -801,7 +801,11 @@ Namedrop runs Claude Code itself for agent-status summaries, persona suggestions
 
 The value is one program: a name or an absolute path, with no arguments. Namedrop looks up a name on that process's `PATH`, which comes from the Herdr or Rex server and may differ from your shell's `PATH`. If it cannot find the name, use an absolute path. Namedrop runs the program with the same arguments it gives `claude`, so a launcher must pass its arguments on, as `exec claude "$@"` does.
 
-If the program is not found, the value is not a string, or the file is invalid, Namedrop's Claude Code requests fail and say why. They never fall back to `claude`. Doctor reports the program as informational finding ND-MODEL-002, and the reason when it cannot run. Codex requests have no such setting, because their sandbox allows exactly one Codex executable. They use the Codex home that `CODEX_HOME` names.
+Put `claude_command` in the settings file that your install reads. A Herdr install, and a Rex install that `install.sh` adopted from Herdr, read Herdr's file above. An install that `install.sh` made reads `~/.config/namedrop/settings.json`.
+
+Namedrop's Claude Code requests fail and say why, and never fall back to `claude`, when the program is not found, the value is not a string (`null` included), the file is invalid, or Namedrop cannot read which install owns its state. They also fail when another of these settings files sets `claude_command` and the file your install reads does not set it to the same value. The reason then names both files. So an invalid `settings.json` that only disabled update checks before 1.12.0 now also stops these requests. Doctor always reports the program as ND-MODEL-002: informational when it can run, and a notice when it cannot.
+
+An older Namedrop does not know `claude_command`. It treats a file with that setting as invalid, so its update checks stop and its Doctor shows ND-UPDATE-002. If you add the setting to Herdr's file while Herdr still runs 1.11.1 or earlier, you no longer see the notice that offers 1.12.0. Update first, then add the setting. Codex requests have no such setting, because their sandbox allows exactly one Codex executable. They use the Codex home that `CODEX_HOME` names.
 
 ## Upgrade
 
