@@ -281,6 +281,10 @@ class Installer(unittest.TestCase):
         self.assertIn('install: adopt', output)
         self.assertEqual(output.count('Install Namedrop for Rex?'), 1)
         self.assertIn('Installation cancelled; no files changed.', output)
+        # The beta notice comes before the question.
+        notice = ('Rex support is beta and under active development. '
+                  'docs/compatibility.md lists the Rex versions it was tested with.\n')
+        self.assertIn(notice, output.split('Install Namedrop for Rex?')[0])
         # The confirmation lists what the binary says the install writes.
         for line in ('Rex module: ', 'PATH lines: ' + str(self.home / '.zshrc'),
                      'Claude Code package: ' + str(self.home / '.claude/skills/namedrop')):
@@ -738,6 +742,8 @@ class Installer(unittest.TestCase):
         output = self.ok(self.run_install(package=package, answer='y\n'))
         self.assertIn('install: new', output)
         self.assertEqual(output.count('Install Namedrop for Rex?'), 1)
+        self.assertEqual(output.count('Rex support is beta and under active development.'), 1)
+        self.assertTrue((package / 'docs/compatibility.md').is_file())
         installed = self.home / '.local/state/namedrop'
         self.assertTrue((installed / 'runtime/current').is_symlink())
         shutil.rmtree(installed)

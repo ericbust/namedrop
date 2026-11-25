@@ -260,7 +260,7 @@
         "install.sh"
       ],
       "sources": [
-        {"file": "scripts/install.sh", "line": 214, "source": "Herdr keeps its runtime and updates it. This archive publishes no runtime."}
+        {"file": "scripts/install.sh", "line": 215, "source": "Herdr keeps its runtime and updates it. This archive publishes no runtime."}
       ],
       "reason": "install.sh adopts Herdr's runtime. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
     },
@@ -271,7 +271,7 @@
         "install.sh"
       ],
       "sources": [
-        {"file": "scripts/install.sh", "line": 226, "source": "Installing the Rex module and agent packages with Herdr's runtime…"}
+        {"file": "scripts/install.sh", "line": 227, "source": "Installing the Rex module and agent packages with Herdr's runtime…"}
       ],
       "reason": "install.sh adopts Herdr's runtime. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
     },
