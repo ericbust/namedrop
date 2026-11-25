@@ -97,7 +97,7 @@ These have not been tested on Rex:
 - sshd's per-source penalties on a real B, which can refuse A for a while after a dropped connection.
 - An update of Namedrop on B while B's bridge runs.
 - The Rex app's own command palette and keys on Rex builds other than preview.23.
-- With real agents on Rex: `#label` and `#all` mentions to another Rex session, groups, reminders, tracked coordination, pinned context and freshness checks, and the content of Agent status.
+- With real agents: `#label` and `#all` mentions to another Rex session, groups, reminders, tracked coordination, pinned context and freshness checks, and the content of Agent status.
 - A restart of the Rex app, as opposed to its server.
 - Windows, which is out of scope.
 

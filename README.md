@@ -103,11 +103,11 @@ In both, Namedrop runs on macOS on Apple silicon and on Linux with glibc, with C
 
 You can use both on one machine. They share one Namedrop, as [Use Herdr and Rex on one machine](docs/rex.md#use-herdr-and-rex-on-one-machine) describes.
 
-The rest of this page describes Namedrop in either terminal. In Rex, a workspace is a Rex session, and a pane is a Rex pane. Several of these features have not been tested on Rex yet. [What has been tested on Rex](docs/compatibility.md#what-has-been-tested-on-rex) lists them.
+The rest of this page describes Namedrop in either terminal. In Rex, a workspace is a Rex session, and a pane is a Rex pane. Some features on this page, such as mentions to another workspace, groups and reminders, have not been tested on Rex yet. The list at the end of [What has been tested on Rex](docs/compatibility.md#what-has-been-tested-on-rex) names them.
 
 ## Keyboard shortcuts
 
-Namedrop's screens, such as Agent status, Name this pane, Manage names, Doctor, and the tour, open over the pane you open them from. Each one has a key. Herdr binds them to its prefix key, and Rex adds them to its command palette with their own keys. Your terminal's guide lists them and says how to change them:
+Five of Namedrop's screens have a key: Agent status, Name this pane, Manage names, Doctor, and the tour. Each opens over the pane you open it from. In Herdr, the keys follow Herdr's prefix key. In Rex, Namedrop's module binds them and also adds the screens to Rex's command palette. Your terminal's guide lists them and says how to change them:
 
 - [Keyboard shortcuts in Herdr](docs/herdr.md#keyboard-shortcuts)
 - [Namedrop's screens and keys in Rex](docs/rex.md#open-namedrops-screens)
@@ -298,7 +298,7 @@ In Herdr, you can also run the action from a shell tab:
 herdr plugin action invoke channels --plugin namedrop
 ```
 
-Both open the page in your browser on macOS, and on Linux when a display is available. If no browser opens, run `namedrop channels` in a shell and open the link it prints. Herdr runs the action in its own server process, so the action can't open a browser when that process has no display. Run `namedrop channels --no-open` to print the link only. The link works once. Run the command again for a new link.
+Each of these opens the page in your browser on macOS, and on Linux when a display is available. If no browser opens, run `namedrop channels` in a shell and open the link it prints. Herdr runs the action in its own server process, so the action can't open a browser when that process has no display. Run `namedrop channels --no-open` to print the link only. The link works once. Run the command again for a new link.
 
 ### Open Channels from your tailnet
 
@@ -359,12 +359,12 @@ An agent's final message is its answer to your Channels message. It appears in t
 
 Channels opens from a Rex session too. These things differ from Herdr:
 
-- Live Peek is not available for Rex panes. **Live** answers `live peek is not available in Rex panes`, so **Type to agent**, which is part of it, doesn't work there either.
+- Live Peek is not available for Rex panes. **Live** shows `Reconnecting…` for a few seconds and then `Live view isn’t available. Try again or choose Text snapshot.` Choose **Text snapshot** to read the pane. **Type to agent** is part of Live Peek, so it doesn't work there either.
 - Its setup and Doctor hints tell you to open Herdr. In Rex, use the palette actions and `namedrop` commands instead.
 - **+** and **Add agent** can't create a channel or start an agent in Rex. Start the Rex session or pane yourself, then activate and name it there.
 - With tailnet access on, nothing in Rex starts the Channels server again after a reboot. Run `namedrop channels --no-open` to start it.
 
-[Limits of Rex support](docs/rex-reference.md#limits-of-rex-support) gives the exact texts.
+[Limits of Rex support](docs/rex-reference.md#limits-of-rex-support) lists every Rex limit.
 
 ### Beta limits and privacy
 

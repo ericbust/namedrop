@@ -92,7 +92,7 @@ Setup keeps any binding you already have for these actions, including a custom k
 
 To change a key, edit its `namedrop.*` entry in Herdr's configuration and run `herdr server reload-config`. Herdr reads the file at `HERDR_CONFIG_PATH` if you set it. Otherwise it reads `~/.config/herdr/config.toml`, or the same path under `$XDG_CONFIG_HOME`.
 
-To open a popup without a key, run `herdr plugin action invoke <action> --plugin namedrop`. The actions are `agent-status`, `name-agent`, `manage-addresses`, `doctor`, and `tour`, and `channels` opens [Channels](../README.md#channels-beta). [Popups](operations.md#popups) describes each popup.
+To open a popup without a key, run `herdr plugin action invoke <action> --plugin namedrop`. The actions are `agent-status`, `name-agent`, `manage-addresses`, `doctor`, and `tour`. The `channels` action opens [Channels](../README.md#channels-beta) in your browser. [Popups](operations.md#popups) describes each popup.
 
 ## Pause, resume, or deactivate Namedrop
 
