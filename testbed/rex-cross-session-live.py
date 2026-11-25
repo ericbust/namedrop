@@ -192,8 +192,8 @@ def type_prompt(run, lane, block, text, landed, what):
 
 
 def settle(a, since, spaces, quiet=8, within=240):
-    """The rows once every delivery is acknowledged or settled and nothing changed for `quiet`
-    seconds."""
+    """The rows once every delivery is settled and nothing changed for `quiet` seconds, or the
+    rows as they are at the deadline."""
     until, last, still = time.monotonic() + within, None, time.monotonic()
     while time.monotonic() < until:
         rows = messages(a, since, spaces)
@@ -768,18 +768,19 @@ def channels_smoke(run, a, b, spaces_by_session):
 
 
 def channels_limits(run, page, keys, a):
-    """The Rex limits the docs record, read from the page's own routes, as notes."""
+    """Checks the Rex limits the docs record, read from the page's own routes."""
     notes = {}
     key = keys.get(ALPHA)
     if not key:
         return notes
-    # The bodies the page's New channel and Add agent forms send
-    # (src/dashboard/channel_create.rs). Anything but Rex's 501 refusal fails, because a Rex
-    # that accepted them would start an agent outside PROFILE/bin/claude or leave a channel.
-    refusals = {"New channel": ("/w/{}/channels", {"name": "xs-probe",
+    # Valid bodies of the page's New channel and Add agent forms
+    # (src/dashboard/channel_create.rs), so they reach Rex's 501 refusal. Each is harmless
+    # even if a later Rex accepts it: the channel and the name are already taken, which
+    # refuses before anything is created, and a terminal starts no agent program.
+    refusals = {"New channel": ("/w/{}/channels", {"name": ALPHA,
                                                     "folder": str(a.profile.repo)},
                                 "Channels can't create a channel in Rex yet."),
-                "Add agent": ("/w/{}/agents", {"kind": "claude", "name": "xsprobe"},
+                "Add agent": ("/w/{}/agents", {"kind": "terminal", "name": "claude"},
                               "Channels can't add an agent in Rex yet.")}
     for form, (path, body, text) in refusals.items():
         status, answer = page.raw_post(path.format(key), body)
@@ -905,7 +906,7 @@ def main():
                                          for entry in row.get("addresses") or []}
                       for row in (json.loads(address_list.stdout).get("data") or {}).get(
                           "workspaces") or []}
-        except ValueError:
+        except (ValueError, AttributeError):
             listed = {}
         wanted = {space: {(agent, lane.blocks[agent]) for agent in ("claude", "codex")}
                   for space, lane in lanes.items()}

@@ -505,8 +505,9 @@ load, and `/api/spaces` must list both sessions with their labels once the
 page's event stream has subscribed. Each channel must show its `@claude` and
 `@codex`, and a composer post to `@claude` in A and to `@codex` in B must each
 get one answer in their thread. New channel and Add agent must refuse with
-501 and the documented Rex text, because a Rex that accepted them would start
-an agent outside `PROFILE/bin/claude` or leave a channel behind. Last, nothing
+501 and the documented Rex text. Their bodies name a channel and a name that
+already exist, and Add agent asks for a terminal, so they create nothing even
+on a Rex that accepts them. Last, nothing
 may be left awaiting in either session, and Doctor must report `healthy` with
 no item above `info` in each.
 
