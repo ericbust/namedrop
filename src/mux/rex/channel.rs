@@ -164,8 +164,9 @@ impl<'a, 'w> RawChannel for RexChannel<'a, 'w> {
     /// Enter, so the gate holds the prompt: another foreground, a watched
     /// process that is gone, a zombie, unreadable, restarted, or out of the
     /// foreground's group, or any change for the block that Rex queued after
-    /// the facts. The read comes last, just before the Enter, so the Enter
-    /// follows it by one request. No sleep.
+    /// the facts, except a status that still takes a prompt. The read comes
+    /// last, just before the Enter, so the Enter follows it by one request.
+    /// No sleep.
     fn paste_submit(&self, _pane: &PaneId, text: &str) -> Result<(), ChannelError> {
         let block = self.block.clone();
         self.event(json!({"type": "paste", "payload": {"text": one_line(text)}}))?;
@@ -202,7 +203,8 @@ impl<'a, 'w> RawChannel for RexChannel<'a, 'w> {
             let seen = self.seen.borrow();
             let changed = seen.pending.iter().any(|event| {
                 event.seq > seen.boundary
-                    && change(&event.payload, &block, seen.foreground).is_some()
+                    && change(&event.payload, &block, seen.foreground)
+                        .is_some_and(|change| !still_settled(&change))
             });
             if changed {
                 return Err(ChannelError(format!(
@@ -234,6 +236,14 @@ fn watched(locality: &Locality, binding: Option<&Binding>) -> Option<Watched> {
         incarnation: incarnation.clone(),
         group: foreground.group,
     })
+}
+
+/// Codex 0.169.0 turns `done` into `idle` when it takes input, its own
+/// paste included (`app.rs` calls `acknowledge_program_status` on every key
+/// and non-empty paste), so a status that still takes a prompt says nothing
+/// about the paste or the Enter.
+fn still_settled(change: &TapChange) -> bool {
+    matches!(change, TapChange::Status(state) if state.accepts_prompt())
 }
 
 /// A change of the block's program or status in an event, as the tap reports
@@ -274,7 +284,8 @@ impl StatusTap for RexTap<'_> {
     /// Skips events at or below the facts' boundary and events for other
     /// blocks. A zero wait still reads what the socket holds once. A status
     /// change at or below the Enter's acknowledgement was queued before the
-    /// Enter started, so it reports `Program`, which never confirms.
+    /// Enter started, so it reports `Program`, which never confirms, unless
+    /// the status still takes a prompt, which the gate does not confirm on.
     fn next_change(&mut self, within: Duration) -> Result<Option<TapChange>, ChannelError> {
         let deadline = Instant::now().checked_add(within);
         loop {
@@ -301,8 +312,9 @@ impl StatusTap for RexTap<'_> {
                 continue;
             }
             match change(&event.payload, &self.block, seen.foreground) {
-                Some(TapChange::Status(_))
-                    if seen.entered.is_some_and(|entered| event.seq <= entered) =>
+                Some(change @ TapChange::Status(_))
+                    if seen.entered.is_some_and(|entered| event.seq <= entered)
+                        && !still_settled(&change) =>
                 {
                     return Ok(Some(TapChange::Program));
                 }

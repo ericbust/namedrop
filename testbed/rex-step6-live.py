@@ -2,7 +2,7 @@
 """UI.md's U14 on the testbed: PLAN's step 6 live check on a Rex lane that
 `./testbed rex up --fresh` just installed with the archive's install.sh and no Herdr.
 
-usage: python3 -I testbed/rex-step6-live.py --profile rex-NAME --out DIR
+usage: python3 -I testbed/rex-step6-live.py --profile rex-NAME --out DIR [--stress N]
 
 1. The lane's server lists the module's eleven actions, and About Namedrop names the module,
    launcher and state that install.sh wrote.
@@ -17,6 +17,13 @@ usage: python3 -I testbed/rex-step6-live.py --profile rex-NAME --out DIR
    agents, reads their screens and reads the store read-only, and the agents' Namedrop hooks
    carry each mention and reply. Each screen check needs a delivery prompt that was not on the
    screen before the typing and whose nonce the store drew for that exchange's message.
+
+With --stress N, the driver then types N more mentions into Claude Code for Codex, one at a time,
+each waiting for Codex's reply and its delivery back, and counts the rounds delivered, held and
+timed out. A held attempt is recorded with its screen and the reason the store kept for it, then
+cancelled with `delivery cancel-held`, and its pointer is deleted from the agent's box with
+Ctrl-U, so each round starts clean. The driver never presses Enter for a held prompt. The last
+check fails unless every round was delivered.
 
 Every rex call names the lane's server with -S and --autostart=false, from the lane's own
 environment. Claude Code runs only as the profile's token wrapper, which the lane started.
@@ -383,6 +390,116 @@ def exchange(run, lane, sender, recipient, word, within=240):
             "reply's prompt": shown_banner[0], "thread": rows})
 
 
+def attempts(lane, message):
+    """Each delivery attempt of the message: its id, state, pointer nonce, and the summary of
+    its open attention item, which says why a held attempt held."""
+    return lane.rows(
+        "select s.attempt_id, s.state, coalesce(s.pointer_nonce, '-'), (select i.summary from "
+        "attention_items i where i.session_socket_id = s.session_socket_id and i.worktree_id = "
+        "s.worktree_id and i.source_id = s.attempt_id and i.resolved_at_ms is null) from "
+        "delivery_attempt_state s join delivery_attempts a using (session_socket_id, worktree_id, "
+        "attempt_id, address_id) join mailbox_deliveries d using (session_socket_id, worktree_id, "
+        "delivery_id, address_id) where d.message_id = ?", message)
+
+
+def input_box(screen):
+    """The text of the last agent input box on a `capture --trim` screen: the last line that
+    opens with Claude Code's or Codex's prompt glyph, with the lines under it down to a blank
+    line or a rule."""
+    lines = screen.splitlines()
+    opens = [index for index, line in enumerate(lines) if line[:1] in ("\u276f", "\u203a")]
+    if not opens:
+        return ""
+    held = [lines[opens[-1]][1:]]
+    for line in lines[opens[-1] + 1:]:
+        if not line.strip() or line.startswith("\u2500"):
+            break
+        held.append(line)
+    return " ".join(" ".join(held).split())
+
+
+def clear_box(lane, agent, marker, tries=12):
+    """Deletes the agent's box with Ctrl-U while it shows `marker`, and never presses Enter.
+    Returns whether the box no longer shows it."""
+    block = lane.blocks[agent]
+    for _ in range(tries):
+        if marker not in input_box(lane.screen(block)):
+            return True
+        lane.key(block, "ctrl+u")
+        time.sleep(0.4)
+    return marker not in input_box(lane.screen(block))
+
+
+def cancel_held(lane, attempt):
+    """`delivery cancel-held`, the command Doctor's ND-DELIVERY-001 repair runs, as a person."""
+    launcher = lane.state / "runtime" / "namedrop"
+    return lane.run.run(lane.lane.environment(), [
+        launcher, "--plugin-state", lane.state, "delivery", "cancel-held", "--input-json",
+        json.dumps({"attempt_id": attempt, "confirmed": True}), "--endpoint",
+        "rex:" + str(lane.lane.socket), "--space", lane.session], lane.profile.dir, ok=False)
+
+
+def stress(run, lane, count, within=180):
+    """`count` mentions from Claude Code to Codex in a row, each waiting for Codex's reply and
+    its delivery back. A round ends delivered, held, or timed out. A held attempt, of the
+    mention or of its reply, is recorded with its screen and why it held, cancelled with
+    `delivery cancel-held`, and its pointer deleted from the agent's box, so the next round
+    starts clean. The driver never presses Enter for a held prompt."""
+    rounds = []
+    for index in range(count):
+        word = "stress{}x{}".format(index, int(time.time()) % 10000)
+        prompt = "@codex Please reply with exactly the word {}.".format(word)
+        body = prompt[len("codex") + 2:]
+        if not clear_box(lane, "claude", "Please reply with exactly the word"):
+            raise Failed("round {}: an earlier mention stays in Claude Code's box".format(index))
+        lane.type_line(lane.blocks["claude"], prompt)
+        typed = time.time()
+        request = wait(lambda: thread_of(lane, "claude", body), bool,
+                       "round {}'s mention in the store".format(index), 120, 0.5)
+        mention, record = request[0][1], {"round": index, "word": word, "outcome": "timed out"}
+        until = time.monotonic() + within
+        while time.monotonic() < until and record["outcome"] == "timed out":
+            rows = thread_of(lane, "claude", body)[1]
+            reply = next((row[6] for row in rows if row[1].lstrip("@") == "codex" and
+                          word in row[3].lower()), None)
+            for message, agent in ((mention, "codex"), (reply, "claude")):
+                for attempt, state, nonce, why in attempts(lane, message) if message else ():
+                    if state != "held":
+                        continue
+                    screen = lane.screen(lane.blocks[agent])
+                    cancelled = cancel_held(lane, attempt)
+                    marker = "Namedrop message {}".format(nonce)
+                    record.update(outcome="held", to=agent, attempt=attempt, nonce=nonce,
+                                  why=why, screen=screen[-2000:],
+                                  **{"pointer in its box": marker in input_box(screen),
+                                     "cancel-held exit": cancelled.returncode,
+                                     "box cleared": clear_box(lane, agent, marker)})
+                    print("round {}: held to @{} ({}): {}".format(index, agent, nonce, why),
+                          flush=True)
+                    break
+            back = attempts(lane, reply) if reply else []
+            if record["outcome"] == "timed out" and back and all(
+                    state in ("acknowledged", "settled") for _, state, _, _ in back):
+                record["outcome"] = "delivered"
+            if record["outcome"] == "timed out":
+                time.sleep(0.5)
+        record["seconds"] = round(time.time() - typed, 1)
+        rounds.append(record)
+        print("round {}: {} in {}s".format(index, record["outcome"], record["seconds"]),
+              flush=True)
+        if record["outcome"] == "held" and not record["box cleared"]:
+            break
+    counts = {outcome: sum(item["outcome"] == outcome for item in rounds)
+              for outcome in ("delivered", "held", "timed out")}
+    run.observe("stress", {"counts": counts, "rounds": rounds})
+    print("STRESS {} rounds: {} delivered, {} held, {} timed out".format(
+        len(rounds), counts["delivered"], counts["held"], counts["timed out"]), flush=True)
+    run.check("stress: {} mentions to @codex, each delivered".format(count),
+              counts["delivered"] == count,
+              {"counts": counts, "rounds": [{key: value for key, value in item.items()
+                                             if key != "screen"} for item in rounds]})
+
+
 def check_exchange_commands(run, lane, commands):
     """The driver's own commands during the exchanges: the lane's rex, and only capture, send and
     send-key. The mentions and replies travel through the agents' Namedrop hooks."""
@@ -399,6 +516,9 @@ def main():
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--profile", required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--stress", type=int, default=0, metavar="N",
+                        help="then send N mentions from Claude Code to Codex and count the "
+                             "rounds delivered, held and timed out")
     args = parser.parse_args()
     if not args.profile.startswith("rex-"):
         parser.error("--profile names a rex- profile")
@@ -419,6 +539,8 @@ def main():
         exchange(run, lane, "claude", "codex", "pong")
         exchange(run, lane, "codex", "claude", "ping")
         check_exchange_commands(run, lane, run.commands[first:])
+        if args.stress > 0:
+            stress(run, lane, args.stress)
     except (Failed, RuntimeError, subprocess.SubprocessError, OSError, KeyError, ValueError,
             sqlite3.Error) as error:
         run.note("stopped: {!r}".format(error))
