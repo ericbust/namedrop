@@ -92,7 +92,7 @@ Setup keeps any binding you already have for these actions, including a custom k
 
 To change a key, edit its `namedrop.*` entry in Herdr's configuration and run `herdr server reload-config`. Herdr reads the file at `HERDR_CONFIG_PATH` if you set it. Otherwise it reads `~/.config/herdr/config.toml`, or the same path under `$XDG_CONFIG_HOME`.
 
-To open a popup without a key, run `herdr plugin action invoke <action> --plugin namedrop`. The actions are `agent-status`, `name-agent`, `manage-addresses`, `doctor`, and `tour`. [Popups](operations.md#popups) describes each one.
+To open a popup without a key, run `herdr plugin action invoke <action> --plugin namedrop`. The actions are `agent-status`, `name-agent`, `manage-addresses`, `doctor`, and `tour`, and `channels` opens [Channels](../README.md#channels-beta). [Popups](operations.md#popups) describes each popup.
 
 ## Pause, resume, or deactivate Namedrop
 
@@ -110,7 +110,7 @@ herdr plugin action invoke resume --plugin namedrop
 namedrop deactivate
 ```
 
-`namedrop space pause` and `namedrop space resume` do the same as the first two. [Stop collaboration temporarily](operations.md#stop-collaboration-temporarily) has the details.
+`namedrop space pause` and `namedrop space resume` do the same as the first two. While a workspace is paused, Doctor shows `ND-SPACE-001`. [Stop collaboration temporarily](operations.md#stop-collaboration-temporarily) covers deactivation and disabling the plugin.
 
 ## Update Namedrop
 

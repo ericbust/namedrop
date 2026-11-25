@@ -146,7 +146,7 @@ Run **Namedrop Doctor** from the palette, press `alt+shift+cmd+h`, or run `named
 | `ND-SESSION-004`, Namedrop refused to bind the agent session | Start the agent as the pane's own program, at its shell, then send it one prompt |
 | `ND-INTEGRATION-003`, a hook wrapper does not name its agent | Run **Activate Namedrop** again, then restart the agent |
 | `ND-SPACE-001`, Namedrop is paused in this Rex session | Run **Resume Namedrop** |
-| `ND-UPDATE-002`, update checks are disabled by invalid settings | Set `check_for_updates` to `true` or `false` in `~/.config/namedrop/settings.json` |
+| `ND-UPDATE-002`, update checks are disabled by invalid settings | Set `check_for_updates` to `true` or `false` in the settings file. For an install that `install.sh` made, that is `~/.config/namedrop/settings.json`. If Herdr owns the install, it is `$XDG_CONFIG_HOME/herdr/plugins/config/namedrop/settings.json`, else `~/.config/herdr/plugins/config/namedrop/settings.json` |
 
 Other problems:
 

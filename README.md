@@ -74,11 +74,11 @@ The reply comes back to the workspace you sent from. A mention without a label s
 ## What you get
 
 - **Mentions that come back.** A reply returns to the pane that asked. Ask several agents at once and the lead merges their results into one answer.
-- **Mentions across workspaces.** `#label @name` reaches an agent in another workspace, a repository's name reaches its worktrees, and `#all @name` reaches every workspace. Replies and tracked work come back to you.
+- **Mentions across workspaces.** `#label @name` reaches an agent in another workspace, and `#all @name` reaches every workspace. In Herdr, a repository's name reaches its worktrees. Replies and tracked work come back to you.
 - **Personas.** Describe what each agent is good at, and your agents pick useful collaborators from the roster themselves.
 - **Named terminals.** `@build cargo test` runs in a shell pane without an LLM and returns stdout, stderr, and the exit status.
 - **Groups.** Save `@review-team` once, then mention it like a name.
-- **Channels (Beta).** Read channels, threads, and direct messages in your browser. Use Live Peek to see an agent's terminal, or open **Needs you** when it needs a decision.
+- **Channels (Beta).** Read channels, threads, and direct messages in your browser. In Herdr, use Live Peek to see an agent's terminal. Open **Needs you** when an agent needs a decision.
 - **Reminders.** Ask an agent to check something later or on a schedule and answer where you asked.
 - **Agent status.** A floating panel shows what each agent is doing and which replies you're still waiting on.
 - **Tracked coordination.** Read progress and partial results while work runs. The lead saves one final report.
@@ -103,21 +103,14 @@ In both, Namedrop runs on macOS on Apple silicon and on Linux with glibc, with C
 
 You can use both on one machine. They share one Namedrop, as [Use Herdr and Rex on one machine](docs/rex.md#use-herdr-and-rex-on-one-machine) describes.
 
-The rest of this page describes Namedrop in either terminal. In Rex, a workspace is a Rex session, and a pane is a Rex pane.
+The rest of this page describes Namedrop in either terminal. In Rex, a workspace is a Rex session, and a pane is a Rex pane. Several of these features have not been tested on Rex yet. [What has been tested on Rex](docs/compatibility.md#what-has-been-tested-on-rex) lists them.
 
 ## Keyboard shortcuts
 
-Namedrop's screens open over the pane you open them from. Each one has a key in both terminals:
+Namedrop's screens, such as Agent status, Name this pane, Manage names, Doctor, and the tour, open over the pane you open them from. Each one has a key. Herdr binds them to its prefix key, and Rex adds them to its command palette with their own keys. Your terminal's guide lists them and says how to change them:
 
-| Screen | Herdr | Rex |
-|---|---|---|
-| [Agent status](#agent-status) for the current pane | **Prefix**, then **Shift-S** | `alt+shift+cmd+s` |
-| Name this pane | **Prefix**, then **Shift-I** | `alt+shift+cmd+i` |
-| [Manage names](#manage-names) | **Prefix**, then **Shift-M** | `alt+shift+cmd+m` |
-| [Namedrop Doctor](#troubleshooting) | **Prefix**, then **Shift-H** | `alt+shift+cmd+h` |
-| [Namedrop tour](#tour) | **Prefix**, then **Shift-O** | `alt+shift+cmd+o` |
-
-In Herdr, press **Prefix**, release it, then press the key. In Rex on a Mac, `alt+shift+cmd` is Option-Shift-Command, and every screen is also an action in the `Namedrop` category of Rex's command palette. To change a key or open a screen without one, see [Herdr's keyboard shortcuts](docs/herdr.md#keyboard-shortcuts) or [Rex's screens and keys](docs/rex.md#open-namedrops-screens).
+- [Keyboard shortcuts in Herdr](docs/herdr.md#keyboard-shortcuts)
+- [Namedrop's screens and keys in Rex](docs/rex.md#open-namedrops-screens)
 
 ## Examples
 
@@ -231,7 +224,7 @@ Ask @reviewer to review src/retry.rs. Attach pinned Git context and list
 src/retry.rs as diff evidence.
 ```
 
-If the work is in another worktree of the same repository, name that checkout. Namedrop then captures context, reads files, and checks freshness there instead of in the workspace's worktree:
+In Herdr, if the work is in another worktree of the same repository, name that checkout. Namedrop then captures context, reads files, and checks freshness there instead of in the workspace's worktree:
 
 ```text
 Ask @reviewer to review src/retry.rs in the worker checkout at
@@ -299,6 +292,12 @@ Run **Open Namedrop Channels** in the workspace, from Herdr's or Rex's command p
 namedrop channels
 ```
 
+In Herdr, you can also run the action from a shell tab:
+
+```sh
+herdr plugin action invoke channels --plugin namedrop
+```
+
 Both open the page in your browser on macOS, and on Linux when a display is available. If no browser opens, run `namedrop channels` in a shell and open the link it prints. Herdr runs the action in its own server process, so the action can't open a browser when that process has no display. Run `namedrop channels --no-open` to print the link only. The link works once. Run the command again for a new link.
 
 ### Open Channels from your tailnet
@@ -345,8 +344,8 @@ The ordinary `namedrop channels` command and the **Open Namedrop Channels** acti
 - Post a note without a mention. It stays in the channel and wakes nobody. Embedded agent mentions go through the router described in [Examples](#examples).
 - Choose an agent under **Direct messages**. Your messages go to that agent without a mention and stay out of channels and **All activity**.
 - An agent waiting on permission or a question shows **Needs you** in member chips, the DM sidebar, and DM and Peek headers. Open **Needs you** when an agent waits on an approval or a reply. Handoff warnings offer details and review actions. **All activity** shows work across channels.
-- Select an agent's name to open **Peek**. **Live** shows its terminal, keeps output that scrolls by while you watch, and offers **Expand**. **Text snapshot** gives you a sanitized text view with manual refresh.
-- Use **Type to agent** in Live Peek to submit a prompt or send keys such as Esc and Ctrl-C. This sends input to the real pane. Live Peek keeps streaming through the agent's reply. If Namedrop is typing into that pane at the same moment, for example to deliver a message, nothing is sent and your text stays in the box to send again. Watching, scrolling, and resizing Peek do not send input or resize that pane.
+- Select an agent's name to open **Peek**. In Herdr, **Live** shows its terminal, keeps output that scrolls by while you watch, and offers **Expand**. **Text snapshot** gives you a sanitized text view with manual refresh.
+- In Herdr, use **Type to agent** in Live Peek to submit a prompt or send keys such as Esc and Ctrl-C. This sends input to the real pane. Live Peek keeps streaming through the agent's reply. If Namedrop is typing into that pane at the same moment, for example to deliver a message, nothing is sent and your text stays in the box to send again. Watching, scrolling, and resizing Peek do not send input or resize that pane.
 - Type `/` or `$` in a message box or **Type to agent** to see skills for the addressed agent. Claude Code and Codex have separate lists.
 - Paste a screenshot into a message box, drop an image on it, or use the image button beside Send. The agent gets the image with your message and can open it. A message takes up to 4 images of up to 10 MB each.
 - Hear a sound when an agent messages you, in any open Channels tab. Pick a sound for each agent with the speaker button in its direct message header or its Peek panel, set the Default sound, or mute them all from **Sounds** in the sidebar.
@@ -358,8 +357,9 @@ An agent's final message is its answer to your Channels message. It appears in t
 
 ### Channels on Rex
 
-Channels opens from a Rex session too. Three things differ from Herdr:
+Channels opens from a Rex session too. These things differ from Herdr:
 
+- Live Peek is not available for Rex panes. **Live** answers `live peek is not available in Rex panes`, so **Type to agent**, which is part of it, doesn't work there either.
 - Its setup and Doctor hints tell you to open Herdr. In Rex, use the palette actions and `namedrop` commands instead.
 - **+** and **Add agent** can't create a channel or start an agent in Rex. Start the Rex session or pane yourself, then activate and name it there.
 - With tailnet access on, nothing in Rex starts the Channels server again after a reboot. Run `namedrop channels --no-open` to start it.
