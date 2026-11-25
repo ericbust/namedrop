@@ -458,6 +458,54 @@ check prints one line. Every command is logged in
 and the timings. The driver leaves the lane up. To run another Rex build, put
 its `rex` first on `PATH` for `rex up`, as [The Rex lane](#the-rex-lane) says.
 
+### Cross-session mentions on Rex
+
+```sh
+./testbed rex up --link /path/to/namedrop --profile rex-xsession --fresh --yes
+python3 -I rex-cross-session-live.py --profile rex-xsession --out /tmp/xsession
+./testbed rex down --profile rex-xsession
+```
+
+[rex-cross-session-live.py](rex-cross-session-live.py) runs on a lane that
+`rex up --fresh` just installed. When the lane's session, A, has no names
+yet, it first runs step 6's palette checks, so A has `@claude` and `@codex`.
+It renames A to `alpha` and starts session B, labelled `beta`, on the same
+lane server, in its own Git directory `PROFILE/beta`. B gets a shell block,
+Claude Code as `PROFILE/bin/claude` and `codex --no-daemon`, with their
+first-run prompts answered as `rex up` answers them. The driver activates B
+and names its agents `@claude` and `@codex` from the palette, the same names as
+A's. It then types these into the agents and judges the store and the screens:
+
+- `#beta @codex` from A's Claude Code, and `#alpha @codex` from B's Claude Code.
+  Each must reach only the named agent, once, as a bridged copy in the
+  recipient's session, with a delivery prompt that names the sender as
+  `#label @name`. The reply must come back to the sender in the same thread,
+  and nothing may repeat within 15 s.
+- `#all @claude` from A's Codex. It must reach `@claude` in both sessions, the
+  sender's own included, as the docs say, and both replies must come back.
+- `#nosuch @codex`, a label no session has, typed into A's Claude Code. A `#`
+  word that names no session stays part of the prompt, so the hook must add
+  nothing and nothing may be sent. The driver then asks that Claude Code to
+  run Namedrop's `send` with the same source, and its transcript must show
+  the refusal
+  `no Rex session is labelled #nosuch; activated Rex sessions: #alpha, #beta`.
+
+It then reads the agents' transcripts for the roster line
+`Other Rex sessions: 1 other Rex session has named agents (…)`, runs
+`address list` with `{"workspaces":"all"}` for the record, and checks that
+nothing is left awaiting and that Doctor is clean in both sessions. Last, it
+types `namedrop channels --no-open` into A's shell block, opens the printed link
+as a person does, and reads the page's own routes: the page loads,
+`/api/spaces` lists both sessions with their labels once the page's event
+stream has subscribed, each channel shows its `@claude` and `@codex`, and a
+composer post to `@claude` in A and to `@codex` in B each get one answer in
+their thread. It records, and does not fail on, what New channel and Add agent
+answer, which are known Rex limits. `--skip-channels` leaves that part out,
+and `--channels-only` runs it alone on a lane a full run set up. A failed
+check does not stop the run. Each check prints one line, `OUT/commands.log` logs every
+command, and `OUT/evidence.json` holds the store rows, the screens and the
+timings. A rerun reuses B and its names. The driver leaves the lane up.
+
 ### The remote-host lab
 
 ```sh
