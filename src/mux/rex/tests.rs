@@ -675,6 +675,7 @@ fn port_ansi_turns_blank_runs_into_spaces_and_refuses_what_the_reader_would_misr
         include_str!("fixtures/vt/codex-empty.vt"),
         include_str!("fixtures/vt/codex-draft.vt"),
         include_str!("fixtures/vt/codex-draft-fresh.vt"),
+        include_str!("fixtures/vt/codex-empty-ech.vt"),
     ] {
         let screen = port_ansi(vt).unwrap();
         assert!(!screen.contains("C\u{1b}") && !screen.contains("\u{1b}[1C"));
@@ -684,6 +685,11 @@ fn port_ansi_turns_blank_runs_into_spaces_and_refuses_what_the_reader_would_misr
         port_ansi("\u{203a}\u{1b}[5Cdraft\u{1b}[C!").unwrap(),
         "\u{203a}     draft !",
         "a tab run and a single blank"
+    );
+    assert_eq!(
+        port_ansi("\u{1b}[48;2;1;2;3mhi\u{1b}[3X\u{1b}[3C|\u{1b}[2Xz").unwrap(),
+        "\u{1b}[48;2;1;2;3mhi   |z",
+        "an erased run is the blanks its move draws, and the erase alone draws none"
     );
     assert_eq!(
         port_ansi("\u{1b}[0m\u{1b}[38;2;1;2;3mhi\u{1b}[38:5:9m\r\n").unwrap(),
@@ -699,6 +705,7 @@ fn port_ansi_turns_blank_runs_into_spaces_and_refuses_what_the_reader_would_misr
         ("a\rb", "\"\\r\""),
         ("\u{1b}(B", "\"\\u{1b}(\""),
         ("\u{1b}[99999C", "\"\\u{1b}[99999C\""),
+        ("\u{1b}[99999X", "\"\\u{1b}[99999X\""),
         ("cut \u{1b}[3", "\"\\u{1b}[3\""),
     ] {
         assert_eq!(port_ansi(screen), Err(refused.to_owned()), "{screen:?}");

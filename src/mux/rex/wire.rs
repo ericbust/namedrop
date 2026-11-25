@@ -245,6 +245,12 @@ pub(crate) fn port_ansi(vt: &str) -> Result<String, String> {
                             screen.push_str(&format!("\u{1b}[{parameters}m"));
                         }
                         ('C', Some(count)) => screen.extend(std::iter::repeat_n(' ', count)),
+                        // Rex 0.1.0-preview.23 erases a run that has a
+                        // background, such as Codex's prompt box, before the
+                        // `C` that moves over it. The dump draws onto a blank
+                        // screen, so the erase changes nothing the `C` leaves
+                        // out, and the cursor stays.
+                        ('X', Some(_)) => {}
                         _ => return refuse(&format!("\u{1b}[{parameters}{last}")),
                     }
                 }
