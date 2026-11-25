@@ -715,19 +715,32 @@ mod tests {
         assert_eq!(mixed.server.pid, server.pid());
     }
 
+    /// A Rex block can run Codex as its own program, so its process reply
+    /// names no shell. Its foreground group still shows `--no-daemon`.
     #[test]
-    fn an_in_process_pane_herdr_names_no_shell_for_stays_served() {
+    fn an_in_process_pane_with_no_shell_is_not_served() {
         let root = Root::new();
         let server = Process::server(&root.codex_home());
         root.write("app-server-daemon/daemon.pid", &pid_record(server.pid()));
         let in_process = Process::spawn(Command::new("sleep").arg0("--no-daemon").arg("30"));
-        let herdr = herdr(
-            BTreeMap::from([("w1:p1".to_owned(), vec![in_process.pid()])]),
-            vec!["w1:p1"],
+        let plain = Process::spawn(Command::new("sleep").arg0("codex").arg("30"));
+        let host = herdr(
+            BTreeMap::from([
+                ("w1:p1".to_owned(), vec![in_process.pid()]),
+                ("w1:p2".to_owned(), vec![plain.pid()]),
+            ]),
+            vec!["w1:p1", "w1:p2"],
         );
-        let served = served(&root, &herdr, &[pane("w1:p1", crate::AgentRuntime::Codex)])
-            .expect("a reply without a shell proves nothing, so the pane stays served");
-        assert_eq!(served.pane_ids(), ["w1:p1"]);
+        let served = served(
+            &root,
+            &host,
+            &[
+                pane("w1:p1", crate::AgentRuntime::Codex),
+                pane("w1:p2", crate::AgentRuntime::Codex),
+            ],
+        )
+        .expect("a plain Codex with no shell is still served");
+        assert_eq!(served.pane_ids(), ["w1:p2"]);
     }
 
     #[test]
