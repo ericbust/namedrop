@@ -562,7 +562,7 @@ fn main() -> ExitCode {
         return run_context_hook(state_directory, inherited, execute_session_start_hook);
     }
     if let Some(state_directory) = cli.mailbox_wake_hook_state_directory() {
-        return run_mailbox_wake_hook(state_directory, inherited);
+        return run_mailbox_wake_hook(state_directory, inherited, command_guard.take().flatten());
     }
     if cli.is_agent_status_changed_hook() {
         return run_agent_status_changed_hook(inherited);
@@ -1034,8 +1034,20 @@ fn wake_runtime_mailboxes(runtime: &Runtime<'_>) -> Result<(), String> {
         runtime.state_directory,
         runtime.session_socket_id,
         &current_space(runtime)?,
-        false,
+        AfterScheduling::Return,
     )
+}
+
+/// What the caller of `schedule_mailbox_workers` does once the workers start.
+enum AfterScheduling {
+    Return,
+    /// Wait for them, without the command gate. Each worker takes the gate for
+    /// its own units, and while one retries, an update or `install --remove`
+    /// needs the gate exclusively, so a hook that kept it while waiting left
+    /// them busy for as long as the worker retried.
+    Wait {
+        gate: Option<fs::File>,
+    },
 }
 
 fn current_space(runtime: &Runtime<'_>) -> Result<String, String> {
@@ -1049,7 +1061,7 @@ fn schedule_mailbox_workers(
     state_directory: &Path,
     socket_id: &str,
     here: &str,
-    wait_for_workers: bool,
+    after: AfterScheduling,
 ) -> Result<(), String> {
     let mut failures = Vec::new();
     let mut workers = Vec::new();
@@ -1067,7 +1079,8 @@ fn schedule_mailbox_workers(
             failures.push(format!("{space}: {error}"));
         }
     }
-    if wait_for_workers {
+    if let AfterScheduling::Wait { gate } = after {
+        drop(gate);
         for (space, mut worker) in workers {
             if let Err(error) = worker.wait() {
                 failures.push(format!("{space}: {error}"));
@@ -1719,8 +1732,12 @@ fn state_required() -> String {
 /// sent. Its hook shell has exited by the time it runs, so it is nobody's
 /// pane: it reconciles the whole space and takes no identity from the pane
 /// ID it inherited, which no session ID vouches for under Codex.
-fn run_mailbox_wake_hook(state_directory: &Path, inherited: &dyn Inherited) -> ExitCode {
-    let wake = || -> Result<(), String> {
+fn run_mailbox_wake_hook(
+    state_directory: &Path,
+    inherited: &dyn Inherited,
+    gate: Option<fs::File>,
+) -> ExitCode {
+    let wake = move || -> Result<(), String> {
         let home = home::resolve(&home::Flags::default(), inherited)?;
         if let Home::Rex(place) = &home {
             let space = place
@@ -1731,7 +1748,7 @@ fn run_mailbox_wake_hook(state_directory: &Path, inherited: &dyn Inherited) -> E
                 state_directory,
                 &place.endpoint.key,
                 space.as_str(),
-                true,
+                AfterScheduling::Wait { gate },
             );
         }
         let location = home
@@ -1750,7 +1767,12 @@ fn run_mailbox_wake_hook(state_directory: &Path, inherited: &dyn Inherited) -> E
                 namedrop::discover_worktree(&herdr, &cwd)?.workspace_id
             }
         };
-        schedule_mailbox_workers(state_directory, &socket_id, &space_id, true)
+        schedule_mailbox_workers(
+            state_directory,
+            &socket_id,
+            &space_id,
+            AfterScheduling::Wait { gate },
+        )
     };
     match wake() {
         Ok(()) => ExitCode::SUCCESS,

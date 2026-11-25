@@ -613,6 +613,59 @@ fn a_retrying_status_worker_lets_an_update_take_the_command_gate() {
     assert!(!marker.exists());
 }
 
+/// `hook mailbox-wake` waits for the worker it starts, and that worker can
+/// retry for as long as its host stays away. Meanwhile an update or
+/// `install --remove` must still get the command gate.
+#[test]
+fn a_waiting_mailbox_wake_lets_an_update_take_the_command_gate() {
+    let fixture = Fixture::new();
+    fixture.initialize();
+    fs::create_dir_all(fixture.state().join("runtime")).unwrap();
+    fixture.set_herdr(&format!(
+        "if [ ! -f \"$NAMEDROP_TEST_FIXTURE/host-ready\" ]; then\n\
+           touch \"$NAMEDROP_TEST_FIXTURE/host-failed\"\n\
+           printf '%s\\n' '{{\"error\":{{\"code\":\"connection_refused\",\"message\":\"host restarting\"}}}}' >&2\n\
+           exit 1\nfi\n{HERDR_SCRIPT}"
+    ));
+    let mut wake = fixture
+        .command()
+        .args(["hook", "mailbox-wake", "--state-directory"])
+        .arg(fixture.state())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !fixture.root.join("host-failed").exists() {
+        assert!(Instant::now() < deadline, "host failure was not reached");
+        thread::sleep(Duration::from_millis(10));
+    }
+    let gate = fs::File::open(fixture.state().join("runtime/commands.lock")).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while gate.try_lock().is_err() {
+        assert!(
+            Instant::now() < deadline,
+            "a mailbox wake waiting for its worker still holds the command gate"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        wake.try_wait().unwrap().is_none(),
+        "the wake must still be waiting for its worker, or the check proves nothing"
+    );
+    gate.unlock().unwrap();
+    fs::write(fixture.root.join("host-ready"), "ready").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = wake.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "the wake never finished");
+        thread::sleep(Duration::from_millis(50));
+    };
+    assert!(status.success(), "{status:?}");
+}
+
 /// A worker starts in whatever directory its hook ran in, such as a plugin
 /// checkout or a worktree, and can outlive it. Every reconcile used to read the
 /// current directory first, so once it was removed each event failed the same
