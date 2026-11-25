@@ -2,11 +2,11 @@
 
 Test the Channels Beta included in the normal `main` installation on Linux and macOS. Run every step on each platform. Record your platform, Herdr, Namedrop and agent versions, the failed step, and what you saw. Remove private conversation text and credentials before sharing screenshots or logs in an [issue](https://github.com/ericbust/namedrop/issues).
 
-You need Herdr 0.7.5 or newer, Claude Code, Codex, and a browser. See [Install](../README.md#install) for the full requirements. Use a test repository for commands that create files.
+You need Herdr 0.7.5 or newer, Claude Code, Codex, and a browser. See [Run Namedrop in Herdr](herdr.md#install) for the full requirements. Use a test repository for commands that create files.
 
 ## Test Channels
 
-1. Follow [Install the plugin](../README.md#install-the-plugin) for a normal `main` installation. If Namedrop is already installed, follow [Update Namedrop](../README.md#update-namedrop). Channels needs no separate installation.
+1. Follow [Install the plugin](herdr.md#install-the-plugin) for a normal `main` installation. If Namedrop is already installed, follow [Update Namedrop](herdr.md#update-namedrop). Channels needs no separate installation.
 2. In the setup tab, read the result and press Enter. Open a new terminal tab and run `namedrop doctor`. Resolve reported setup problems before continuing.
 3. Start a fresh Claude Code session in one pane. Ask it to `Name yourself @claude with Namedrop.`
 4. Start a fresh Codex session in another pane. Ask it to `Name yourself @codex with Namedrop.` Fresh sessions load the reminder commands.

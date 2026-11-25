@@ -750,6 +750,7 @@ fn the_archive_bundles_every_declared_entrypoint_including_the_naming_popup() {
         "docs/operations.md",
         "docs/compatibility.md",
         "docs/releasing.md",
+        "docs/herdr.md",
         "docs/rex.md",
         "docs/rex-reference.md",
         "docs/channels-testing.md",

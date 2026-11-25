@@ -1,6 +1,8 @@
 # Run Namedrop on Rex
 
-Rex support is experimental. Namedrop 1.12.0 is the first release that includes it. This guide installs Namedrop in [Rex](https://www.superlogical.com/rex/docs) without Herdr, sets up your agents, and connects them to agents on a second machine. For the palette actions, the files the install writes, Doctor's Rex diagnostics, and the known limits, see [Namedrop on Rex reference](rex-reference.md). For the Rex versions that Namedrop accepts and what has been tested, see [Compatibility](compatibility.md#rex-experimental).
+> **Rex support is beta and under active development.** Namedrop 1.12.0 is the first release that includes it. Rex Server is itself a preview, so a new Rex preview can change behavior that Namedrop relies on, and Namedrop's Rex support can change between releases. [Compatibility](compatibility.md#rex-beta) lists the Rex versions that Namedrop accepts and the ones that were tested. [Limits of Rex support](rex-reference.md#limits-of-rex-support) lists what doesn't work on Rex yet.
+
+This guide installs Namedrop in [Rex](https://www.superlogical.com/rex/docs) without Herdr, sets up your agents, and covers the palette, keys, troubleshooting, updates, and removal. It also connects your agents to agents on a second machine. For the palette actions, the files the install writes, Doctor's Rex diagnostics, and the known limits, see [Namedrop on Rex reference](rex-reference.md). The [README](../README.md) describes what Namedrop does once it runs, such as mentions, groups, Agent status, and Channels. If you use Herdr, see [Run Namedrop in Herdr](herdr.md) instead.
 
 On Rex, Namedrop names panes, delivers mentions and replies between agents in one Rex session, and keeps names current through its bridge, a background process that reads Rex's events. Its relay sends a mention to an agent on another machine that runs its own Rex server and its own Namedrop.
 
@@ -9,7 +11,7 @@ On Rex, Namedrop names panes, delivers mentions and replies between agents in on
 You need:
 
 - macOS on Apple silicon, or Linux on x86_64 or aarch64 with glibc.
-- Rex, with its server running.
+- Rex, with its server running. Namedrop needs a Rex server that supports control API revision 12, 13 or 14. `rex version` prints the range that a server supports.
 - Python 3.9 or newer. On macOS, `xcode-select --install` installs Python 3 with the Command Line Tools.
 - Claude Code, Codex, or both.
 
@@ -38,7 +40,7 @@ Do these steps on each machine that runs agents.
 	sh scripts/install.sh
 	```
 
-	It prints `Namedrop Rex install:` with `new`, `update`, or `adopt`, then the state directory, the launcher, the Rex server, and each file it will install or update. It changes nothing before you answer.
+	It prints `Namedrop Rex install:` with `new`, `update`, or `adopt`, then the state directory, the launcher, the Rex server, a line that says Rex support is beta, and each file it will install or update. It changes nothing before you answer.
 
 4. Check the `Rex server:` line. It must name the socket of the Rex server you use. Then answer `y` to `Install Namedrop for Rex? [y/N]`. To skip the question, run `sh scripts/install.sh --yes`.
 5. Read the report. It lists the module and the `init.lua` line, what it installed, each key and whether it is in effect, the `namedrop` shell command, and the agent steps. It ends with `In the Rex palette, run Activate Namedrop, then Name this pane. Start new agent sessions.`
@@ -96,6 +98,67 @@ Namedrop's palette actions and keys were tested in the Rex app on Rex Server pre
 
 If an agent's pane gets no agent session, run **Namedrop Doctor** or `namedrop doctor`. `ND-SESSION-004` says why Namedrop refused to bind the agent session, and `ND-SESSION-003` reports a Codex shared app-server. `ND-SESSION-002` means that Namedrop has no agent session for the agent yet, because its hook has not run or is not installed. Run **Activate Namedrop** again, restart the agent, send it a prompt, and run Doctor again.
 
+## Open Namedrop's screens
+
+Namedrop's screens open in a floating Rex layer over the pane you run them from. Run an action from the `Namedrop` category of the Rex command palette, or press its key:
+
+| Action | Key | Opens |
+|---|---|---|
+| Name this pane | `alt+shift+cmd+i` | The naming screen for this pane |
+| Manage Namedrop names and agents | `alt+shift+cmd+m` | [Manage names](../README.md#manage-names) for this Rex session |
+| Agent status | `alt+shift+cmd+s` | [Agent status](../README.md#agent-status) for this pane |
+| Namedrop Doctor | `alt+shift+cmd+h` | Doctor's report for this Rex session. See [Troubleshooting](#troubleshooting) |
+| Namedrop tour | `alt+shift+cmd+o` | The [tour](../README.md#tour) |
+| Open Namedrop Channels | None | [Channels](../README.md#channels-beta) in your browser. See [Channels on Rex](../README.md#channels-on-rex) for what differs |
+
+On a Mac, `alt+shift+cmd+i` is Option-Shift-Command-I. The module binds a key only when no other binding holds it when Rex loads the module, and a key that `init.lua` binds after the Namedrop line wins over Namedrop's. The install report and Doctor's `ND-REX-001` say whether each key is in effect.
+
+To run an action without the palette or a key, run `rex do namedrop_<name>` in a Rex pane, such as `rex do namedrop_doctor`. [Palette actions and keys](rex-reference.md#palette-actions-and-keys) lists every action and its name.
+
+## Pause, resume, or deactivate Namedrop
+
+Each of these acts on the current Rex session and keeps its names and messages:
+
+- **Pause Namedrop** stops all collaboration in the Rex session. Messages wait until you resume, and Doctor shows `ND-SPACE-001` while the session is paused.
+- **Resume Namedrop** starts it again.
+- **Deactivate Namedrop** turns Namedrop off in the Rex session. Run **Activate Namedrop** to turn it back on.
+
+Run them from the palette, or from a shell in a pane of the Rex session:
+
+```sh
+namedrop space pause
+namedrop space resume
+namedrop deactivate
+```
+
+To remove Namedrop from the machine, see [Remove Namedrop from Rex](#remove-namedrop-from-rex).
+
+## Troubleshooting
+
+Run **Namedrop Doctor** from the palette, press `alt+shift+cmd+h`, or run `namedrop doctor` in a shell in a pane of the Rex session. Doctor's exit codes and screen work as [Troubleshooting](../README.md#troubleshooting) in the README describes. These are the Rex problems you are most likely to see. [Doctor on Rex](rex-reference.md#doctor-on-rex) gives the full text of each code.
+
+| Doctor reports | What to do |
+|---|---|
+| `ND-SETUP-001`, Namedrop is not active in this Rex session | Run **Activate Namedrop** |
+| `ND-REX-001`, the Rex module is not confirmed | If an older module is still loaded, run `rex config reload`. Otherwise run `sh scripts/install.sh` again. Then run Doctor again |
+| `ND-SESSION-002`, no session identity for a pane | Send the agent a prompt. If it still has none after a turn, run **Activate Namedrop** again and restart the agent |
+| `ND-SESSION-003`, a Codex session runs through Codex's shared app-server | Start Codex as `codex --no-daemon`, or follow [the shared app-server fix](compatibility.md#codex-0162-and-later-the-shared-app-server) |
+| `ND-SESSION-004`, Namedrop refused to bind the agent session | Start the agent as the pane's own program, at its shell, then send it one prompt |
+| `ND-INTEGRATION-003`, a hook wrapper does not name its agent | Run **Activate Namedrop** again, then restart the agent |
+| `ND-SPACE-001`, Namedrop is paused in this Rex session | Run **Resume Namedrop** |
+| `ND-UPDATE-002`, update checks are disabled by invalid settings | Set `check_for_updates` to `true` or `false` in `~/.config/namedrop/settings.json` |
+
+Other problems:
+
+- **The palette lists no Namedrop actions.** Rex has not loaded the module. Check that `init.lua` has `pcall(require, "namedrop");` on its own line, run `rex config reload`, then run `namedrop doctor` and read `ND-REX-001`.
+- **A key does nothing.** Another binding holds it. Run the action from the palette or with `rex do`, and see [Open Namedrop's screens](#open-namedrops-screens).
+- **An action fails.** `Namedrop's launcher <path> is missing. Run sh scripts/install.sh again.` means what it says. `<title> did not finish within 25 s, so Rex stopped it.` usually means an update is running, so try again when it is done. [Palette actions and keys](rex-reference.md#palette-actions-and-keys) lists every action error.
+- **The `namedrop` command is not found.** Open a new Rex pane. The installer adds `~/.local/bin` to `PATH` in your zsh or bash startup files only. For another shell, add `~/.local/bin` to `PATH` yourself.
+- **The installer stops.** Its message says why and what to do. [install.sh messages](rex-reference.md#installsh-messages) lists them.
+- **The palette does not work at all.** Use the shell commands in [Activate Namedrop and name your panes](#activate-namedrop-and-name-your-panes).
+
+When you [report a problem](https://github.com/ericbust/namedrop/issues), include the output of `rex version` and `namedrop --version`, your platform and agent versions, the steps to reproduce, and Doctor's report. Remove credentials and private conversation text first.
+
 ## Update Namedrop
 
 An install that `install.sh` made checks for a new release once a day. When one is available, your agents show this at the start of an agent session, and Doctor shows it as `ND-UPDATE-001`:
@@ -122,6 +185,19 @@ To turn off the check, create `~/.config/namedrop/settings.json` with this conte
 On a Mac without the developer tools, the check does not run, because Apple's `/usr/bin/python3` and `/usr/bin/git` only offer to install them. Run `xcode-select --install` to turn the check on. [Updates](rex-reference.md#updates) gives the full rules.
 
 If Herdr owns your Namedrop install, as it does after [Herdr first, then Rex](#herdr-first-then-rex), update it with **Update Namedrop** in Herdr. That updates Namedrop for both Herdr and Rex.
+
+## Remove Namedrop from Rex
+
+1. Close every Namedrop screen that is open in Rex. Removal waits 60 seconds for an open screen, then fails with `Namedrop on Rex is busy`.
+2. In a Rex pane, run:
+
+	```sh
+	namedrop install --remove --input-json '{"confirmed":true}'
+	```
+
+For an install that `install.sh` made, removal deletes the Rex configuration, the agent packages, and the `namedrop` shell command, and prints `Namedrop was removed from Rex. Its state directory was preserved.` It keeps the state directory with your names and messages, the newest `init.lua` backup, and the `PATH` lines in your shell startup files. [namedrop install](rex-reference.md#namedrop-install) lists what removal deletes. To install again, run `sh scripts/install.sh`. An install into the same state directory brings back your names.
+
+If Herdr owns the install, removal deletes only the Rex module and the `init.lua` line, and prints `Removed only the Rex configuration. The shared packages and install record belong to another owner.` To remove Namedrop from Herdr too, follow [Uninstall from Herdr](herdr.md#uninstall).
 
 ## Use Herdr and Rex on one machine
 
@@ -168,19 +244,6 @@ After the move:
 Until each agent from before the move takes a turn or ends, Herdr's Doctor reports `ND-INSTALL-001`, "Agents on Rex have not run the new hooks yet." It lists each agent's pane. The old install's commands refuse with the short form of `ND-INSTALL-001`, which names Herdr's state directory. [ND-INSTALL-001](rex-reference.md#nd-install-001) gives both texts.
 
 If you add a Herdr release without Rex support after a Rex install, Doctor on Rex reports `ND-INSTALL-003`. Update Namedrop in Herdr, then run **Activate Namedrop** in Herdr again.
-
-## Remove Namedrop from Rex
-
-1. Close every Namedrop screen that is open in Rex. Removal waits 60 seconds for an open screen, then fails with `Namedrop on Rex is busy`.
-2. In a Rex pane, run:
-
-	```sh
-	namedrop install --remove --input-json '{"confirmed":true}'
-	```
-
-For an install that `install.sh` made, removal deletes the Rex configuration, the agent packages, and the `namedrop` shell command, and prints `Namedrop was removed from Rex. Its state directory was preserved.` It keeps the state directory with your names and messages, the newest `init.lua` backup, and the `PATH` lines in your shell startup files. [namedrop install](rex-reference.md#namedrop-install) lists what removal deletes. To install again, run `sh scripts/install.sh`. An install into the same state directory brings back your names.
-
-If Herdr owns the install, removal deletes only the Rex module and the `init.lua` line, and prints `Removed only the Rex configuration. The shared packages and install record belong to another owner.` To remove Namedrop from Herdr too, follow [Uninstall](../README.md#uninstall).
 
 ## Mention an agent on another machine
 

@@ -1333,6 +1333,7 @@
       "file": "scripts/package-release.sh",
       "reason": "Internal script argv, prerequisite check, packaging file list or git object path; not Rex UI text.",
       "literals": [
+        [74, "for doc in operations compatibility releasing herdr rex rex-reference channels-testing"],
         [89, "sha256 bin/namedrop herdr-plugin.toml runtime.json README.md CHANGELOG.md CONTRIBUTING.md LICENSE scripts/setup.sh scripts/install.sh scripts/update.sh scripts/update.py scripts/run.sh scripts/runtime.py scripts/runtime_install.py scripts/check-linux-prerequisites.sh docs/*.md"]
       ]
     },

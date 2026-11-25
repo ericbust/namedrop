@@ -51,9 +51,9 @@ To fix one session only, leave the setting on and start that Codex with `codex -
 
 Namedrop reports this as ND-SESSION-003 in `namedrop doctor`, when you name a Codex pane, during activation, and at the start of an affected Codex session.
 
-## Rex (experimental)
+## Rex (beta)
 
-Rex support is experimental. Namedrop 1.12.0 is the first release that includes it. On Rex, Namedrop does not need Herdr, and `sh scripts/install.sh` from the release archive installs it. See [Run Namedrop on Rex](rex.md).
+Rex support is beta and under active development. Namedrop 1.12.0 is the first release that includes it. Rex Server is itself a preview, so a new Rex preview can change behavior that Namedrop relies on. The table below lists the Rex builds that Namedrop supports, and [What has been tested on Rex](#what-has-been-tested-on-rex) records what each was tested with. On Rex, Namedrop does not need Herdr, and `sh scripts/install.sh` from the release archive installs it. See [Run Namedrop on Rex](rex.md).
 
 Namedrop speaks Rex's control protocol, `rex.control.v1`, at API revisions 12, 13 and 14. It offers revisions 12 to 14, and the server answers with the highest revision that both support. Namedrop refuses any other answer with `the server's welcome is not one for rex.control.v1 revisions 12 to 14`. `rex version` prints a server's revision and the range it supports.
 
