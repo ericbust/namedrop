@@ -13,18 +13,19 @@ checks for the lane's session when nothing is named yet, so that session, A, has
    palette and its agents are named @claude and @codex from the palette, the same names as A's.
 2. Types cross-session mentions into the agents and judges the store and the screens: A's
    Claude Code to `#beta @codex`, B's Claude Code to `#alpha @codex`, A's Codex to
-   `#all @claude`, and A's Claude Code to `#nosuch @codex`, a label no session has. Each send
-   must reach only the named agent, once, as a bridged copy in the recipient's session, and
-   the reply must come back to the sender in the same thread. The unknown label typed as a
-   prompt must stay the person's prompt and send nothing, and Claude Code's own `send` of it
-   must be refused in Rex's words.
-3. Reads what the agents were shown, the roster line `Other Rex sessions:` among it, from
-   their transcripts, and checks that nothing is left awaiting and Doctor is clean in both
-   sessions.
+   `#all @claude`, B's Claude Code to a bare `@codex`, and A's Claude Code to
+   `#nosuch @codex`, a label no session has. Each labelled send must reach only the named
+   agent, once, as a bridged copy in the recipient's session, and the reply must come back to
+   the sender in the same thread; the bare one must stay in B. Every delivery must settle
+   after one attempt. The unknown label typed as a prompt must stay the person's prompt and
+   send nothing, and Claude Code's own `send` of it must be refused in Rex's words.
+3. Reads the roster line `Other Rex sessions:` from the Claude Code transcripts, which must
+   list the other session's names, and `address list` across sessions from A.
 4. Runs `namedrop channels --no-open` in A's shell block, opens the printed link as a person
    does, and reads the page's own routes: the page loads, both sessions and their agents show,
-   and a composer post to an agent in A and one in B each get one answer in their thread. The
-   Rex limits the docs record are written down, not failed on.
+   and a composer post to an agent in A and one in B each get one answer in their thread. New
+   channel and Add agent must refuse with Rex's 501. Live Peek is not tried.
+5. Checks that nothing is left awaiting and Doctor is healthy in both sessions.
 
 Every rex call names the lane's server with -S and --autostart=false, from the lane's own
 environment. Claude Code runs only as the profile's token wrapper. The driver logs every
@@ -44,6 +45,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.request
 
 sys.dont_write_bytecode = True
 HERE = Path(__file__).resolve().parent
@@ -61,17 +63,29 @@ ALPHA, BETA, UNKNOWN = "alpha", "beta", "nosuch"
 # A delivery prompt (src/pointer.rs): its nonce, and its sender, which a bridged copy prefixes
 # with the sender's session label.
 BANNER = re.compile(r"Namedrop\s+message\s+([0-9a-f]{8})\s+from\s+(?:#([\w-]+)\s+)?@([\w-]+)")
-SETTLED = ("acknowledged", "settled")
+SETTLED = ("settled",)
 
 
 class Run(step6.Run):
-    """step6's Run, except a failed check is recorded and the run goes on."""
+    """step6's Run, except a failed check is recorded and the run goes on, and `prefix` names
+    the session whose palette steps step6's own wording describes."""
+
+    prefix = ""
 
     def check(self, what, passed, detail=None):
         try:
-            super().check(what, passed, detail)
+            super().check(self.prefix + what, passed, detail)
         except Failed:
             pass
+
+    def observe(self, key, value):
+        super().observe(self.prefix + key, value)
+
+
+def all_settled_once(rows):
+    """Every delivery of every row, the reply legs included, settled after one attempt."""
+    return bool(rows) and all(d["state"] in SETTLED and d["attempts"] <= 1
+                              for row in rows for d in row["to"])
 
 
 def lane_for(a, session, blocks):
@@ -159,7 +173,8 @@ def new_banner(lane, block, before, drawn):
 
 
 def word(index):
-    return ("amber", "cobalt", "fennel", "juniper", "saffron", "tundra", "quartz")[index] + str(
+    return ("amber", "cobalt", "fennel", "juniper", "saffron", "tundra", "quartz", "violet")[
+        index] + str(
         int(time.time()) % 900 + 100)
 
 
@@ -250,9 +265,8 @@ def cross(run, a, spaces, sender, recipient, label, text_word, others):
     run.check(what + ": the reply comes back to the sender in the same thread",
               len(answer) == 1 and reply["bridged"] == r_space and
               reply["thread"] == original[0]["thread"] if original else False, detail)
-    run.check(what + ": every delivery settled and nothing repeated in 15 s",
-              all(d["state"] in SETTLED for row in rows for d in row["to"]) and again == rows,
-              detail)
+    run.check(what + ": every delivery settled after one attempt and nothing repeated in 15 s",
+              all_settled_once(rows) and again == rows, detail)
 
 
 def broadcast(run, a, spaces, sender, agent, text_word, targets, others):
@@ -293,15 +307,55 @@ def broadcast(run, a, spaces, sender, agent, text_word, targets, others):
               "stray prompts": stray, "rows after 10 s": len(again)}
     run.observe(what, dict(detail, raw=rows))
     run.check(what + " reaches @{} in {}".format(agent, ", ".join(s for s, _ in targets)),
-              all(len(where(rows, space, reply=False, to=agent)) == 1 and reached[space]
-                  for space, _ in targets) and not any(stray), detail)
-    run.check(what + ": one reply from each comes back, settled, nothing repeated",
+              all(len(where(rows, space, reply=False, to=agent)) == 1 and
+                  len(reached[space]) == 1 for space, _ in targets) and not any(stray), detail)
+    run.check(what + ": one reply from each comes back, every delivery settled after one "
+              "attempt, nothing repeated",
               len(replies) == len(targets) and
               sorted(row["bridged"] or s_space for row in replies) ==
-              sorted(space for space, _ in targets) and
-              all(d["state"] in SETTLED for row in rows for d in row["to"]) and again == rows,
-              detail)
+              sorted(space for space, _ in targets) and all_settled_once(rows) and
+              again == rows, detail)
     return rows
+
+
+def stays_local(run, a, spaces, sender, agent, text_word, others):
+    """A bare `@agent` from the sender reaches only its own session's agent of that name, though
+    the other session has the same name, and the reply comes back there. others: every block of
+    the other session, as (lane, block), none of which may get a prompt."""
+    s_lane, s_space, s_agent = sender
+    prompt = "@{} Please reply with exactly the word {}.".format(agent, text_word)
+    what = "bare @{} from {}'s @{}".format(agent, s_space, s_agent)
+    to_block, from_block = s_lane.blocks[agent], s_lane.blocks[s_agent]
+    stale_to = {b[0] for b in banners(s_lane.screen(to_block))}
+    stale_others = [{b[0] for b in banners(lane.screen(block))} for lane, block in others]
+    since = latest_ms(a)
+    type_prompt(run, s_lane, from_block, prompt, lambda: where(
+        messages(a, since, spaces), s_space, s_agent, False), what + " in the store")
+
+    def back():
+        rows = messages(a, since, spaces)
+        return [row for row in where(rows, s_space, agent, True, to=s_agent)
+                if text_word in row["body"].lower()] and rows
+
+    wait(back, bool, what + "'s reply", 240, 0.5)
+    rows = settle(a, since, spaces)
+    time.sleep(10)
+    again = messages(a, since, spaces)
+    sent = where(rows, s_space, s_agent, False)
+    drawn = set().union(*(nonces(a, row["message"]) for row in sent)) if sent else set()
+    reached = [b[:3] for b in banners(s_lane.screen(to_block))
+               if b[0] not in stale_to and b[0] in drawn]
+    stray = [[b[:3] for b in banners(lane.screen(block)) if b[0] not in before]
+             for (lane, block), before in zip(others, stale_others)]
+    detail = {"rows": show(rows), "prompt on the recipient's screen": reached,
+              "prompts in the other session": stray, "rows after 10 s": len(again)}
+    run.observe(what, dict(detail, raw=rows))
+    run.check(what + " stays in " + s_space + ": only its own @" + agent + " gets it and "
+              "replies, nothing is bridged",
+              len(sent) == 1 and [d["alias"] for d in sent[0]["to"]] == [agent] and
+              len(reached) == 1 and reached[0][1] is None and
+              all(row["space"] == s_space and row["bridged"] is None for row in rows) and
+              not any(stray) and all_settled_once(rows) and again == rows, detail)
 
 
 def store_counts(a):
@@ -536,7 +590,8 @@ def doctor(run, a, session, block):
                                             "doctor"], a.profile.repo, ok=False)
     try:
         data = livetest.last_json(result.stdout).get("data") or {}
-    except SystemExit:
+    except (RuntimeError, ValueError):
+        # livetest.last_json fails through testbed.fail, a RuntimeError.
         data = {"unparsed": result.stdout[-1500:]}
     return result.returncode, data
 
@@ -586,10 +641,15 @@ class Page(dailyuse.Channels):
             return response.status, response.read().decode(errors="replace")
 
     def raw_post(self, path, body):
+        """The status and body a POST answered, whatever the status, as the page sends it."""
+        request = urllib.request.Request(
+            self.base + path, data=json.dumps(body).encode(), method="POST",
+            headers={"Content-Type": "application/json", "X-Namedrop-Csrf": self.csrf})
         try:
-            return 200, self._post(path, body)
-        except dailyuse.ChannelsError as error:
-            return None, str(error)
+            with self.opener.open(request, timeout=30) as response:
+                return response.status, response.read().decode(errors="replace")
+        except urllib.error.HTTPError as error:
+            return error.code, error.read().decode(errors="replace")
 
 
 def channels_link(run, a):
@@ -656,6 +716,10 @@ def channels_smoke(run, a, b, spaces_by_session):
                   {"link": link.split("?")[0], "error": repr(error),
                    "body": error.read().decode(errors="replace")[:300]})
         code, printed, link = channels_link(run, a)
+        if not link:
+            run.check("Channels: the retried namedrop channels --no-open prints a link", False,
+                      {"exit": code, "printed": printed[-600:]})
+            return None
         page = Page(link)
     run.check("Channels: a link signs in", True, link.split("?")[0])
     status, html = page.raw_get("/")
@@ -710,11 +774,18 @@ def channels_limits(run, page, keys, a):
     if not key:
         return notes
     # The bodies the page's New channel and Add agent forms send
-    # (src/dashboard/channel_create.rs).
-    notes["New channel"] = page.raw_post("/w/{}/channels".format(key), {
-        "name": "xs-probe", "folder": str(a.profile.repo)})
-    notes["Add agent"] = page.raw_post("/w/{}/agents".format(key), {
-        "kind": "claude", "name": "xsprobe"})
+    # (src/dashboard/channel_create.rs). Anything but Rex's 501 refusal fails, because a Rex
+    # that accepted them would start an agent outside PROFILE/bin/claude or leave a channel.
+    refusals = {"New channel": ("/w/{}/channels", {"name": "xs-probe",
+                                                    "folder": str(a.profile.repo)},
+                                "Channels can't create a channel in Rex yet."),
+                "Add agent": ("/w/{}/agents", {"kind": "claude", "name": "xsprobe"},
+                              "Channels can't add an agent in Rex yet.")}
+    for form, (path, body, text) in refusals.items():
+        status, answer = page.raw_post(path.format(key), body)
+        notes[form] = [status, answer[:400]]
+        run.check("Channels: {} refuses in Rex with 501 and the documented text".format(form),
+                  status == 501 and text in answer, {"status": status, "answer": answer[:400]})
     frame = (page.by_key.get(key) or [None])[-1]
     notes["health level"] = frame.level if frame else None
     wire = json.dumps(page.raw[-1] if page.raw else {})
@@ -743,17 +814,21 @@ def main():
         print("Rex {} on {}, session A {}".format(version[0] if version else "?", a.lane.server,
                                                   a.session), flush=True)
         if named(a) != {"claude", "codex"}:
+            run.prefix = "A: "
             step6.check_install(run, a)
             step6.activate(run, a)
             for agent in ("claude", "codex"):
                 step6.name_from_palette(run, a, agent)
+            run.prefix = ""
         a.rex("session", "rename", a.session, ALPHA)
         session_b, blocks_b = start_beta(run, a)
         b = lane_for(a, session_b, blocks_b)
         if named(b) != {"claude", "codex"}:
+            run.prefix = "B: "
             step6.activate(run, b)
             for agent in ("claude", "codex"):
                 step6.name_from_palette(run, b, agent)
+            run.prefix = ""
         labels = {row["session_id"]: row.get("label")
                   for row in a.json("list", "--json").get("sessions") or []}
         run.observe("sessions", {"labels": labels, "A": [a.session, a.blocks],
@@ -779,6 +854,9 @@ def main():
                                        [(ALPHA, a), (BETA, b)],
                                        others((ALPHA, "codex"), (ALPHA, "claude"),
                                               (BETA, "claude")))),
+            ("bare @codex", lambda: stays_local(run, a, spaces, (b, BETA, "claude"), "codex",
+                                                word(7), [(a, a.blocks["claude"]),
+                                                          (a, a.blocks["codex"])])),
         ]
         for name, step in steps:
             try:
@@ -801,14 +879,16 @@ def main():
                     "files": [str(p) for p in transcript_files(a.profile, agent, session_id)],
                     "lines": other_sessions_lines(a.profile, agent, session_id)}
         run.observe("other-sessions lines the agents were shown", shown)
-        run.check("A's Claude Code was shown an `Other Rex sessions:` line naming B's agents",
-                  any("1 other Rex session has named agents (@claude, @codex)" in line
-                      for line in shown.get(ALPHA + " @claude", {}).get("lines", [])),
-                  shown.get(ALPHA + " @claude"))
-        run.check("B's Claude Code was shown an `Other Rex sessions:` line naming A's agents",
-                  any("1 other Rex session has named agents (@claude, @codex)" in line
-                      for line in shown.get(BETA + " @claude", {}).get("lines", [])),
-                  shown.get(BETA + " @claude"))
+        for space, other in ((ALPHA, b), (BETA, a)):
+            expected = {"@" + alias for alias in named(other)}
+            lines = shown.get(space + " @claude", {}).get("lines", [])
+            roster = [set(re.search(r"\(([^)]*)\)", line).group(1).split(", ")) for line in lines
+                      if line.startswith("Other Rex sessions: 1 other Rex session has")]
+            run.check("{}'s Claude Code was shown `Other Rex sessions: 1 other Rex session` "
+                      "with {}'s names {}".format(space, spaces[other.session],
+                                                  sorted(expected)),
+                      bool(roster) and roster[-1] == expected,
+                      {"lines": lines, "expected": sorted(expected)})
         run.check("no agent was shown Herdr's `Other workspaces:` wording",
                   not any(line.startswith("Other workspaces") for row in shown.values()
                           for line in row["lines"]), shown)
@@ -820,6 +900,19 @@ def main():
         run.observe("address list workspaces all from A's @claude",
                     {"exit": address_list.returncode, "stdout": address_list.stdout[-4000:],
                      "stderr": address_list.stderr[-1000:]})
+        try:
+            listed = {row.get("label"): {(entry.get("alias"), entry.get("pane_id"))
+                                         for entry in row.get("addresses") or []}
+                      for row in (json.loads(address_list.stdout).get("data") or {}).get(
+                          "workspaces") or []}
+        except ValueError:
+            listed = {}
+        wanted = {space: {(agent, lane.blocks[agent]) for agent in ("claude", "codex")}
+                  for space, lane in lanes.items()}
+        run.check("address list from A's @claude names #alpha and #beta, each with its own "
+                  "@claude and @codex blocks", listed == wanted,
+                  {"listed": {k: sorted(v) for k, v in listed.items()},
+                   "wanted": {k: sorted(v) for k, v in wanted.items()}})
         if not args.skip_channels:
             try:
                 limits = channels_smoke(run, a, b, spaces)
@@ -836,8 +929,8 @@ def main():
                       for issue in data.get("issues") or []]
             problems = [issue for issue in issues if issue[1] != "info"]
             run.observe("doctor in " + space, data)
-            run.check("Doctor is clean in " + space + " (info items allowed)", code == 0 and not problems and
-                      data.get("status") in ("healthy", "ok", None),
+            run.check("Doctor is clean in " + space + " (info items allowed)",
+                      code == 0 and not problems and data.get("status") == "healthy",
                       {"exit": code, "status": data.get("status"), "issues": issues,
                        "waiting": data.get("waiting_messages")})
     except (Failed, RuntimeError, subprocess.SubprocessError, OSError, KeyError, ValueError,
