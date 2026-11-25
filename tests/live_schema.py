@@ -658,7 +658,11 @@ def busy_gate_advice():
                'working': [(44, 'namedrop hook agent-status-worker', True)],
                'popup': [(42, 'namedrop ui run tour', True)],
                'both': [(41, 'namedrop hook agent-status-worker', False), (42, 'namedrop ui run tour', True)],
-               'other': [(43, 'namedrop reply', True)], 'none': []}
+               'other': [(43, 'namedrop reply', True)],
+               'wake': [(45, 'namedrop hook mailbox-wake', True)],
+               'wake and worker': [(45, 'namedrop hook mailbox-wake', True),
+                                   (44, 'namedrop hook agent-status-worker', True)],
+               'none': []}
     found = runtime.gate_holders
     try:
         messages = {}
@@ -667,14 +671,20 @@ def busy_gate_advice():
             messages[name] = runtime.busy_gate_message(Path('/unused'))
     finally:
         runtime.gate_holders = found
-    # Only a status worker from before 1.7.0 holds the lock between jobs, so
-    # only that one is worth stopping by hand.
+    # A status worker from before 1.7.0 holds the lock between jobs, and a
+    # mailbox wake from before 1.12.0 holds it while it waits for its worker,
+    # so only those are worth stopping by hand.
     assert 'kill 41' in messages['worker'] and 'status worker' in messages['worker'] and 'popup' not in messages['worker']
     assert 'kill' not in messages['working'] and 'PID 44' in messages['working'], messages['working']
     assert 'wait' in messages['working'], messages['working']
     assert 'popup' in messages['popup'] and 'kill' not in messages['popup']
     assert 'popup' in messages['both'] and 'kill 41' in messages['both'] and 'kill 42' not in messages['both']
     assert 'kill' not in messages['other'] and 'PID 43 (namedrop reply)' in messages['other'], messages['other']
+    # A waiting mailbox wake may wait for hours on its worker, and stopping it
+    # loses nothing; a worker in the middle of a job is still waited for.
+    assert 'kill 45' in messages['wake'] and 'wait a moment' not in messages['wake'], messages['wake']
+    both = messages['wake and worker']
+    assert 'kill 45' in both and 'kill 44' not in both and 'wait a moment' in both, both
     assert 'popup' in messages['none']
     assert all('retry the update' in message for message in messages.values())
 
