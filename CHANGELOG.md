@@ -19,7 +19,7 @@ Namedrop now runs in Rex as well as in Herdr. Rex support is experimental. In He
 - Rex support has known limits. [Limits of Rex support](https://github.com/ericbust/namedrop/blob/main/docs/rex-reference.md#limits-of-rex-support) lists them all. These matter most:
 	- Channels' setup and Doctor hints tell a Rex user to open Herdr, and **New channel** and **Add agent** refuse in a Rex session.
 	- After a reboot, the Channels tailnet link stays down on Rex until you run `namedrop channels --no-open`.
-	- The actions were tested in the Rex app's own palette and with its keys only on Rex Server preview.23. On the other builds, they were tested with `rex do --origin palette`.
+	- The Rex app's own palette and keys were tried only on Rex Server preview.23, where Open Namedrop Channels and Deactivate Namedrop were not run. On the other builds, the actions were tested with `rex do --origin palette`.
 	- Real agents were tested on macOS only. A Linux Rex server was tested only as the machine that receives relayed mentions.
 
 ### Changed
