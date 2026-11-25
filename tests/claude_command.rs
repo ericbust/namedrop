@@ -282,6 +282,24 @@ fn claude_command_picks_the_program_for_namedrops_own_claude_calls() {
         assert_eq!(ran, "", "a dangling settings link must run nothing");
         fs::remove_file(link).unwrap();
     }
+    // So is a settings file under a directory link that leads nowhere, as
+    // when ~/.config/herdr links to a dotfiles directory that is gone.
+    let herdr_config = f.root.0.join("home/.config/herdr");
+    let moved = f.root.0.join("herdr-config-moved");
+    fs::rename(&herdr_config, &moved).unwrap();
+    std::os::unix::fs::symlink(f.root.0.join("gone-dotfiles"), &herdr_config).unwrap();
+    let (result, ran) = f.suggest();
+    let error = result.expect_err("a dangling directory link above the settings file");
+    assert!(
+        error.contains(&format!(
+            "{} is a link that leads nowhere",
+            herdr_config.display()
+        )),
+        "{error}"
+    );
+    assert_eq!(ran, "", "a dangling directory link must run nothing");
+    fs::remove_file(&herdr_config).unwrap();
+    fs::rename(&moved, &herdr_config).unwrap();
     f.write_settings(&herdr, r#"{"claude_command":"claude-personal"}"#);
 
     // An owner that cannot be read leaves the file unknown, so nothing runs.

@@ -59,7 +59,18 @@ fn cached_update_is_informational_and_doctor_remains_healthy_and_read_only() {
     assert_eq!(update.diagnostic["last_success_at"], 90);
     assert_eq!(update.diagnostic["last_error"], "offline");
     let text = render_health_report_to_text(&report);
-    assert!(text.starts_with(&render_health_report_to_text(&baseline)));
+    // The baseline's one note, which names the Claude Code program, comes last
+    // in both, after the update notice.
+    let mut quiet = baseline.clone();
+    quiet.issues.retain(|issue| issue.code != "ND-MODEL-002");
+    assert!(text.starts_with(&render_health_report_to_text(&quiet)));
+    let baseline_text = render_health_report_to_text(&baseline);
+    let note = baseline_text.lines().last().unwrap();
+    assert!(
+        note.starts_with("Namedrop's own Claude Code calls run"),
+        "{baseline_text}"
+    );
+    assert_eq!(text.lines().last(), Some(note), "{text}");
     assert!(text.contains("herdr plugin action invoke update --plugin namedrop"));
     assert_eq!(before, fs::read(f.root.join("namedrop.sqlite3")).unwrap());
     assert!(!f.root.join("update-notice.json").exists());
@@ -265,6 +276,12 @@ fn doctor_names_the_claude_command_namedrop_runs() {
     assert_eq!(report.status, HealthStatus::NeedsAttention, "{report:?}");
     let misplaced = claude(&report).unwrap();
     assert_eq!(misplaced.severity, HealthSeverity::Notice);
+    // The target is the file the reason is about: here, the misplaced one.
+    assert_eq!(
+        misplaced.diagnostic["path"],
+        standalone.to_string_lossy().as_ref(),
+        "{misplaced:?}"
+    );
     assert!(
         misplaced.explanation.contains(&format!(
             "claude_command is set in {}, but this install reads {}",

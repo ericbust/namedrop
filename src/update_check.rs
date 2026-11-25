@@ -126,6 +126,28 @@ pub(crate) struct ClaudeCommand {
     pub command: Option<String>,
 }
 
+/// Why the Claude Code program cannot be told, and the file to fix, when
+/// there is one.
+pub(crate) struct SettingsFault {
+    pub path: Option<PathBuf>,
+    pub reason: String,
+}
+
+impl SettingsFault {
+    fn at(path: &Path, reason: String) -> Self {
+        Self {
+            path: Some(path.to_owned()),
+            reason,
+        }
+    }
+}
+
+impl From<SettingsFault> for String {
+    fn from(fault: SettingsFault) -> Self {
+        fault.reason
+    }
+}
+
 /// The `claude_command` setting this install reads, from the settings files
 /// under `roots`.
 ///
@@ -135,16 +157,25 @@ pub(crate) struct ClaudeCommand {
 /// be read, including a link that leads nowhere, and a `claude_command` that
 /// a file this install does not read sets differently are each an error,
 /// never `claude`.
-pub(crate) fn claude_command(state: &Path, roots: &ConfigRoots) -> Result<ClaudeCommand, String> {
+pub(crate) fn claude_command(
+    state: &Path,
+    roots: &ConfigRoots,
+) -> Result<ClaudeCommand, SettingsFault> {
     crate::installed_runtime::standalone(state).map_err(|error| {
-        format!("Namedrop cannot tell which settings.json this install reads: {error}")
+        SettingsFault::at(
+            &state.join("runtime/owner"),
+            format!("Namedrop cannot tell which settings.json this install reads: {error}"),
+        )
     })?;
-    let file = settings_path_in(state, roots)?;
+    let file =
+        settings_path_in(state, roots).map_err(|reason| SettingsFault { path: None, reason })?;
     let command = match present(&file)? {
         false => None,
         true => {
             read_json::<Settings>(&file)
-                .map_err(|error| format!("{} is invalid: {error}", file.display()))?
+                .map_err(|error| {
+                    SettingsFault::at(&file, format!("{} is invalid: {error}", file.display()))
+                })?
                 .claude_command
         }
     };
@@ -154,28 +185,37 @@ pub(crate) fn claude_command(state: &Path, roots: &ConfigRoots) -> Result<Claude
         }
         let set = read_json::<Value>(&other)
             .map_err(|error| {
-                format!(
-                    "{} is invalid, so Namedrop cannot tell whether it sets claude_command: {error}",
-                    other.display()
+                SettingsFault::at(
+                    &other,
+                    format!(
+                        "{} is invalid, so Namedrop cannot tell whether it sets claude_command: {error}",
+                        other.display()
+                    ),
                 )
             })?
             .get("claude_command")
             .cloned();
         match (set, &command) {
             (Some(_), None) => {
-                return Err(format!(
-                    "claude_command is set in {}, but this install reads {}; move it to {}",
-                    other.display(),
-                    file.display(),
-                    file.display()
+                return Err(SettingsFault::at(
+                    &other,
+                    format!(
+                        "claude_command is set in {}, but this install reads {}; move it to {}",
+                        other.display(),
+                        file.display(),
+                        file.display()
+                    ),
                 ));
             }
             (Some(set), Some(command)) if set != *command => {
-                return Err(format!(
-                    "claude_command is set in {} and in {}, which this install reads, to different programs; make them match, or remove it from {}",
-                    other.display(),
-                    file.display(),
-                    other.display()
+                return Err(SettingsFault::at(
+                    &other,
+                    format!(
+                        "claude_command is set in {} and in {}, which this install reads, to different programs; make them match, or remove it from {}",
+                        other.display(),
+                        file.display(),
+                        other.display()
+                    ),
                 ));
             }
             _ => {}
@@ -184,12 +224,37 @@ pub(crate) fn claude_command(state: &Path, roots: &ConfigRoots) -> Result<Claude
     Ok(ClaudeCommand { file, command })
 }
 
-/// Whether anything is at `path`, a link that leads nowhere included.
-fn present(path: &Path) -> Result<bool, String> {
+/// Whether anything is at `path`, a link that leads nowhere included. A path
+/// that is missing because a directory above it is such a link, as when
+/// `~/.config/herdr` links to a dotfiles directory that is gone, cannot be
+/// read either.
+fn present(path: &Path) -> Result<bool, SettingsFault> {
     match fs::symlink_metadata(path) {
         Ok(_) => Ok(true),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(format!("{} cannot be inspected: {error}", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            for directory in path.ancestors().skip(1) {
+                match fs::symlink_metadata(directory) {
+                    Ok(meta) if meta.is_symlink() && fs::metadata(directory).is_err() => {
+                        return Err(SettingsFault::at(
+                            directory,
+                            format!(
+                                "{} is a link that leads nowhere, so Namedrop cannot read {}",
+                                directory.display(),
+                                path.display()
+                            ),
+                        ));
+                    }
+                    // The nearest directory that exists decides it.
+                    Ok(_) => break,
+                    Err(_) => continue,
+                }
+            }
+            Ok(false)
+        }
+        Err(error) => Err(SettingsFault::at(
+            path,
+            format!("{} cannot be inspected: {error}", path.display()),
+        )),
     }
 }
 

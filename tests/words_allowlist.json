@@ -787,7 +787,7 @@
       "file": "src/agent_status_model.rs",
       "reason": "An environment or config name read or set, never printed.",
       "literals": [
-        [1013, "HERDR_"]
+        [1019, "HERDR_"]
       ]
     },
     {
@@ -842,14 +842,14 @@
       "reason": "Channels' New channel and Add agent, which refuse a Rex session before they read or open anything.",
       "literals": [
         [32, "Herdr isn't reachable. Check that Herdr is running, then try again."],
-        [188, "Herdr couldn't create the workspace. Try again."],
-        [192, "Herdr didn't open the workspace in that folder, so it was closed again. Check the folder, then try again."],
-        [289, "Herdr couldn't open a tab for the agent. Try again."],
-        [293, "Herdr didn't open the tab in this channel's folder, so it was closed again. Try again."],
-        [799, "dashboard: Herdr could not create a workspace: {error}"],
-        [805, "dashboard: Herdr opened {} in {:?}, not in {}"],
-        [906, "dashboard: Herdr could not open a tab: {error}"],
-        [911, "dashboard: Herdr opened {} in {:?}, not in {}"]
+        [205, "Herdr couldn't create the workspace. Try again."],
+        [209, "Herdr didn't open the workspace in that folder, so it was closed again. Check the folder, then try again."],
+        [308, "Herdr couldn't open a tab for the agent. Try again."],
+        [312, "Herdr didn't open the tab in this channel's folder, so it was closed again. Try again."],
+        [824, "dashboard: Herdr could not create a workspace: {error}"],
+        [830, "dashboard: Herdr opened {} in {:?}, not in {}"],
+        [932, "dashboard: Herdr could not open a tab: {error}"],
+        [937, "dashboard: Herdr opened {} in {:?}, not in {}"]
       ]
     },
     {
@@ -1428,7 +1428,7 @@
     },
     {
       "file": "src/health.rs",
-      "line": 1835,
+      "line": 1830,
       "text": "Run `namedrop channels --no-open` to start the server again on the same port. Devices that are signed in stay signed in.",
       "reason": "ND-TAILSCALE-001's repair once a tailnet handler's Channels server has stopped, which needs a Tailscale the sweep's homes do not have."
     }

@@ -1738,17 +1738,12 @@ fn claude_program_issue(
                 "ND-MODEL-002",
                 HealthSeverity::Notice,
                 "Namedrop's own Claude Code calls cannot run.",
-                &format!("{CALLS} fail until you fix it: {error}"),
+                &format!("{CALLS} fail until you fix it: {}", error.reason),
                 HealthRepairKind::HumanDecision,
                 "Fix claude_command or the Namedrop settings file that holds it, then run Doctor again. Namedrop never runs claude in its place.",
             );
-            // The file to fix: the owner's when it cannot be read.
-            let path = if crate::installed_runtime::standalone(state).is_err() {
-                Some(state.join("runtime/owner"))
-            } else {
-                crate::update_check::settings_path_in(state, roots).ok()
-            };
-            failed.diagnostic = serde_json::json!({"path": path});
+            // The file the reason is about.
+            failed.diagnostic = serde_json::json!({"path": error.path});
             return failed;
         }
     };
@@ -1979,7 +1974,11 @@ pub fn render_health_report_to_text(report: &HealthReport) -> String {
         HealthStatus::NeedsAttention => "Namedrop needs attention.\n".to_owned(),
         HealthStatus::Healthy => passed + "\n",
     };
-    for issue in &report.issues {
+    // A note only informs, so it takes one line, after everything to act on.
+    let note = |issue: &&HealthIssue| {
+        issue.code == "ND-MODEL-002" && issue.severity == HealthSeverity::Info
+    };
+    for issue in report.issues.iter().filter(|issue| !note(issue)) {
         rendered.push('\n');
         rendered.push_str(&terminal_safe_text(&issue.summary));
         rendered.push('\n');
@@ -2031,6 +2030,11 @@ pub fn render_health_report_to_text(report: &HealthReport) -> String {
                 rendered.push('\n');
             }
         }
+    }
+    for issue in report.issues.iter().filter(note) {
+        rendered.push('\n');
+        rendered.push_str(&terminal_safe_text(&issue.summary));
+        rendered.push('\n');
     }
     rendered.trim_end().to_owned()
 }

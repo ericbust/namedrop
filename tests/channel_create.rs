@@ -863,6 +863,51 @@ fn a_new_agent_gets_its_own_tab_its_name_and_only_the_plain_command() {
     );
 }
 
+/// With `claude_command` set, a new Claude Code agent starts that program,
+/// so it uses the account the program selects. A setting that cannot be
+/// used refuses before any tab opens, rather than typing `claude`.
+#[test]
+fn a_new_claude_agent_starts_the_program_claude_command_names() {
+    let f = fixture();
+    let server = Server::start(&f);
+    let launcher = f.root.join("bin dir/claude-personal");
+    fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+    executable::write_executable(&launcher, "#!/bin/sh\n");
+    let settings = f
+        .root
+        .join("home/.config/herdr/plugins/config/namedrop/settings.json");
+    fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    fs::write(&settings, json!({"claude_command": launcher}).to_string()).unwrap();
+    let response = server.add_agent(
+        "w1",
+        json!({"kind": "claude", "name": "coder", "persona": null}),
+    );
+    assert_eq!(response.status, 201, "{}", response.body);
+    let quoted = format!("'{}'", launcher.display());
+    let runs: Vec<_> = calls(&f)
+        .into_iter()
+        .filter(|call| call[..2] == ["pane", "run"])
+        .collect();
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    assert_eq!(runs[0][3], quoted, "{runs:?}");
+
+    fs::write(&settings, r#"{"claude_command":"missing-launcher"}"#).unwrap();
+    let before = creations(&f).len();
+    let response = server.add_agent(
+        "w1",
+        json!({"kind": "claude", "name": "other", "persona": null}),
+    );
+    assert_eq!(response.status, 409, "{}", response.body);
+    assert!(
+        response
+            .error()
+            .contains("claude_command missing-launcher is not on PATH"),
+        "{}",
+        response.body
+    );
+    assert_eq!(creations(&f).len(), before, "a refused agent opens no tab");
+}
+
 #[test]
 fn a_refused_agent_reads_plainly_and_opens_no_tab() {
     let f = fixture();

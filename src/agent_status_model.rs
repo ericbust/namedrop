@@ -362,29 +362,35 @@ pub(crate) enum ClaudeSource {
 pub(crate) fn claude_program(
     state: &Path,
     roots: &crate::update_check::ConfigRoots,
-) -> Result<(OsString, ClaudeSource), String> {
+) -> Result<(OsString, ClaudeSource), crate::update_check::SettingsFault> {
+    use crate::update_check::SettingsFault;
+    let fault = |path: Option<PathBuf>| move |reason: String| SettingsFault { path, reason };
     if let Some(value) = env::var_os(CLAUDE_OVERRIDE) {
         let value = value
             .into_string()
-            .map_err(|_| format!("{CLAUDE_OVERRIDE} is not valid UTF-8"))?;
+            .map_err(|_| format!("{CLAUDE_OVERRIDE} is not valid UTF-8"))
+            .map_err(fault(None))?;
         return locate(CLAUDE_OVERRIDE, &value)
-            .map(|program| (program.into_os_string(), ClaudeSource::Override));
+            .map(|program| (program.into_os_string(), ClaudeSource::Override))
+            .map_err(fault(None));
     }
     let setting = crate::update_check::claude_command(state, roots)?;
     match setting.command {
-        Some(command) => locate("claude_command", &command).map(|program| {
-            (
-                program.into_os_string(),
-                ClaudeSource::Setting(setting.file),
-            )
-        }),
+        Some(command) => locate("claude_command", &command)
+            .map_err(fault(Some(setting.file.clone())))
+            .map(|program| {
+                (
+                    program.into_os_string(),
+                    ClaudeSource::Setting(setting.file),
+                )
+            }),
         None => Ok(("claude".into(), ClaudeSource::Default)),
     }
 }
 
 /// The executable `value` names, found as the worker will run it: an
 /// absolute path, or a name on `PATH`. `name` is where the value came from.
-fn locate(name: &str, value: &str) -> Result<PathBuf, String> {
+pub(crate) fn locate(name: &str, value: &str) -> Result<PathBuf, String> {
     if value.trim().is_empty() {
         return Err(format!("{name} is empty"));
     }

@@ -640,6 +640,9 @@ mod tests {
     fn post_rename_sync_failure_retains_a_private_recoverable_journal() {
         let root = std::env::temp_dir().join(format!("nd21-sync-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
+        // Settings paths are resolved, so the fault names the resolved file,
+        // as on macOS, where the temporary directory is reached through /var.
+        let root = root.canonicalize().unwrap();
         let directory = root.join("claude");
         fs::create_dir_all(&directory).unwrap();
         let path = directory.join("settings.json");
