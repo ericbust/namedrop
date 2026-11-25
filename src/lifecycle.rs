@@ -2107,24 +2107,44 @@ pub(crate) fn discover_reminder_workspace(
     namespace: &StateNamespace,
     mux: &impl MuxRead,
 ) -> Result<DiscoveredWorktree, String> {
-    discover_event_space(state, namespace, mux).map_err(String::from)
+    discover_drained_space(state, namespace, mux).map_err(String::from)
 }
 
-/// The space `namespace` names, as an event handler finds it. A space that
-/// is gone fails its reminders.
+/// The space `namespace` names, as a drain finds it, saying when it is gone.
+pub(crate) fn discover_drained_space(
+    state: &Path,
+    namespace: &StateNamespace,
+    mux: &impl MuxRead,
+) -> Result<DiscoveredWorktree, crate::DrainError> {
+    survey_event_space(state, namespace, mux)?.map_err(crate::DrainError::from)
+}
+
+/// The space `namespace` names, as an event handler finds it.
 fn discover_event_space(
     state: &Path,
     namespace: &StateNamespace,
     mux: &impl MuxRead,
 ) -> Result<DiscoveredWorktree, EventError> {
+    survey_event_space(state, namespace, mux)
+        .map_err(EventError::Retry)?
+        .map_err(EventError::mux)
+}
+
+/// The survey of the space `namespace` names. A space that is gone fails its
+/// reminders. The outer error is the store's.
+fn survey_event_space(
+    state: &Path,
+    namespace: &StateNamespace,
+    mux: &impl MuxRead,
+) -> Result<Result<DiscoveredWorktree, MuxError>, String> {
     let result = survey_space(mux, namespace.space_id.as_str());
     if let Err(MuxError::Gone(Gone::Space, _)) = result {
         StateStore::open(state)
-            .map_err(EventError::retry)?
+            .map_err(|error| error.to_string())?
             .transaction(|tx| tx.fail_reminder_workspace(namespace))
-            .map_err(EventError::retry)?;
+            .map_err(|error| error.to_string())?;
     }
-    result.map_err(EventError::mux)
+    Ok(result)
 }
 
 pub fn discover_worktree_for_workspace(

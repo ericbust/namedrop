@@ -1031,7 +1031,7 @@
       "file": "src/lifecycle.rs",
       "reason": "A check of with_herdr_runtime, which only a Herdr home runs.",
       "literals": [
-        [2180, "Herdr has no pane {pane_id}, so its space is unknown. Pass --herdr-workspace <space-id>."]
+        [2200, "Herdr has no pane {pane_id}, so its space is unknown. Pass --herdr-workspace <space-id>."]
       ]
     },
     {
