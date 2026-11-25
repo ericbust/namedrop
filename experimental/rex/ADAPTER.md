@@ -673,7 +673,9 @@ impl gate::RawChannel for RexChannel<'_> {
 	/// - a foreground pid other than the facts' pid;
 	/// - a bound agent that is gone, a zombie, or `Unreadable`, has another start time, or left the foreground's group;
 	/// - any change for the block above the facts' boundary, whether Rex queued it before the
-	///   paste started (the agent was already busy) or after (the Enter did not cause it).
+	///   paste started (the agent was already busy) or after (the Enter did not cause it),
+	///   except a status that still takes a prompt: Codex 0.169.0 turns `done` into `idle`
+	///   for its own paste ([PORT.md](PORT.md), U14).
 	/// Then block.event key Enter and its ack, whose `seq` is the tap's floor. No sleep.
 	fn paste_submit(&self, pane: &PaneId, text: &str) -> Result<(), ChannelError> { todo!() }
 }
@@ -686,7 +688,8 @@ impl gate::StatusTap for RexTap {
 		// pre-paste check sees an event that has arrived but was not yet read.
 		// After the Enter, a status change with seq <= the Enter ack's seq was queued before the
 		// Enter started, so it is Program, which the confirm loop holds as Ambiguous. It never
-		// confirms as Delivered.
+		// confirms as Delivered. A status that still takes a prompt stays a Status, which never
+		// confirms either.
 		// Root program_status_changed       => Status(AgentState::parse(record.state)).
 		// Root program_status_removed       => Program.
 		// child_exited                      => Program.

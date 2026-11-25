@@ -150,7 +150,7 @@ impl StaticSpace {
             ("pane-recipient", InputOutcome::Delivered),
             (
                 "pane-failure",
-                InputOutcome::Ambiguous("agent.prompt outcome is ambiguous".into()),
+                InputOutcome::Ambiguous("agent.prompt outcome is ambiguous.".into()),
             ),
             (
                 "pane-invalid",

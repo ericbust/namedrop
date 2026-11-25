@@ -392,16 +392,27 @@ mod tests {
         }
     }
 
+    /// Also a change between two statuses that take a prompt: an agent may
+    /// make it when a person starts typing.
     #[test]
     fn a_status_change_after_the_facts_are_read_declines_before_any_input() {
         let agent = claude(reported("session-1"));
-        let mut channel = channel(Some(agent.clone()), Some("idle"), AfterPaste::StartsWorking);
-        channel.changes_after_facts = vec![TapChange::Status(AgentState::Working)];
-        assert!(matches!(
-            prompt(&channel, &agent),
-            InputOutcome::Declined(Retry::OnEvent, _)
-        ));
-        assert!(pasted(&channel).is_empty());
+        for (start, then) in [
+            ("idle", AgentState::Working),
+            ("done", AgentState::Idle),
+            ("idle", AgentState::Done),
+        ] {
+            let mut channel = channel(Some(agent.clone()), Some(start), AfterPaste::StartsWorking);
+            channel.changes_after_facts = vec![TapChange::Status(then.clone())];
+            assert!(
+                matches!(
+                    prompt(&channel, &agent),
+                    InputOutcome::Declined(Retry::OnEvent, _)
+                ),
+                "{start} to {then:?}"
+            );
+            assert!(pasted(&channel).is_empty(), "{start} to {then:?}");
+        }
     }
 
     #[test]

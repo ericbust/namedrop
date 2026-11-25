@@ -1020,3 +1020,74 @@ fn a_settled_status_queued_before_the_enter_and_read_after_it_neither_confirms_n
         InputOutcome::Ambiguous(why) if why.contains("did not report working")
     ));
 }
+
+/// Before the paste, a move between settled statuses is Codex taking input:
+/// a person's key, which the facts did not see. The prompt waits.
+#[test]
+fn a_settled_status_change_after_the_facts_still_declines_before_any_input() {
+    for (start, then) in [("done", "idle"), ("idle", "done")] {
+        for at in [Step::Facts, Step::Process] {
+            let gate = bound(|fixture, _| {
+                gate(reads_as(fixture, start), move |step, _, events| {
+                    if step == at {
+                        events.later(status(then));
+                    }
+                    None
+                })
+            });
+            assert_eq!(
+                prompt(&gate.rex, "hello"),
+                InputOutcome::Declined(
+                    Retry::OnEvent,
+                    "pane block:b changed status before the prompt".into()
+                ),
+                "{start} to {then} at {at:?}"
+            );
+            assert!(typed(&gate.rex).is_empty(), "{start} to {then} at {at:?}");
+        }
+    }
+}
+
+/// Only a status that takes a prompt passes: a status Namedrop does not
+/// know, or a settled one queued with `working`, still holds.
+#[test]
+fn an_unknown_status_or_working_beside_a_settled_one_still_holds_without_an_enter() {
+    for queued in [
+        vec!["error"],
+        vec!["idle", "working"],
+        vec!["working", "idle"],
+    ] {
+        let gate = bound(|fixture, _| {
+            let queued = queued.clone();
+            gate(reads_as(fixture, "done"), move |step, _, events| {
+                if step == Step::Paste {
+                    for state in &queued {
+                        events.earlier(status(state));
+                    }
+                }
+                None
+            })
+        });
+        assert!(
+            matches!(prompt(&gate.rex, "hello"), InputOutcome::Ambiguous(why)
+                if why.contains("changed before the Enter")),
+            "{queued:?}"
+        );
+        assert_eq!(typed(&gate.rex), ["block.event paste hello"], "{queued:?}");
+    }
+    // Read only after the Enter, at or below its acknowledgement, an unknown
+    // status is a program change.
+    let after = bound(|fixture, _| {
+        gate(reads_as(fixture, "done"), |step, _, events| {
+            (step == Step::Enter).then(|| {
+                events.earlier(status("error"));
+                events.later(status("working"));
+                Ok(json!({}))
+            })
+        })
+    });
+    assert_eq!(
+        prompt(&after.rex, "hello"),
+        InputOutcome::Ambiguous("the program in pane block:b changed after the prompt".into())
+    );
+}

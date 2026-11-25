@@ -929,7 +929,8 @@ where
                             &namespace,
                             &leased.attempt_id,
                             &format!(
-                                "Delivery attempt requires attention after entering Held: {why}."
+                                "Delivery attempt requires attention after entering Held: {}.",
+                                why.trim_end().trim_end_matches('.')
                             ),
                             &attribution,
                         )

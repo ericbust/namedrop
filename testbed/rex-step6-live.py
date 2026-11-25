@@ -22,8 +22,9 @@ With --stress N, the driver then types N more mentions into Claude Code for Code
 each waiting for Codex's reply and its delivery back, and counts the rounds delivered, held and
 timed out. A held attempt is recorded with its screen and the reason the store kept for it, then
 cancelled with `delivery cancel-held`, and its pointer is deleted from the agent's box with
-Ctrl-U, so each round starts clean. The driver never presses Enter for a held prompt. The last
-check fails unless every round was delivered.
+Ctrl-U, so each round starts clean. The driver never presses Enter for a held prompt. A round
+that does not end clean, or a pointer or held attempt found before a round, stops the run. The
+last check fails unless every round was delivered.
 
 Every rex call names the lane's server with -S and --autostart=false, from the lane's own
 environment. Claude Code runs only as the profile's token wrapper, which the lane started.
@@ -439,65 +440,94 @@ def cancel_held(lane, attempt):
         "rex:" + str(lane.lane.socket), "--space", lane.session], lane.profile.dir, ok=False)
 
 
-def stress(run, lane, count, within=180):
-    """`count` mentions from Claude Code to Codex in a row, each waiting for Codex's reply and
-    its delivery back. A round ends delivered, held, or timed out. A held attempt, of the
-    mention or of its reply, is recorded with its screen and why it held, cancelled with
-    `delivery cancel-held`, and its pointer deleted from the agent's box, so the next round
-    starts clean. The driver never presses Enter for a held prompt."""
-    rounds = []
-    for index in range(count):
-        word = "stress{}x{}".format(index, int(time.time()) % 10000)
-        prompt = "@codex Please reply with exactly the word {}.".format(word)
-        body = prompt[len("codex") + 2:]
-        if not clear_box(lane, "claude", "Please reply with exactly the word"):
-            raise Failed("round {}: an earlier mention stays in Claude Code's box".format(index))
-        lane.type_line(lane.blocks["claude"], prompt)
-        typed = time.time()
-        request = wait(lambda: thread_of(lane, "claude", body), bool,
-                       "round {}'s mention in the store".format(index), 120, 0.5)
-        mention, record = request[0][1], {"round": index, "word": word, "outcome": "timed out"}
-        until = time.monotonic() + within
-        while time.monotonic() < until and record["outcome"] == "timed out":
-            rows = thread_of(lane, "claude", body)[1]
-            reply = next((row[6] for row in rows if row[1].lstrip("@") == "codex" and
-                          word in row[3].lower()), None)
-            for message, agent in ((mention, "codex"), (reply, "claude")):
-                for attempt, state, nonce, why in attempts(lane, message) if message else ():
-                    if state != "held":
-                        continue
-                    screen = lane.screen(lane.blocks[agent])
-                    cancelled = cancel_held(lane, attempt)
-                    marker = "Namedrop message {}".format(nonce)
-                    record.update(outcome="held", to=agent, attempt=attempt, nonce=nonce,
-                                  why=why, screen=screen[-2000:],
-                                  **{"pointer in its box": marker in input_box(screen),
-                                     "cancel-held exit": cancelled.returncode,
-                                     "box cleared": clear_box(lane, agent, marker)})
-                    print("round {}: held to @{} ({}): {}".format(index, agent, nonce, why),
-                          flush=True)
-                    break
-            back = attempts(lane, reply) if reply else []
-            if record["outcome"] == "timed out" and back and all(
-                    state in ("acknowledged", "settled") for _, state, _, _ in back):
-                record["outcome"] = "delivered"
-            if record["outcome"] == "timed out":
-                time.sleep(0.5)
-        record["seconds"] = round(time.time() - typed, 1)
-        rounds.append(record)
-        print("round {}: {} in {}s".format(index, record["outcome"], record["seconds"]),
-              flush=True)
-        if record["outcome"] == "held" and not record["box cleared"]:
+def held_attempts(lane):
+    """Every attempt in the lane's session that the store holds."""
+    return [row[0] for row in lane.rows(
+        "select attempt_id from delivery_attempt_state where worktree_id = ? and state = 'held'",
+        lane.session)]
+
+
+def stress_round(lane, index, within):
+    """One mention from Claude Code to Codex. Delivered once the reply's delivery to Claude Code
+    is acknowledged or settled, as `exchange` judges it, held when an attempt of the mention or
+    of its reply is held, or timed out."""
+    for agent in ("claude", "codex"):
+        if "Namedrop message" in input_box(lane.screen(lane.blocks[agent])):
+            raise Failed("round {}: a pointer sits in @{}'s box".format(index, agent))
+    if held_attempts(lane):
+        raise Failed("round {}: the store holds {}".format(index, held_attempts(lane)))
+    if not clear_box(lane, "claude", "Please reply with exactly the word"):
+        raise Failed("round {}: an earlier mention stays in Claude Code's box".format(index))
+    word = "stress{}x{}".format(index, int(time.time()) % 10000)
+    prompt = "@codex Please reply with exactly the word {}.".format(word)
+    body = prompt[len("codex") + 2:]
+    lane.type_line(lane.blocks["claude"], prompt)
+    typed = time.time()
+    record = {"round": index, "word": word, "outcome": "timed out"}
+    request = wait(lambda: thread_of(lane, "claude", body), bool,
+                   "round {}'s mention in the store".format(index), 120, 0.5)
+    mention = request[0][1]
+    until = time.monotonic() + within
+    while time.monotonic() < until:
+        rows = thread_of(lane, "claude", body)[1]
+        replies = [row for row in rows if row[1].lstrip("@") == "codex" and
+                   word in row[3].lower()]
+        if any(row[5] in ("acknowledged", "settled") for row in replies):
+            record["outcome"] = "delivered"
             break
-    counts = {outcome: sum(item["outcome"] == outcome for item in rounds)
-              for outcome in ("delivered", "held", "timed out")}
-    run.observe("stress", {"counts": counts, "rounds": rounds})
-    print("STRESS {} rounds: {} delivered, {} held, {} timed out".format(
-        len(rounds), counts["delivered"], counts["held"], counts["timed out"]), flush=True)
+        reply = replies[0][6] if replies else None
+        held = [(agent, attempt, nonce, why)
+                for message, agent in ((mention, "codex"), (reply, "claude")) if message
+                for attempt, state, nonce, why in attempts(lane, message) if state == "held"]
+        if held:
+            agent, attempt, nonce, why = held[0]
+            screen = lane.screen(lane.blocks[agent])
+            marker = "Namedrop message {}".format(nonce)
+            record.update(outcome="held", to=agent, attempt=attempt, nonce=nonce, why=why,
+                          screen=screen[-2000:])
+            record["pointer in its box"] = marker in input_box(screen)
+            record["cancel-held exit"] = cancel_held(lane, attempt).returncode
+            record["box cleared"] = clear_box(lane, agent, marker)
+            break
+        time.sleep(0.5)
+    record["seconds"] = round(time.time() - typed, 1)
+    return record
+
+
+def stress(run, lane, count, within=180):
+    """`count` mentions from Claude Code to Codex in a row. A held attempt is recorded with its
+    screen and why it held, cancelled with `delivery cancel-held`, and its pointer deleted from
+    the agent's box, so the next round starts clean. The driver never presses Enter for a held
+    prompt. A round that does not end clean (a time-out, a cancel that failed, a box that kept
+    the pointer) stops the run, and so does a pointer or a held attempt found before a round."""
+    rounds, stopped = [], None
+    try:
+        for index in range(count):
+            record = stress_round(lane, index, within)
+            rounds.append(record)
+            print("round {}: {} in {}s{}".format(
+                index, record["outcome"], record["seconds"],
+                "" if record["outcome"] != "held" else
+                " to @{} ({}): {}".format(record["to"], record["nonce"], record["why"])),
+                flush=True)
+            if record["outcome"] == "timed out" or record["outcome"] == "held" and (
+                    record["cancel-held exit"] != 0 or not record["box cleared"]):
+                stopped = "round {} did not end clean".format(index)
+                break
+    except Failed as error:
+        stopped = str(error)
+    finally:
+        counts = {outcome: sum(item["outcome"] == outcome for item in rounds)
+                  for outcome in ("delivered", "held", "timed out")}
+        run.observe("stress", {"counts": counts, "rounds": rounds, "stopped": stopped})
+        print("STRESS {} rounds: {} delivered, {} held, {} timed out{}".format(
+            len(rounds), counts["delivered"], counts["held"], counts["timed out"],
+            "" if stopped is None else "; stopped: " + stopped), flush=True)
     run.check("stress: {} mentions to @codex, each delivered".format(count),
               counts["delivered"] == count,
-              {"counts": counts, "rounds": [{key: value for key, value in item.items()
-                                             if key != "screen"} for item in rounds]})
+              {"counts": counts, "stopped": stopped,
+               "rounds": [{key: value for key, value in item.items() if key != "screen"}
+                          for item in rounds]})
 
 
 def check_exchange_commands(run, lane, commands):
