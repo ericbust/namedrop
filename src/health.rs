@@ -1738,7 +1738,10 @@ fn claude_program_issue(
                 "ND-MODEL-002",
                 HealthSeverity::Notice,
                 "Namedrop's own Claude Code calls cannot run.",
-                &format!("{CALLS} fail until you fix it: {}", error.reason),
+                &format!(
+                    "{CALLS}, and Channels' Add agent for Claude Code, fail until you fix it: {}",
+                    error.reason
+                ),
                 HealthRepairKind::HumanDecision,
                 "Fix claude_command or the Namedrop settings file that holds it, then run Doctor again. Namedrop never runs claude in its place.",
             );

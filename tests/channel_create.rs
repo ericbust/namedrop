@@ -870,42 +870,71 @@ fn a_new_agent_gets_its_own_tab_its_name_and_only_the_plain_command() {
 fn a_new_claude_agent_starts_the_program_claude_command_names() {
     let f = fixture();
     let server = Server::start(&f);
-    let launcher = f.root.join("bin dir/claude-personal");
-    fs::create_dir_all(launcher.parent().unwrap()).unwrap();
-    executable::write_executable(&launcher, "#!/bin/sh\n");
     let settings = f
         .root
         .join("home/.config/herdr/plugins/config/namedrop/settings.json");
     fs::create_dir_all(settings.parent().unwrap()).unwrap();
-    fs::write(&settings, json!({"claude_command": launcher}).to_string()).unwrap();
-    let response = server.add_agent(
-        "w1",
-        json!({"kind": "claude", "name": "coder", "persona": null}),
-    );
-    assert_eq!(response.status, 201, "{}", response.body);
-    let quoted = format!("'{}'", launcher.display());
-    let runs: Vec<_> = calls(&f)
-        .into_iter()
-        .filter(|call| call[..2] == ["pane", "run"])
-        .collect();
-    assert_eq!(runs.len(), 1, "{runs:?}");
-    assert_eq!(runs[0][3], quoted, "{runs:?}");
+    let last_run = || {
+        calls(&f)
+            .into_iter()
+            .rev()
+            .find(|call| call[..2] == ["pane", "run"])
+            .map(|call| call[3].clone())
+    };
+    // An ordinary path is typed bare, which every shell runs; one that needs
+    // quoting is single-quoted, a quote inside it included.
+    let plain = f.root.join("bin/claude-personal");
+    let quoted = f.root.join("bin dir/it's claude");
+    for (name, launcher, typed) in [
+        ("coder", &plain, plain.display().to_string()),
+        (
+            "reviewer",
+            &quoted,
+            format!(
+                "'{}'",
+                quoted.display().to_string().replace('\'', "'\"'\"'")
+            ),
+        ),
+    ] {
+        fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+        executable::write_executable(launcher, "#!/bin/sh\n");
+        fs::write(&settings, json!({"claude_command": launcher}).to_string()).unwrap();
+        let response = server.add_agent(
+            "w1",
+            json!({"kind": "claude", "name": name, "persona": null}),
+        );
+        assert_eq!(response.status, 201, "{}", response.body);
+        assert_eq!(last_run(), Some(typed), "{name}");
+    }
 
-    fs::write(&settings, r#"{"claude_command":"missing-launcher"}"#).unwrap();
-    let before = creations(&f).len();
-    let response = server.add_agent(
-        "w1",
-        json!({"kind": "claude", "name": "other", "persona": null}),
-    );
-    assert_eq!(response.status, 409, "{}", response.body);
-    assert!(
-        response
-            .error()
-            .contains("claude_command missing-launcher is not on PATH"),
-        "{}",
-        response.body
-    );
-    assert_eq!(creations(&f).len(), before, "a refused agent opens no tab");
+    // A setting that cannot be used, or a program a shell line cannot hold,
+    // refuses before any tab opens.
+    let tabbed = f.root.join("bin/claude\tpersonal");
+    executable::write_executable(&tabbed, "#!/bin/sh\n");
+    for (settings_text, reason) in [
+        (
+            r#"{"claude_command":"missing-launcher"}"#.to_owned(),
+            "claude_command missing-launcher is not on PATH",
+        ),
+        (
+            json!({"claude_command": tabbed}).to_string(),
+            "which a shell line cannot hold",
+        ),
+    ] {
+        fs::write(&settings, &settings_text).unwrap();
+        let before = creations(&f).len();
+        let response = server.add_agent(
+            "w1",
+            json!({"kind": "claude", "name": "other", "persona": null}),
+        );
+        assert_eq!(response.status, 409, "{settings_text}: {}", response.body);
+        assert!(
+            response.error().contains(reason),
+            "{settings_text}: {}",
+            response.body
+        );
+        assert_eq!(creations(&f).len(), before, "a refused agent opens no tab");
+    }
 }
 
 #[test]

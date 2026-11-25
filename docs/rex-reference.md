@@ -379,15 +379,15 @@ Doctor on Rex reports `ND-INTEGRATION-003` when an installed Codex or Claude Cod
 
 ### ND-MODEL-002
 
-`ND-MODEL-002` is not Rex-only. Doctor reports it whenever Namedrop is active, to name the program that Namedrop's own Claude Code calls run. Doctor reads the settings that its own environment names, `HOME`, `XDG_CONFIG_HOME` and `NAMEDROP_AGENT_STATUS_CLAUDE_BIN`, and looks the program up on its own `PATH`. The calls read the Rex server's environment, so run Doctor in a Rex pane to see what they run. In the Doctor screen and text, the `info` form is one line after every other finding.
+`ND-MODEL-002` is not Rex-only. Doctor reports it whenever Namedrop is active, to name the program that Namedrop's own Claude Code calls run. Doctor finds the settings files through its own `HOME` and `XDG_CONFIG_HOME`, and looks the program up on its own `PATH`. A `NAMEDROP_AGENT_STATUS_CLAUDE_BIN` in its environment takes the place of the settings. The calls read the Rex server's environment, so run Doctor in a Rex pane to see what they run. In the Doctor screen and text, the `info` form is one line after every other finding.
 
 | Field | Text |
 |---|---|
 | Severity | `info` when the program can run. `notice` when the calls cannot run |
 | Summary | "Namedrop's own Claude Code calls run `<program>`.", "Namedrop's own Claude Code calls run claude, which is not on Doctor's PATH.", or "Namedrop's own Claude Code calls cannot run." |
-| Explanation | Where the program comes from: `claude_command` in `<file>`, `NAMEDROP_AGENT_STATUS_CLAUDE_BIN`, or `claude` from `PATH` because the settings file sets no `claude_command`. For calls that cannot run, "Agent-status summaries, persona suggestions, and channel routing fail until you fix it: `<reason>`" |
+| Explanation | Where the program comes from: `claude_command` in `<file>`, `NAMEDROP_AGENT_STATUS_CLAUDE_BIN`, or `claude` from `PATH` because the settings file sets no `claude_command`. For calls that cannot run, "Agent-status summaries, persona suggestions, and channel routing, and Channels' Add agent for Claude Code, fail until you fix it: `<reason>`" |
 | Repair | When the program can run, "To run another program, such as a launcher that selects another Claude Code account, set claude_command in the Namedrop settings file to its name on PATH or its absolute path." When the calls cannot run, "Fix claude_command or the Namedrop settings file that holds it, then run Doctor again. Namedrop never runs claude in its place." |
-| Diagnostic | `path`: the file the finding is about. That is the settings file that sets `claude_command`, or, when the calls cannot run, the file or link the reason names, such as `runtime/owner` in the state directory for an owner that cannot be read. It is `null` for the default `claude` and for `NAMEDROP_AGENT_STATUS_CLAUDE_BIN` |
+| Diagnostic | `path`: the file the finding is about. That is the settings file that sets `claude_command`, or, when the calls cannot run, the file or link the reason names, such as `runtime/owner` in the state directory for an owner that cannot be read. It is `null` for the default `claude`, for `NAMEDROP_AGENT_STATUS_CLAUDE_BIN`, and when the settings file cannot be located because there is no `HOME` |
 
 ### ND-SESSION-002
 

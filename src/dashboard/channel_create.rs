@@ -110,17 +110,34 @@ impl AgentKind {
                 .map_err(|fault| AgentRefusal::ClaudeCommand(fault.reason))?;
                 Some(match setting.command {
                     None => "claude".to_owned(),
-                    Some(command) => crate::install::shell_single_quote(
+                    Some(command) => typed_program(
                         &crate::agent_status_model::locate("claude_command", &command)
-                            .map_err(AgentRefusal::ClaudeCommand)?
-                            .to_string_lossy(),
-                    ),
+                            .map_err(AgentRefusal::ClaudeCommand)?,
+                    )
+                    .map_err(AgentRefusal::ClaudeCommand)?,
                 })
             }
             Self::Codex => Some("codex".to_owned()),
             Self::Terminal => None,
         })
     }
+}
+
+/// `program` as a shell line types it: bare when it is an ordinary path,
+/// which every shell runs, else single-quoted. A path that is not UTF-8, or
+/// that holds a control character, cannot be typed faithfully, so it is
+/// refused.
+fn typed_program(program: &Path) -> Result<String, String> {
+    program
+        .to_str()
+        .filter(|text| !text.chars().any(char::is_control))
+        .map(crate::integration::shell_argument)
+        .ok_or_else(|| {
+            format!(
+                "claude_command leads to {}, which a shell line cannot hold",
+                program.display()
+            )
+        })
 }
 
 struct NewAgent {
@@ -1004,6 +1021,32 @@ fn add(front: &Front, key: &SpaceKey, agent: NewAgent) -> Result<(String, String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A program is typed bare when every shell runs it so, quoted when it
+    /// must be, and refused when a shell line cannot hold it.
+    #[test]
+    fn the_claude_program_is_typed_as_a_shell_runs_it_or_refused() {
+        use std::os::unix::ffi::OsStrExt;
+        assert_eq!(
+            typed_program(Path::new("/Users/me/.local/bin/claude-personal")),
+            Ok("/Users/me/.local/bin/claude-personal".to_owned())
+        );
+        assert_eq!(
+            typed_program(Path::new("/Users/me/my bin/it's claude")),
+            Ok("'/Users/me/my bin/it'\"'\"'s claude'".to_owned())
+        );
+        for refused in [
+            Path::new("/Users/me/bin/claude\tpersonal"),
+            Path::new("/Users/me/bin/claude\npersonal"),
+            Path::new(std::ffi::OsStr::from_bytes(b"/Users/me/bin/claude\xff")),
+        ] {
+            let reason = typed_program(refused).unwrap_err();
+            assert!(
+                reason.contains("which a shell line cannot hold"),
+                "{reason}"
+            );
+        }
+    }
 
     fn workspace(id: &str, checkout: Option<&str>) -> SpaceView {
         SpaceView {
