@@ -20,9 +20,9 @@ usage: python3 -I testbed/rex-step6-live.py --profile rex-NAME --out DIR [--stre
 
 With --stress N, the driver then types N more mentions into Claude Code for Codex, one at a time,
 each waiting for Codex's reply and its delivery back, and counts the rounds delivered, held and
-timed out. A held attempt is recorded with its screen and the reason the store kept for it, then
-cancelled with `delivery cancel-held`, and its pointer is deleted from the agent's box with
-Ctrl-U, so each round starts clean. The driver never presses Enter for a held prompt. A round
+timed out. A held attempt is recorded with its screen and the reason the store kept for it, its pointer
+is deleted from the agent's box with Ctrl-U, and only then is it cancelled with
+`delivery cancel-held`, so each round starts clean. The driver never presses Enter for a held prompt. A round
 that does not end clean, or a pointer or held attempt found before a round, stops the run. The
 last check fails unless every round was delivered.
 
@@ -486,8 +486,11 @@ def stress_round(lane, index, within):
             record.update(outcome="held", to=agent, attempt=attempt, nonce=nonce, why=why,
                           screen=screen[-2000:])
             record["pointer in its box"] = marker in input_box(screen)
-            record["cancel-held exit"] = cancel_held(lane, attempt).returncode
+            # Clear the box first: cancel-held drains the queue, and a delivery pasted behind
+            # the stale pointer would be submitted with it.
             record["box cleared"] = clear_box(lane, agent, marker)
+            record["cancel-held exit"] = (cancel_held(lane, attempt).returncode
+                                          if record["box cleared"] else None)
             break
         time.sleep(0.5)
     record["seconds"] = round(time.time() - typed, 1)
@@ -496,8 +499,8 @@ def stress_round(lane, index, within):
 
 def stress(run, lane, count, within=180):
     """`count` mentions from Claude Code to Codex in a row. A held attempt is recorded with its
-    screen and why it held, cancelled with `delivery cancel-held`, and its pointer deleted from
-    the agent's box, so the next round starts clean. The driver never presses Enter for a held
+    screen and why it held, its pointer deleted from the agent's box, and then cancelled with
+    `delivery cancel-held`, so the next round starts clean. The driver never presses Enter for a held
     prompt. A round that does not end clean (a time-out, a cancel that failed, a box that kept
     the pointer) stops the run, and so does a pointer or a held attempt found before a round."""
     rounds, stopped = [], None

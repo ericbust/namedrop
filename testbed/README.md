@@ -463,9 +463,9 @@ time. A round is delivered when the reply's delivery to Claude Code is
 acknowledged, as the exchanges judge it, held when the store holds an attempt
 of the mention or of its reply, or timed out after 180 s. For a held attempt,
 the driver records the agent's screen and the reason the store kept on the
-attempt's attention item, runs `delivery cancel-held` for it as Doctor's
-repair does, and deletes the pointer from the agent's box with Ctrl-U, so the
-next round starts clean. It never presses Enter for a held prompt. Before each
+attempt's attention item, deletes the pointer from the agent's box with
+Ctrl-U, and then runs `delivery cancel-held` for it as Doctor's repair does, so
+the next round starts clean. It never presses Enter for a held prompt. Before each
 round it checks that neither box holds a pointer and that the store holds no
 held attempt, and a round that does not end clean (a time-out, a cancel that
 failed, a pointer left in a box) stops the run. It prints
