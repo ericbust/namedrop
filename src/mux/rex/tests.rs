@@ -1328,9 +1328,10 @@ fn a_claimed_block_is_read_on_one_proved_connection() {
     let wrapped = fixture("wrapper-before");
     let script = one_block(wrapped.clone());
     assert_eq!(
-        claimed_over(&script, Path::new(SOCKET), "session:s", "block:b"),
+        claimed_over(&script, Path::new(SOCKET), "block:b"),
         Ok(Claimed {
             endpoint: Endpoint::parse(&format!("rex:{SOCKET}")),
+            session: "session:s".into(),
             server: PEER,
             child: 70962,
             caller: Caller {
@@ -1352,6 +1353,7 @@ fn a_claimed_block_is_read_on_one_proved_connection() {
         script.calls(),
         [
             "server.status",
+            "target.resolve block:b",
             "session.attach session:s",
             "process block:b",
             "program_status block:b"
@@ -1361,7 +1363,7 @@ fn a_claimed_block_is_read_on_one_proved_connection() {
     script.peer.store(PEER + 1, Ordering::Relaxed);
     assert!(
         matches!(
-            claimed_over(&script, Path::new(SOCKET), "session:s", "block:b"),
+            claimed_over(&script, Path::new(SOCKET), "block:b"),
             Err(MuxError::Unavailable(why)) if why.contains("is not a Rex server on this machine")
         ),
         "a server whose pid is not the peer is not read"

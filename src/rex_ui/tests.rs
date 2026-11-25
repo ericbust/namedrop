@@ -183,7 +183,7 @@ fn load_start_guard_accepts_only_the_server_parent() {
             self.calls.borrow_mut().push(socket.into());
             self.peer.ok_or_else(|| io::ErrorKind::NotFound.into())
         }
-        fn claimed(&self, _: &Path, _: &str, _: &str) -> Result<Claimed, String> {
+        fn claimed(&self, _: &Path, _: &str) -> Result<Claimed, String> {
             panic!("no host request")
         }
         fn incarnation(&self, _: u32) -> Option<String> {

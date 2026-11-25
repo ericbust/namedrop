@@ -28,10 +28,11 @@ impl Scripted {
         self
     }
 
-    /// The Rex claim of `BLOCK` in `SESSION`, on the server `REX_SERVER` names.
+    /// The Rex claim of `BLOCK`, on the server `REX_SERVER` names. Rex
+    /// 0.1.0-preview.23 and later set no `REX_SESSION`: the server names the
+    /// block's session.
     fn in_block(self) -> Self {
         self.var("REX_BLOCK", BLOCK)
-            .var("REX_SESSION", SESSION)
             .var("REX_SERVER", &format!("unix://{REX}"))
     }
 
@@ -55,6 +56,7 @@ impl Scripted {
     fn child(mut self, server: u32, child: u32) -> Self {
         self.claimed = Some(Ok(Claimed {
             endpoint: Endpoint::parse(CANONICAL),
+            session: SESSION.to_owned(),
             server,
             child,
             caller: Caller::default(),
@@ -95,10 +97,10 @@ impl Inherited for Scripted {
         }
     }
 
-    fn claimed(&self, socket: &Path, session: &str, block: &str) -> Result<Claimed, String> {
+    fn claimed(&self, socket: &Path, block: &str) -> Result<Claimed, String> {
         assert_eq!(
-            (socket, session, block),
-            (Path::new(REX), SESSION, BLOCK),
+            (socket, block),
+            (Path::new(REX), BLOCK),
             "the claim is verified on the socket that proved the ancestor"
         );
         self.claimed
@@ -541,14 +543,14 @@ fn without_a_rex_claim_the_set_of_names_decides() {
         "a Herdr name hides every neutral one"
     );
     assert_eq!(
-        resolved(&neutral("rex:/tmp/r.sock").var("REX_BLOCK", BLOCK)),
+        resolved(&neutral("rex:/tmp/r.sock").var("REX_SESSION", SESSION)),
         Ok(Home::Rex(Place {
             endpoint: Endpoint::parse("rex:/tmp/r.sock"),
             space: Some(SpaceId::new("session:s")),
             pane: None,
             caller: None,
         })),
-        "a claim needs both REX_BLOCK and REX_SESSION"
+        "REX_SESSION alone is no claim"
     );
     assert_eq!(resolved(&Scripted::default()), Ok(Home::Herdr));
 }
@@ -1042,4 +1044,15 @@ fn a_binding_that_does_not_prove_the_denied_caller_is_an_error() {
             "{refused}"
         );
     }
+}
+
+/// Rex 0.1.0-preview.22 and earlier also set `REX_SESSION`. The server's
+/// answer names the session, so a stale or foreign value changes nothing.
+#[test]
+fn the_server_names_the_session_and_an_inherited_rex_session_is_ignored() {
+    assert_eq!(resolved(&plain_block()), Ok(rex_place()));
+    assert_eq!(
+        resolved(&plain_block().var("REX_SESSION", "session:stale")),
+        Ok(rex_place())
+    );
 }

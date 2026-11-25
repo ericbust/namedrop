@@ -2403,12 +2403,7 @@ mod worker_shutdown_tests {
             Err(io::ErrorKind::NotFound.into())
         }
 
-        fn claimed(
-            &self,
-            _socket: &Path,
-            _session: &str,
-            _block: &str,
-        ) -> Result<home::Claimed, String> {
+        fn claimed(&self, _socket: &Path, _block: &str) -> Result<home::Claimed, String> {
             Err("no Rex claim".to_owned())
         }
 

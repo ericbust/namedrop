@@ -1,6 +1,5 @@
 //! Which multiplexer this process runs in. An explicit endpoint decides by its
-//! kind. A process that inherited a Rex claim (`REX_BLOCK` and `REX_SESSION`)
-//! is served by the multiplexer whose server is its nearest ancestor, proved
+//! kind. A process that inherited a Rex claim (`REX_BLOCK`) is served by the multiplexer whose server is its nearest ancestor, proved
 //! by the peer pid of each claimed socket with no request sent. Any doubt
 //! about Herdr is resolved as Herdr, so every Herdr process keeps today's
 //! path. Everything else reads step 3's set of names.
@@ -206,6 +205,8 @@ pub struct Flags<'a> {
 pub struct Claimed {
     /// `rex:` and the server's primary Unix socket.
     pub endpoint: Endpoint,
+    /// The session that holds the block, as the server resolves it.
+    pub session: String,
     /// The server's pid, which its own status names and the connection's peer
     /// pid matches.
     pub server: u32,
@@ -229,8 +230,9 @@ pub trait Inherited {
     /// the process at its other end. Nothing is sent.
     fn peer(&self, socket: &Path) -> io::Result<u32>;
     /// One connection to the Rex server at `socket` that proves it local,
-    /// attaches `session`, and reads `block`'s process.
-    fn claimed(&self, socket: &Path, session: &str, block: &str) -> Result<Claimed, String>;
+    /// resolves and attaches the session that holds `block`, and reads the
+    /// block's process.
+    fn claimed(&self, socket: &Path, block: &str) -> Result<Claimed, String>;
     /// `<pid>@<start>` of a live process, or `None` when it is gone or
     /// cannot be read.
     fn incarnation(&self, pid: u32) -> Option<String>;
@@ -257,8 +259,8 @@ impl Inherited for ThisProcess {
         super::rex::peer_within(socket, std::time::Duration::from_millis(20))
     }
 
-    fn claimed(&self, socket: &Path, session: &str, block: &str) -> Result<Claimed, String> {
-        super::rex::claimed(socket, session, block)
+    fn claimed(&self, socket: &Path, block: &str) -> Result<Claimed, String> {
+        super::rex::claimed(socket, block)
     }
 
     fn incarnation(&self, pid: u32) -> Option<String> {
@@ -420,9 +422,11 @@ fn percent_decoded(text: &str) -> String {
 /// 1. An explicit endpoint decides by `Endpoint::parse`, with no probe. A
 ///    Rex place then trusts `--space` and `--pane`, as `--herdr-pane` is
 ///    trusted today.
-/// 2. With `REX_BLOCK` and `REX_SESSION` set, the nearest server ancestor
-///    decides, and a Rex home reads its place from the verified claim and
-///    ignores every `HERDR_*` and `NAMEDROP_*` location name.
+/// 2. With `REX_BLOCK` set, the nearest server ancestor decides, and a Rex
+///    home reads its place from the verified claim and ignores every
+///    `HERDR_*` and `NAMEDROP_*` location name. The server names the block's
+///    session, so `REX_SESSION`, which Rex 0.1.0-preview.23 stopped setting,
+///    is never read.
 /// 3. Otherwise step 3's set of names: Herdr's when a Herdr location name is
 ///    set, else the neutral set, whose `NAMEDROP_ENDPOINT` is parsed for its
 ///    kind.
@@ -440,14 +444,12 @@ pub fn resolve(flags: &Flags<'_>, inherited: &dyn Inherited) -> Result<Home, Str
             MuxKind::Rex => Home::Rex(place(endpoint, None, None)),
         });
     }
-    if let (Some(block), Some(session)) =
-        (set(inherited, "REX_BLOCK"), set(inherited, "REX_SESSION"))
-    {
-        return nearest(flags, inherited, &session, &block).map(|nearest| match nearest {
+    if let Some(block) = set(inherited, "REX_BLOCK") {
+        return nearest(flags, inherited, &block).map(|nearest| match nearest {
             Nearest::Herdr => Home::Herdr,
-            Nearest::Rex(endpoint, caller) => Home::Rex(Place {
-                caller: Some(Box::new(caller)),
-                ..place(endpoint, Some(session), Some(block))
+            Nearest::Rex(claimed) => Home::Rex(Place {
+                caller: Some(Box::new(claimed.caller)),
+                ..place(claimed.endpoint, Some(claimed.session), Some(block))
             }),
             Nearest::Deferred(deferral) => Home::RexDeferred(deferral),
         });
@@ -477,18 +479,20 @@ pub fn resolve(flags: &Flags<'_>, inherited: &dyn Inherited) -> Result<Home, Str
 /// What the nearest server ancestor makes of a Rex claim.
 enum Nearest {
     Herdr,
-    /// The verified endpoint and what it showed of the caller's block.
-    Rex(Endpoint, Caller),
+    /// The verified endpoint, the block's session, and what the server
+    /// showed of the caller's block.
+    Rex(Verified),
     /// The socket is denied, and the block's binding proved the caller.
     Deferred(Deferral),
 }
 
-fn nearest(
-    flags: &Flags<'_>,
-    inherited: &dyn Inherited,
-    session: &str,
-    block: &str,
-) -> Result<Nearest, String> {
+struct Verified {
+    endpoint: Endpoint,
+    session: String,
+    caller: Caller,
+}
+
+fn nearest(flags: &Flags<'_>, inherited: &dyn Inherited, block: &str) -> Result<Nearest, String> {
     let ancestors = inherited.ancestors();
     let rex = rex_claim(inherited);
     let rex_probe = rex
@@ -519,7 +523,7 @@ fn nearest(
             let (Some(claim), Probe::Ancestor(depth)) = (rex, rex_probe) else {
                 unreachable!("Rex is chosen only for a server that is an ancestor")
             };
-            let claimed = inherited.claimed(&claim.socket, session, block)?;
+            let claimed = inherited.claimed(&claim.socket, block)?;
             if claimed.server != ancestors[depth] {
                 return Err(format!(
                     "the Rex server at {} is process {}, not this process's ancestor {}",
@@ -535,7 +539,11 @@ fn nearest(
                     claimed.child
                 ));
             }
-            Ok(Nearest::Rex(claimed.endpoint, claimed.caller.of(ancestors)))
+            Ok(Nearest::Rex(Verified {
+                caller: claimed.caller.of(ancestors),
+                endpoint: claimed.endpoint,
+                session: claimed.session,
+            }))
         }
     }
 }

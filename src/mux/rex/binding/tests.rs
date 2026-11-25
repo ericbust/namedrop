@@ -798,10 +798,11 @@ impl Inherited for InBlock {
         self.peer.map_err(io::Error::from_raw_os_error)
     }
 
-    fn claimed(&self, _: &Path, session: &str, block: &str) -> Result<Claimed, String> {
-        assert_eq!((session, block), ("session:s", BLOCK));
+    fn claimed(&self, _: &Path, block: &str) -> Result<Claimed, String> {
+        assert_eq!(block, BLOCK);
         Ok(Claimed {
             endpoint: Endpoint::parse(ENDPOINT),
+            session: "session:s".to_owned(),
             server: *self.ancestors.last().unwrap(),
             child: self.ancestors[self.ancestors.len() - 2],
             caller: self.caller.clone(),

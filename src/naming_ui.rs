@@ -1553,7 +1553,7 @@ mod tests {
         fn peer(&self, _socket: &Path) -> io::Result<u32> {
             Err(io::ErrorKind::NotFound.into())
         }
-        fn claimed(&self, _socket: &Path, _session: &str, _block: &str) -> Result<Claimed, String> {
+        fn claimed(&self, _socket: &Path, _block: &str) -> Result<Claimed, String> {
             Err("no Rex claim".to_owned())
         }
         fn incarnation(&self, _pid: u32) -> Option<String> {
