@@ -206,6 +206,7 @@ try:
         sys.exit(69)
     plan = json.loads(preview.stdout)
     print(f'Namedrop Rex install: {decision}\nState directory: {state}\nLauncher: {launcher}\nRex server: {plan["server"]}')
+    print('Rex support is beta and under active development. docs/compatibility.md lists the Rex versions it was tested with.')
     print('Files to install or update:')
     if decision != 'adopt':
         print(f'  Runtime: {state}/runtime (releases, current, owner, source.json and migration records) and the store')

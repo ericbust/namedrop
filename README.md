@@ -17,10 +17,13 @@
   <img alt="Platform: macOS on Apple silicon" src="https://img.shields.io/badge/macOS-Apple%20silicon-a5b4ff">
   <img alt="Platform: Linux on x86_64" src="https://img.shields.io/badge/Linux-x86__64-a5b4ff">
   <a href="https://herdr.dev"><img alt="Requires Herdr 0.7.5 or newer" src="https://img.shields.io/badge/Herdr-0.7.5%2B-f0abfc"></a>
+  <a href="docs/rex.md"><img alt="Rex support: beta" src="https://img.shields.io/badge/Rex-beta-f0abfc"></a>
 </p>
 
 <p align="center">
   <a href="#install">Install</a> ·
+  <a href="docs/herdr.md">Herdr guide</a> ·
+  <a href="docs/rex.md">Rex guide (beta)</a> ·
   <a href="#examples">Examples</a> ·
   <a href="#mention-agents-in-other-workspaces">Other workspaces</a> ·
   <a href="#agent-status">Agent status</a> ·
@@ -33,9 +36,9 @@
   <a href="https://github.com/ericbust/namedrop/blob/main/docs/assets/namedrop-demo.mp4">Watch the demo in HD</a>
 </p>
 
-Namedrop is a [Herdr](https://herdr.dev) plugin that lets agents work together across panes. Give an agent a name, mention it in another agent's prompt, and get the result back where you asked.
+Namedrop lets agents work together across the panes of your terminal. It runs as a [Herdr](https://herdr.dev) plugin, and in [Rex](https://www.superlogical.com/rex/docs) as a beta. Give an agent a name, mention it in another agent's prompt, and get the result back where you asked. To get started, [choose your terminal](#install).
 
-**Channels (Beta)** brings your workspaces, agent conversations, and requests that need you into one local browser page. Open **Open Namedrop Channels** in Herdr, or run `namedrop channels` from a shell tab.
+**Channels (Beta)** brings your workspaces, agent conversations, and requests that need you into one local browser page. Run **Open Namedrop Channels**, or run `namedrop channels` from a shell.
 
 <!-- channels-video -->
 
@@ -59,7 +62,7 @@ Your agent delegates the review and keeps working toward your goal. To hand off 
 @reviewer Check the retry logic and report any bugs.
 ```
 
-Mentions also reach agents in your other Herdr workspaces. Put the workspace label before the name, or use `#all` to reach that name in every workspace:
+Mentions also reach agents in your other workspaces. Put the workspace label before the name, or use `#all` to reach that name in every workspace:
 
 ```text
 #checkout-v2 @lead Rebase on main and tell me the new HEAD.
@@ -71,115 +74,47 @@ The reply comes back to the workspace you sent from. A mention without a label s
 ## What you get
 
 - **Mentions that come back.** A reply returns to the pane that asked. Ask several agents at once and the lead merges their results into one answer.
-- **Mentions across workspaces.** `#label @name` reaches an agent in another Herdr workspace, a repository's name reaches its worktrees, and `#all @name` reaches every workspace. Replies and tracked work come back to you.
+- **Mentions across workspaces.** `#label @name` reaches an agent in another workspace, and `#all @name` reaches every workspace. In Herdr, a repository's name reaches its worktrees. Replies and tracked work come back to you.
 - **Personas.** Describe what each agent is good at, and your agents pick useful collaborators from the roster themselves.
 - **Named terminals.** `@build cargo test` runs in a shell pane without an LLM and returns stdout, stderr, and the exit status.
 - **Groups.** Save `@review-team` once, then mention it like a name.
-- **Channels (Beta).** Read channels, threads, and direct messages in your browser. Use Live Peek to see an agent's terminal, or open **Needs you** when it needs a decision.
+- **Channels (Beta).** Read channels, threads, and direct messages in your browser. In Herdr, use Live Peek to see an agent's terminal. Open **Needs you** when an agent needs a decision.
 - **Reminders.** Ask an agent to check something later or on a schedule and answer where you asked.
 - **Agent status.** A floating panel shows what each agent is doing and which replies you're still waiting on.
 - **Tracked coordination.** Read progress and partial results while work runs. The lead saves one final report.
 - **Freshness checks.** See whether a review still matches the code you're about to merge.
 - **Doctor.** `namedrop doctor` and a floating panel explain setup problems and blocked deliveries.
-- **A tour.** A short walkthrough opens once per machine, the first time an agent appears in an activated workspace. **Prefix**, then **Shift-O** opens it again.
+- **A tour.** A short walkthrough opens once per machine, the first time an agent appears in an activated workspace. Its [key](#keyboard-shortcuts) opens it again.
 
 The demo above uses real sessions. Every screen is output captured from Claude Code, Codex, a shell, and Herdr in a fresh profile, then restaged in 3D. See [how the demo is made](https://github.com/ericbust/namedrop/blob/main/docs/demo/README.md).
 
 ## Install
 
-You need:
+Namedrop runs inside a terminal that hosts your agents' panes. Pick the one you use and follow its guide:
 
-- **macOS on Apple silicon** or **Linux on x86_64** with glibc.
-- **[Herdr](https://herdr.dev) 0.7.5 or newer**.
-- **Codex or Claude Code**, and **Python 3.9 or newer** on `PATH`.
-- **Git, Rust 1.97 or newer, and a C compiler and linker**, because Herdr builds Namedrop from source. On macOS, Apple's command-line developer tools provide the compiler. A [release archive](#install-from-a-release-archive) doesn't need these.
+| Terminal | Status | Guide |
+|---|---|---|
+| [Herdr](https://herdr.dev) 0.7.5 or newer | Stable | [Run Namedrop in Herdr](docs/herdr.md) installs the plugin, connects your agents, and covers keys, updates, and removal |
+| [Rex](https://www.superlogical.com/rex/docs) | **Beta**, under active development | [Run Namedrop on Rex](docs/rex.md) installs a release archive in Rex without Herdr, and covers the palette, keys, updates, removal, and mentions to agents on another machine |
 
-To use Namedrop in [Rex](https://www.superlogical.com/rex/docs) without Herdr, see [Run Namedrop on Rex](docs/rex.md) instead. Rex support is experimental. Namedrop 1.12.0 is the first release that includes it.
+In both, Namedrop runs on macOS on Apple silicon and on Linux with glibc, with Claude Code, Codex, or both. Each guide lists what else you need.
 
-On Linux, install from a local Herdr workspace. A remote workspace installs Namedrop on the remote host. With Codex on Linux, Agent status summaries and persona suggestions also need Landlock and the official static Codex executable. `namedrop doctor` tells you what's missing. Linux aarch64 builds pass CI but nobody has tested them by hand yet.
+**Rex support is beta and under active development.** Namedrop 1.12.0 is the first release that includes it. Rex Server is itself a preview, so a new Rex preview can change behavior that Namedrop relies on. [Compatibility](docs/compatibility.md#rex-beta) lists the Rex versions that were tested, and [Limits of Rex support](docs/rex-reference.md#limits-of-rex-support) lists what doesn't work on Rex yet.
 
-### Install the plugin
+You can use both on one machine. They share one Namedrop, as [Use Herdr and Rex on one machine](docs/rex.md#use-herdr-and-rex-on-one-machine) describes.
 
-Open a terminal in the Herdr workspace where you want to use Namedrop. Check the native integrations, then install or update the ones you use:
+The rest of this page describes Namedrop in either terminal. In Rex, a workspace is a Rex session, and a pane is a Rex pane. Some features on this page, such as mentions to another workspace, groups and reminders, have not been tested on Rex yet. The list at the end of [What has been tested on Rex](docs/compatibility.md#what-has-been-tested-on-rex) names them.
 
-```sh
-herdr integration status
-herdr integration install codex
-herdr integration install claude
-```
+## Keyboard shortcuts
 
-Install Namedrop and open its setup tab:
+Five of Namedrop's screens have a key: Agent status, Name this pane, Manage names, Doctor, and the tour. Each opens over the pane you open it from. In Herdr, the keys follow Herdr's prefix key. In Rex, Namedrop's module binds them and also adds the screens to Rex's command palette. Your terminal's guide lists them and says how to change them:
 
-```sh
-herdr plugin install ericbust/namedrop --ref main
-herdr plugin pane open --plugin namedrop --entrypoint setup
-```
-
-Herdr shows an install preview, then builds the executable and manages the checkout. Review the preview before you confirm. The setup tab activates Namedrop, shows any errors and next steps, and waits for Enter. **Keep Herdr running during setup. It doesn't need a restart.**
-
-If you already use a local Namedrop checkout, follow the [migration steps](docs/operations.md#migrate-a-local-link-to-a-managed-installation) first. Herdr won't install over a local link.
-
-### Install from a release archive
-
-Each [release](https://github.com/ericbust/namedrop/releases) has an archive with a prebuilt executable for each platform, so you don't need Git, Rust or a compiler. Download the `.tar.gz` and its `.sha256` file for your platform, then check and extract the archive. On macOS, use `shasum -a 256 -c` instead of `sha256sum -c`.
-
-```sh
-sha256sum -c namedrop-<version>-<target>.tar.gz.sha256
-tar -xzf namedrop-<version>-<target>.tar.gz
-```
-
-Keep the extracted directory. Herdr runs Namedrop from it, so moving or deleting it breaks the installation. Then open a terminal in the Herdr workspace where you want to use Namedrop, and run setup from the extracted directory:
-
-```sh
-sh namedrop-<version>-<target>/scripts/setup.sh install
-```
-
-Setup checks that the executable runs on your machine, links the directory with Herdr, and activates Namedrop. Then [check the shell command](#check-the-shell-command) and [connect your agents](#connect-your-agents).
-
-An archive installation doesn't use **Update Namedrop**. To update, extract the new release to a new directory and follow the [manual upgrade steps](docs/operations.md#manual-upgrade). To remove it, use `herdr plugin unlink namedrop`, as [Uninstall](#uninstall) describes. The archives aren't signed or notarized, and nobody has tested a downloaded copy on macOS yet.
-
-### Check the shell command
-
-Setup installs `namedrop` in `~/.local/bin` and adds that directory to your zsh and bash startup files. **Open a new terminal tab inside Herdr**, then run:
-
-```sh
-namedrop doctor
-```
-
-Other shells need [manual PATH setup](docs/operations.md#shell-command). Setup refuses to overwrite an unrelated `namedrop` command or a symlinked startup file.
-
-Activation applies to the current workspace only. Open the setup tab in each workspace where you want agents to collaborate. To run setup inline or troubleshoot it, use the [setup helper](docs/operations.md#setup-helper).
-
-### Connect your agents
-
-Follow the instructions that activation prints, then start **fresh agent sessions**:
-
-- **Codex.** When `codex` is on `PATH`, activation installs or refreshes the local Namedrop plugin for you. Start a new session. If Codex asks, review and trust the Namedrop entries in `/hooks`.
-- **Claude Code.** Start a new session, or run `/reload-plugins` to load the Namedrop integration.
-
-To confirm the setup works, name two agents as shown at the top of this page. Send a short request from one to the other, check that the reply comes back, and then try the other direction. A clean install or health check alone doesn't prove that the hooks fired.
-
-### Keyboard shortcuts
-
-Setup binds Namedrop's popups to Herdr's prefix key. Press **Prefix**, release it, then press the key:
-
-| Keys | Opens |
-|---|---|
-| **Prefix**, then **Shift-S** | [Agent status](#agent-status) for the current pane |
-| **Prefix**, then **Shift-I** | Name this pane |
-| **Prefix**, then **Shift-M** | [Manage names](#manage-names) |
-| **Prefix**, then **Shift-H** | [Namedrop Doctor](#troubleshooting) |
-| **Prefix**, then **Shift-O** | [Namedrop tour](#tour) |
-
-Setup keeps any binding you already have for these actions, including a custom key. If another action already uses one of these keys, setup leaves that key alone, binds the rest, and reports the conflict.
-
-To change a key, edit its `namedrop.*` entry in Herdr's configuration and run `herdr server reload-config`. Herdr reads the file at `HERDR_CONFIG_PATH` if you set it. Otherwise it reads `~/.config/herdr/config.toml`, or the same path under `$XDG_CONFIG_HOME`.
-
-To open a popup without a key, run `herdr plugin action invoke <action> --plugin namedrop`. The actions are `agent-status`, `name-agent`, `manage-addresses`, `doctor`, and `tour`.
+- [Keyboard shortcuts in Herdr](docs/herdr.md#keyboard-shortcuts)
+- [Namedrop's screens and keys in Rex](docs/rex.md#open-namedrops-screens)
 
 ## Examples
 
-Names belong to a Herdr workspace, and a `#label` before a mention reaches another one. A name uses lowercase letters and digits, with single hyphens between words, such as `@reviewer`, `@test-runner`, or `@build`. Name each recipient before you mention it.
+Names belong to a workspace, and a `#label` before a mention reaches another one. A name uses lowercase letters and digits, with single hyphens between words, such as `@reviewer`, `@test-runner`, or `@build`. Name each recipient before you mention it.
 
 In the dashboard channel, a top-level post can use plain text. Without a known local agent's embedded `@mention`, the post stays in the channel and no model runs. With embedded mentions, the server asks a separate, tool-free small model which mentioned agents you are addressing. A passing mention such as "nice work by @codex" can stay unrouted. The router prefers Claude Haiku when Claude Code is registered in any workspace, otherwise Codex Luna. It leaves your words unchanged. Set `NAMEDROP_CHANNEL_ROUTER=off` before starting the dashboard to leave plain posts unrouted.
 
@@ -189,7 +124,7 @@ Your own message resets a thread's **Automatic Reply Limit** and lifts a pause c
 
 ### Mention agents in other workspaces
 
-Names are unique per Herdr workspace, so two workspaces can each have an `@lead`. Put the workspace label before the mention to reach another workspace:
+Names are unique per workspace, so two workspaces can each have an `@lead`. Put the workspace label before the mention to reach another workspace:
 
 ```text
 #checkout-v2 @lead Rebase on main and tell me the new HEAD.
@@ -197,9 +132,11 @@ Names are unique per Herdr workspace, so two workspaces can each have an `@lead`
 #all @lead Report back your status in two lines.
 ```
 
-Labels match without case, and a space in a label matches a hyphen, so `#my-space` reaches the workspace labelled "My Space". Every workspace also answers to its Herdr id, such as `#w12`. Use the id when a label is empty, can't be typed, is `all`, or matches another workspace's label.
+Labels match without case, and a space in a label matches a hyphen, so `#my-space` reaches the workspace labelled "My Space". In Herdr, every workspace also answers to its id, such as `#w12`. Use the id when a label is empty, can't be typed, is `all`, or matches another workspace's label.
 
-Herdr labels a linked worktree's workspace after the worktree, not the repository. A repository's name also works as a label, so `#namestack @claude` reaches the one `namestack` worktree whose workspace has `@claude`. A workspace labelled `namestack` that has the name still wins. If two of the repository's worktrees have the name, nothing is sent and your agent asks which one you meant.
+In Herdr, a linked worktree's workspace is labelled after the worktree, not the repository. A repository's name also works as a label, so `#namestack @claude` reaches the one `namestack` worktree whose workspace has `@claude`. A workspace labelled `namestack` that has the name still wins. If two of the repository's worktrees have the name, nothing is sent and your agent asks which one you meant.
+
+In Rex, a workspace's label is its Rex session's label.
 
 A workspace label with no mention after it, as in `#catchup-again run the tests`, sends nothing. Your agent lists the named agents there and asks who you meant, even when there is only one. A `#` word that names no workspace or repository, such as `#42`, stays part of your prompt.
 
@@ -242,7 +179,7 @@ In a shell pane, run:
 namedrop name @build --type terminal
 ```
 
-Or press **Prefix**, then **Shift-I**. Type `@build`, press **Enter**, and press **Enter** again to accept the **terminal** type. When the pane has its name, send this from an agent pane:
+Or open **Name this pane** with its [key](#keyboard-shortcuts). Type `@build`, press **Enter**, and press **Enter** again to accept the **terminal** type. When the pane has its name, send this from an agent pane:
 
 ```text
 @build cargo test --locked --all-targets
@@ -260,7 +197,7 @@ An agent then reaches it with the workspace label, as in `#build-box @build carg
 
 ### Manage names
 
-Press **Prefix**, then **Shift-M** to manage names in the current workspace. Select a name with **↑** and **↓**, then press **Enter** to rename it, edit its persona, attach or detach it, turn delivery on or off, or remove it.
+Open **Manage names** with its [key](#keyboard-shortcuts) to manage names in the current workspace. Select a name with **↑** and **↓**, then press **Enter** to rename it, edit its persona, attach or detach it, turn delivery on or off, or remove it.
 
 | Key | Action |
 |---|---|
@@ -287,7 +224,7 @@ Ask @reviewer to review src/retry.rs. Attach pinned Git context and list
 src/retry.rs as diff evidence.
 ```
 
-If the work is in another worktree of the same repository, name that checkout. Namedrop then captures context, reads files, and checks freshness there instead of in the workspace's worktree:
+In Herdr, if the work is in another worktree of the same repository, name that checkout. Namedrop then captures context, reads files, and checks freshness there instead of in the workspace's worktree:
 
 ```text
 Ask @reviewer to review src/retry.rs in the worker checkout at
@@ -306,7 +243,7 @@ Changes to unrelated files don't make the review stale. The check covers the rev
 
 <p align="center"><img src="docs/assets/agent-status.png" width="100%" alt="The Agent status panel over @tester's Claude Code pane in Herdr: @tester's current work, one outstanding reply from @coder with its progress, and a summary of @build."></p>
 
-In a Codex or Claude Code pane, press **Prefix**, then **Shift-S**. The panel shows the pane's current work, its outstanding requests with what each recipient is doing, and a short overview of the other agents in the workspace. You can also run `herdr plugin action invoke agent-status --plugin namedrop`.
+In a Codex or Claude Code pane, open **Agent status** with its [key](#keyboard-shortcuts). The panel shows the pane's current work, its outstanding requests with what each recipient is doing, and a short overview of the other agents in the workspace.
 
 **R** refreshes, **↑** and **↓** scroll, and **Esc** closes. Agent states and outstanding requests appear at once. **Preparing summary…** placeholders fill in as descriptions arrive.
 
@@ -314,7 +251,7 @@ Each description comes from a separate background request through the host of th
 
 ## Tour
 
-The tour is a short walkthrough of names, mentions, terminals, groups, Agent status, and Doctor, shown in a popup. It opens once per machine, the first time Namedrop sees an agent pane in an activated workspace. To open it again, press **Prefix**, then **Shift-O**, or run `herdr plugin action invoke tour --plugin namedrop`.
+The tour is a short walkthrough of names, mentions, terminals, groups, Agent status, and Doctor, shown in a popup. It opens once per machine, the first time Namedrop sees an agent pane in an activated workspace. To open it again, use its [key](#keyboard-shortcuts).
 
 On the first page, press **N** to name the pane under the tour. Opening the tour yourself also counts as having seen it. While a workspace has no names, **Manage names** and **Doctor** offer **T** to page through the tour in place.
 
@@ -345,18 +282,23 @@ A persona grants no permissions and no tool access. It isn't proof of skill, and
 
 ![Channels with a conversation open in a thread](docs/assets/channels-beta.webp)
 
-Channels is included in the normal installation. Each Herdr workspace is a channel with its messages, threads, agents, and anything that needs you. **Direct messages** lets you talk to one agent without adding the conversation to a channel. Workspace names beside agents help you tell same-named agents apart.
+Channels is included in the normal installation. Each workspace is a channel with its messages, threads, agents, and anything that needs you. **Direct messages** lets you talk to one agent without adding the conversation to a channel. Workspace names beside agents help you tell same-named agents apart.
 
 ### Open Channels
 
-Run the Herdr action **Open Namedrop Channels** in the workspace, or run its command from a shell tab:
+Run **Open Namedrop Channels** in the workspace, from Herdr's or Rex's command palette, or run its command from a shell:
 
 ```sh
-herdr plugin action invoke channels --plugin namedrop
 namedrop channels
 ```
 
-Both open the page in your browser on macOS, and on Linux when a display is available. If no browser opens, run `namedrop channels` in a shell tab and open the link it prints. Herdr runs the action in its own server process, so the action can't open a browser when that process has no display. Run `namedrop channels --no-open` to print the link only. The link works once. Run the command again for a new link.
+In Herdr, you can also run the action from a shell tab:
+
+```sh
+herdr plugin action invoke channels --plugin namedrop
+```
+
+Each of these opens the page in your browser on macOS, and on Linux when a display is available. If no browser opens, run `namedrop channels` in a shell and open the link it prints. Herdr runs the action in its own server process, so the action can't open a browser when that process has no display. Run `namedrop channels --no-open` to print the link only. The link works once. Run the command again for a new link.
 
 ### Open Channels from your tailnet
 
@@ -391,7 +333,7 @@ namedrop channels --tailscale off
 
 Disabling tailnet access does not rotate the shared browser session. A retained cookie can work again if you re-enable access before it expires. The session itself has no server-side expiry.
 
-The ordinary `namedrop channels` command and Herdr action still open the local page. Run the tailnet command in a workspace shell tab for a fresh remote link.
+The ordinary `namedrop channels` command and the **Open Namedrop Channels** action still open the local page. Run the tailnet command in a workspace shell tab for a fresh remote link.
 
 ### What to try
 
@@ -402,8 +344,8 @@ The ordinary `namedrop channels` command and Herdr action still open the local p
 - Post a note without a mention. It stays in the channel and wakes nobody. Embedded agent mentions go through the router described in [Examples](#examples).
 - Choose an agent under **Direct messages**. Your messages go to that agent without a mention and stay out of channels and **All activity**.
 - An agent waiting on permission or a question shows **Needs you** in member chips, the DM sidebar, and DM and Peek headers. Open **Needs you** when an agent waits on an approval or a reply. Handoff warnings offer details and review actions. **All activity** shows work across channels.
-- Select an agent's name to open **Peek**. **Live** shows its terminal, keeps output that scrolls by while you watch, and offers **Expand**. **Text snapshot** gives you a sanitized text view with manual refresh.
-- Use **Type to agent** in Live Peek to submit a prompt or send keys such as Esc and Ctrl-C. This sends input to the real pane. Live Peek keeps streaming through the agent's reply. If Namedrop is typing into that pane at the same moment, for example to deliver a message, nothing is sent and your text stays in the box to send again. Watching, scrolling, and resizing Peek do not send input or resize that pane.
+- Select an agent's name to open **Peek**. In Herdr, **Live** shows its terminal, keeps output that scrolls by while you watch, and offers **Expand**. **Text snapshot** gives you a sanitized text view with manual refresh.
+- In Herdr, use **Type to agent** in Live Peek to submit a prompt or send keys such as Esc and Ctrl-C. This sends input to the real pane. Live Peek keeps streaming through the agent's reply. If Namedrop is typing into that pane at the same moment, for example to deliver a message, nothing is sent and your text stays in the box to send again. Watching, scrolling, and resizing Peek do not send input or resize that pane.
 - Type `/` or `$` in a message box or **Type to agent** to see skills for the addressed agent. Claude Code and Codex have separate lists.
 - Paste a screenshot into a message box, drop an image on it, or use the image button beside Send. The agent gets the image with your message and can open it. A message takes up to 4 images of up to 10 MB each.
 - Hear a sound when an agent messages you, in any open Channels tab. Pick a sound for each agent with the speaker button in its direct message header or its Peek panel, set the Default sound, or mute them all from **Sounds** in the sidebar.
@@ -413,13 +355,24 @@ The ordinary `namedrop channels` command and Herdr action still open the local p
 
 An agent's final message is its answer to your Channels message. It appears in the thread or DM like any other reply, and other agents in the conversation can read it. If the agent starts background work for your message and ends its turn, its answer is its final message in the turn that work's notice starts. A subagent that stops while background work of its own still runs hasn't finished, so the answer waits for the turn that carries the subagent's final report. If the notice reaches it while it works on something else, such as a prompt you typed, or another message reaches it in the turn the notice starts, it answers your message with Namedrop's reply line instead, so the final message of a turn about something else never stands in for the answer. Each reply line names the background task it waits on. A monitor it starts holds the answer until the monitor stops. Work that was already running, or a message to one of its own subagents that's still running, doesn't hold the answer. A question it asks another agent through Namedrop does hold the answer until that agent replies. Older text that a release before 1.6.0 copied from an agent's terminal stays marked **From @name's terminal**, stays hidden from other agents, and flags the conversation as needing you. The [Channels tester checklist](docs/channels-testing.md) covers these flows.
 
+### Channels on Rex
+
+Channels opens from a Rex session too. These things differ from Herdr:
+
+- Live Peek is not available for Rex panes. **Live** shows `Reconnecting…` for a few seconds and then `Live view isn’t available. Try again or choose Text snapshot.` Choose **Text snapshot** to read the pane. **Type to agent** is part of Live Peek, so it doesn't work there either.
+- Its setup and Doctor hints tell you to open Herdr. In Rex, use the palette actions and `namedrop` commands instead.
+- **+** and **Add agent** can't create a channel or start an agent in Rex. Start the Rex session or pane yourself, then activate and name it there.
+- With tailnet access on, nothing in Rex starts the Channels server again after a reboot. Run `namedrop channels --no-open` to start it.
+
+[Limits of Rex support](docs/rex-reference.md#limits-of-rex-support) lists every Rex limit.
+
 ### Beta limits and privacy
 
 Beta means the interface and workflows may still change. Status for Codex agents is limited compared with Claude Code. A name created before its session starts can look like an offline agent. A workspace where Namedrop was never activated shows **No agents here yet**.
 
 Channels listens on `127.0.0.1`. Use `--tailscale` to open it from your other devices. Any process running as your user that can open the page can post as you. It can also create channels and start agents, as you can from the page. Live Peek shows terminal content that can contain secrets. **Text snapshot** redacts recognized secrets, but redaction cannot catch every secret. See [Channels operations](docs/operations.md#channels) for authentication and server details.
 
-[Report a problem](https://github.com/ericbust/namedrop/issues) with your platform, Herdr and agent versions, steps to reproduce, and any errors. Remove credentials and private conversation text from screenshots and logs. The `experimental` branch remains available for trying upcoming features.
+[Report a problem](https://github.com/ericbust/namedrop/issues) with your platform, your Herdr or Rex version, your agent versions, steps to reproduce, and any errors. Remove credentials and private conversation text from screenshots and logs. The `experimental` branch remains available for trying upcoming features.
 
 ## Reminders
 
@@ -430,7 +383,7 @@ Check the build in 10 minutes and tell me the result here.
 Check the deployment every 5 minutes, three times, and report back here.
 ```
 
-Reminders work in plain Herdr panes and in Channels, including threads and DMs. The agent wakes at the scheduled time and answers where you asked. Saved reminders survive process restarts, but they belong to the agent session that created them. If that session or its pane binding is gone, the reminder fails instead of moving to another session.
+Reminders work in plain agent panes and in Channels, including threads and DMs. The agent wakes at the scheduled time and answers where you asked. Saved reminders survive process restarts, but they belong to the agent session that created them. If that session or its pane binding is gone, the reminder fails instead of moving to another session.
 
 The minimum delay and repeat interval are **60 seconds**. Each agent can have **20 pending reminders**, and a repeating reminder allows at most **100 total occurrences**, including the first. Pending reminders in Channels offer **Cancel**. In a pane, ask the agent to list or cancel its reminders. See [Reminders operations](docs/operations.md#reminders) for the commands and clock process.
 
@@ -438,60 +391,32 @@ Start a **new agent session after updating** so it learns the reminder commands.
 
 ## Update Namedrop
 
-Namedrop checks for a newer version in the background, at most once a day. For GitHub-managed installations that follow a branch or tag, Doctor shows the installed and available versions. A new Claude Code or Codex session also shows one update line, at most once a day across all panes for that version. The line is visible to you and adds no agent context. Checks never download or install an update automatically. Local links, archives and full commit pins make no update requests.
+An installation that can be updated checks for a newer version in the background, at most once a day. When there is one, Doctor and new agent sessions tell you. Namedrop never downloads or installs an update by itself. How you update depends on your terminal:
 
-For a GitHub-managed installation, run this from a plain shell tab:
+- **Herdr.** Run **Update Namedrop**. [Update Namedrop in Herdr](docs/herdr.md#update-namedrop) covers settings, older installations, and reinstalling.
+- **Rex.** Download the new release and run `sh scripts/install.sh` from it. [Update Namedrop on Rex](docs/rex.md#update-namedrop) gives the steps. If Herdr owns your installation, update it in Herdr instead.
 
-```sh
-herdr plugin action invoke update --plugin namedrop
-```
-
-The **Update Namedrop** tab checks your installed branch or ref for new commits, asks **Install update now?**, and then installs and activates it. A compatible update keeps your agents running. Panes, workspaces, names, groups, handoffs, and pause settings stay intact. Existing sessions keep the instructions they loaded, and new sessions load the updated ones.
-
-To turn off both background checks and notices, put `{"check_for_updates":false}` in `settings.json` inside the directory printed by `herdr plugin config-dir namedrop`. Create the file and directory if needed. Set it to `true`, or remove that setting, to enable checks again. Invalid settings disable checks; Doctor explains the error without marking Namedrop unhealthy. This setting survives updates and `namedrop purge`.
-
-- **Older installations.** An upgrade from an older installation may need one session refresh. The tab lists the affected sessions by workspace, tab, and pane. Choose **Wait here** or **Later**, and refresh them when you're ready. Complete any Codex cache-refresh steps that setup prints.
-- **Nothing is forced.** An update keeps your installed source and ref, including a fixed pin. It stops and cancels nothing. If activation fails, Namedrop selects the previous runtime again. Build and setup details go to `last-update.log` in Namedrop's state directory.
-- **Other workspaces.** Other workspaces keep their activation. Run `namedrop doctor` in each one, and open setup if Doctor reports a problem.
-
-If your installed version has no **Update** action, finish your handoffs, exit your agents, and use the [reinstall steps](#reinstall-an-existing-installation). Local checkouts and archives use the [manual upgrade steps](docs/operations.md#manual-upgrade). Version 1.5.0 upgrades the database in place to schema 7 and keeps names and history. Start new agent sessions after updating to load the reminder commands and updated instructions. Take a backup before upgrading across schemas. The [upgrade guide](docs/operations.md#upgrade) covers migration, backups, and recovery.
-
-### Reinstall an existing installation
-
-These steps remove Herdr's managed checkout and install the latest `main`. Your saved names and message history stay. Before you start, finish active handoffs and exit your Claude Code and Codex sessions. Keep Herdr running. In a shell tab in the workspace you want to activate, run:
-
-```sh
-cd "$HOME"
-namedrop deactivate
-herdr plugin disable namedrop
-herdr plugin uninstall namedrop
-herdr plugin install ericbust/namedrop --ref main
-herdr plugin pane open --plugin namedrop --entrypoint setup
-```
-
-The first command moves your shell out of the checkout that the uninstall deletes. If you installed from another owner, repository, or ref, use yours. Read the setup result. Then open a **new terminal tab**, run `namedrop doctor`, and [start fresh agent sessions](#connect-your-agents). For a local checkout or archive, follow the [migration guide](docs/operations.md#migrate-a-local-link-to-a-managed-installation) instead.
+Start new agent sessions after an update, so they load the updated instructions. The [upgrade guide](docs/operations.md#upgrade) covers migration, backups, and recovery.
 
 ## Troubleshooting
 
-In the Herdr workspace that has the problem, run:
+In the workspace that has the problem, run:
 
 ```sh
 namedrop doctor
 ```
 
-Doctor reports missing names, setup problems, paused workspaces, blocked deliveries, and the number of pending reminders. It warns when pending reminders have no running clock. It exits with `0` when everything is healthy, `1` when something needs attention, and `2` when it can't check. Read its suggested repair before you act. Don't resend a delivery that Doctor marks as uncertain, because the work may already have run. If the `namedrop` command isn't available, run `sh scripts/setup.sh check` from the installed package directory.
+Doctor reports missing names, setup problems, paused workspaces, blocked deliveries, and the number of pending reminders. It warns when pending reminders have no running clock. It exits with `0` when everything is healthy, `1` when something needs attention, and `2` when it can't check. Read its suggested repair before you act. Don't resend a delivery that Doctor marks as uncertain, because the work may already have run.
 
-**Prefix**, then **Shift-H** opens the **Namedrop Doctor** panel with the same diagnosis. **<** and **>** page, **R** refreshes, **T** pages through the [tour](#tour) while the workspace has no names, and **Enter** or **Esc** closes. Doctor does not apply its suggested repairs. A normal command invocation can restart a missing reminder clock. **A** asks the agent in the pane you opened it from to help with the listed issues.
+The **Namedrop Doctor** screen shows the same diagnosis. Open it with its [key](#keyboard-shortcuts). **<** and **>** page, **R** refreshes, **T** pages through the [tour](#tour) while the workspace has no names, and **Enter** or **Esc** closes. Doctor does not apply its suggested repairs. A normal command invocation can restart a missing reminder clock. **A** asks the agent in the pane you opened it from to help with the listed issues.
 
 Everyday commands such as `namedrop name`, `namedrop address list`, `namedrop group list`, and `namedrop doctor` print readable output in a terminal. Use `--json` for scripts, or `--human` to save readable output to a file. See [command output](docs/operations.md#command-output).
 
-
-For more detail, see these guides:
+Each terminal's guide covers its own problems: [Troubleshooting in Herdr](docs/herdr.md#troubleshooting) and [Troubleshooting on Rex](docs/rex.md#troubleshooting). For more detail, see these guides:
 
 - [Operations and recovery](docs/operations.md) covers names, groups, delivery states, and every command.
 - [Upgrades and backups](docs/operations.md#upgrade) covers replacing an installation, restoring state, and removing Namedrop.
 - [Compatibility](docs/compatibility.md) lists supported platforms, tested versions, and known gaps.
-- [Run Namedrop on Rex](docs/rex.md) installs a release archive in Rex without Herdr, and sets up mentions to agents on another machine. Rex support is experimental, and releases include it from 1.12.0.
 - [Namedrop on Rex reference](docs/rex-reference.md) lists Rex's palette actions and keys, the files the installer writes, update settings, Doctor's Rex diagnostics, and known limits.
 
 ## Data and privacy
@@ -502,24 +427,16 @@ Agent permissions still apply, and text from another agent never grants new ones
 
 ## Uninstall
 
-Finish active handoffs and exit your Claude Code and Codex sessions. Keep Herdr running. If several workspaces use Namedrop, run `namedrop deactivate` in each one before you disable the plugin. Then, in a Herdr shell tab, run:
+Removing Namedrop keeps your names, groups, and message history, so a reinstall brings them back.
 
-```sh
-cd "$HOME"
-namedrop deactivate
-herdr plugin disable namedrop
-herdr plugin uninstall namedrop
-```
-
-For a local checkout or an extracted archive, use `herdr plugin unlink namedrop` instead of `uninstall`. Your local files stay where they are.
-
-**Your names, groups, message history, and configuration remain.** So do the agent integrations, the shell launcher, and the `PATH` entries, so a reinstall can refresh them. To remove those too, follow the [remaining cleanup steps](docs/operations.md#remove-agent-integrations-and-shell-command). Don't remove unrelated skills, shell settings, or Herdr's native integrations.
+- **Herdr.** Follow [Uninstall from Herdr](docs/herdr.md#uninstall).
+- **Rex.** Follow [Remove Namedrop from Rex](docs/rex.md#remove-namedrop-from-rex).
 
 ## Contributing
 
-Bug reports and focused pull requests are welcome. When you [open an issue](https://github.com/ericbust/namedrop/issues), include your Herdr, Namedrop, Codex, or Claude Code versions, the steps to reproduce, and any errors. Remove credentials and private conversation text from logs before you share them.
+Bug reports and focused pull requests are welcome. When you [open an issue](https://github.com/ericbust/namedrop/issues), include your Herdr or Rex, Namedrop, Codex, or Claude Code versions, the steps to reproduce, and any errors. Remove credentials and private conversation text from logs before you share them.
 
-To build and test from source, install the [prerequisites](#install) and run:
+To build and test from source, install the [prerequisites](docs/herdr.md#install) and run:
 
 ```sh
 git clone https://github.com/ericbust/namedrop.git
@@ -528,7 +445,7 @@ sh scripts/build.sh
 cargo test --locked --all-targets
 ```
 
-To try your checkout inside a Herdr workspace, run `sh scripts/setup.sh` from its root. The helper links the local directory and activates Namedrop. If you already have a GitHub-managed installation, the helper keeps it. To change which checkout Herdr uses, follow the [migration guide](docs/operations.md#migrate-a-local-link-to-a-managed-installation).
+To try your checkout inside a Herdr workspace, run `sh scripts/setup.sh` from its root. The helper links the local directory and activates Namedrop. If you already have a GitHub-managed installation, the helper keeps it. To change which checkout Herdr uses, follow the [migration guide](docs/operations.md#migrate-a-local-link-to-a-managed-installation). To try it in Rex, run `sh scripts/install.sh` from its root after the build, as [Run Namedrop on Rex](docs/rex.md#install-namedrop-for-rex) describes.
 
 [CONTRIBUTING.md](CONTRIBUTING.md) lists the formatting, lint, and test checks. The [release guide](docs/releasing.md) covers packaging and checksums.
 

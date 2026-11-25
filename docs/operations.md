@@ -1,10 +1,12 @@
 # Operations and recovery
 
+This guide describes Namedrop in Herdr. The `namedrop` commands also run in a Rex pane, but the Herdr actions, keys, and `herdr` commands here don't apply there. For Rex, see [Run Namedrop on Rex](rex.md) and [Namedrop on Rex reference](rex-reference.md).
+
 Run Herdr actions from a terminal in the intended workspace. Keep `HERDR_SOCKET_PATH`, `HERDR_WORKSPACE_ID` and `HERDR_PANE_ID` from that terminal. `sh scripts/setup.sh` refuses to choose a workspace when these are absent.
 
 ## Setup helper
 
-The README uses Herdr's built-in plugin tabs to show setup progress and keep the result visible:
+[Run Namedrop in Herdr](herdr.md) uses Herdr's built-in plugin tabs to show setup progress and keep the result visible:
 
 ```sh
 herdr plugin pane open --plugin namedrop --entrypoint setup
@@ -835,7 +837,7 @@ The registration and shared agent packages apply to every workspace, but setup o
 
 ### Manual upgrade
 
-Keep Herdr running throughout the upgrade. For the remove-and-reinstall sequence, see [reinstalling](../README.md#reinstall-an-existing-installation). A GitHub-managed installation can also be updated in place using the steps below.
+Keep Herdr running throughout the upgrade. For the remove-and-reinstall sequence, see [reinstalling](herdr.md#reinstall-an-existing-installation). A GitHub-managed installation can also be updated in place using the steps below.
 
 1. Stop initiating handoffs and let work finish. Pause Namedrop in each active workspace with `herdr plugin action invoke pause --plugin namedrop`. An empty pane doesn't mean the work is complete. `sh scripts/setup.sh check` reports held and expired deliveries, and `handoff status` from each originating session lists that session's outstanding requests. Once work has finished, exit Claude and Codex sessions before replacing the executable.
 2. Record activation's exact `state_directory` and the installed executable, then [back up the state](#back-up-and-restore-state). For a local or archive installation, keep the old package directory, because it is your rollback. A managed installation has no such artifact. Reinstalling replaces Herdr's checkout in place, so record the current `resolved_commit` from `herdr plugin list --plugin namedrop --json` instead, because reinstalling that ref is the only way back.
@@ -887,7 +889,7 @@ The commands in this section name `ericbust/namedrop` because that is Namedrop's
 
 Step 5 should report `source.kind` `github` with the `owner`, `repo`, `requested_ref` and `resolved_commit` you asked for, and a `plugin_root` inside Herdr's own plugin directory rather than your checkout. Record the `resolved_commit`, because it makes the installation reproducible. After migrating, `sh scripts/setup.sh` detects the managed installation and only activates it. It neither rebuilds nor relinks, so a later `herdr plugin install` still refreshes from the same origin.
 
-Read the setup result and complete its runtime instructions. Open a new terminal tab for `namedrop doctor`, then start fresh agents and [verify a mention and reply](../README.md#connect-your-agents). Herdr itself does not need a restart.
+Read the setup result and complete its runtime instructions. Open a new terminal tab for `namedrop doctor`, then start fresh agents and [verify a mention and reply](herdr.md#connect-your-agents). Herdr itself does not need a restart.
 
 Keep the old package until step 5 passes. Unlinking removes the registration only, so relinking it with `herdr plugin link <old path> --enabled` restores the previous installation. Check `herdr plugin list --plugin namedrop` first, because `link` repoints whatever is registered without asking. You need that fallback because nothing is registered between steps 2 and 3. A managed install that fails registers nothing, leaves no managed directory behind, and does not restore your local link.
 
@@ -997,7 +999,7 @@ herdr plugin list --plugin namedrop --json
 
 The `result.plugins` list should be empty. `uninstall` removes Herdr's managed checkout from disk. Recover that revision with `herdr plugin install` and the recorded commit. `unlink` leaves the directory available to relink.
 
-Both routes preserve the state directory, plugin configuration, shared agent integrations, shell launcher, and PATH entries. A launcher pointing at a removed executable cannot run until you reinstall. If you are [reinstalling](../README.md#reinstall-an-existing-installation), setup refreshes those integrations and the launcher. Keep them and Herdr's native runtime integrations in place.
+Both routes preserve the state directory, plugin configuration, shared agent integrations, shell launcher, and PATH entries. A launcher pointing at a removed executable cannot run until you reinstall. If you are [reinstalling](herdr.md#reinstall-an-existing-installation), setup refreshes those integrations and the launcher. Keep them and Herdr's native runtime integrations in place.
 
 ### Remove agent integrations and shell command
 

@@ -1,6 +1,6 @@
 # Namedrop on Rex reference
 
-This page describes Namedrop's experimental Rex support. To set it up, see [Run Namedrop on Rex](rex.md). For the Rex versions that Namedrop accepts, see [Compatibility](compatibility.md#rex-experimental).
+This page describes Namedrop's Rex support, which is beta and under active development. To set it up, see [Run Namedrop on Rex](rex.md). For the Rex versions that Namedrop accepts and the ones that were tested, see [Compatibility](compatibility.md#rex-beta).
 
 ## Terms
 
@@ -341,6 +341,17 @@ Doctor on Rex reports `ND-INTEGRATION-003` when an installed Codex or Claude Cod
 | Explanation | "`<wrapper>` sets no NAMEDROP_HOOK_RUNTIME. It was installed by an older Namedrop, and an agent whose hooks do not bind cannot register or receive mentions here." More than one wrapper is listed with " and " between them. |
 | Repair | "Activate Namedrop again, which rewrites the wrappers, then restart the agent." |
 
+### ND-SPACE-001
+
+`ND-SPACE-001` is not Rex-only. Doctor reports it while Namedrop is paused in the Rex session, after **Pause Namedrop** or `namedrop space pause`.
+
+| Field | Text |
+|---|---|
+| Severity | `notice` |
+| Summary | "Namedrop is paused in this Rex session." |
+| Explanation | "Messages are preserved and will wait until Namedrop resumes." |
+| Repair | "Resume Namedrop?" |
+
 ### ND-UPDATE-001 and ND-UPDATE-002
 
 | Code | Severity | Summary | Repair |
@@ -444,9 +455,10 @@ Each label in the explanation lists one or more of these conditions:
 
 ## Limits of Rex support
 
-- **Experimental.** Rex is a preview, and Namedrop's Rex support can change between releases. Namedrop 1.12.0 is the first release that includes it.
+- **Beta.** Namedrop's Rex support is under active development and can change between releases. Rex Server is itself a preview, so a new Rex preview can change behavior that Namedrop relies on. Namedrop 1.12.0 is the first release that includes it.
 - **Channels names Herdr.** **Open Namedrop Channels** opens a page that tells a Rex user to open Herdr: "Open this workspace in Herdr and choose Namedrop setup from the command palette to repair the integration.", "Open this workspace in Herdr and choose Namedrop Doctor to review this item.", "Answer it in its pane in Herdr.", "Rename it in Herdr.", and "This workspace has no label in Herdr." Rex has no counterpart for these Herdr steps. The palette actions and `namedrop` commands do that work on Rex.
 - **Channels can't create channels or add agents in Rex.** **New channel** and **Add agent** open a Herdr workspace or tab, so in a Rex session each form says "Channels can't create a channel in Rex yet." or "Channels can't add an agent in Rex yet." and opens nothing. Start the Rex session or pane yourself, then activate and name it there.
+- **No Live Peek in Rex panes.** Channels' **Live** view refuses a Rex pane: it shows `Reconnecting…` for a few seconds and then `Live view isn’t available. Try again or choose Text snapshot.` Choose **Text snapshot** instead. **Type to agent**, which is part of that view, is not available either. A Rex pane streams a Ghostty snapshot and raw VT, which only a terminal emulator could render.
 - **Channels' tailnet link does not come back by itself.** With Tailscale access on, Herdr starts the Channels server again when Herdr starts. Nothing in Rex does, so after a reboot run `namedrop channels --no-open`. Doctor's `ND-TAILSCALE-001` says so.
 - **Rex can miss a new session's first events.** Rex sometimes sends no startup events, such as `block_created`, for the first pane of a new Rex session. Namedrop loses nothing: activation reads the Rex session's panes itself, and that pane's later events still arrive.
 - **The Rex app's palette was tested on one build.** On Rex Server preview.23, the Rex app's palette lists the eleven actions. Activate Namedrop, Name this pane and About Namedrop were run from it, and the Name this pane, Manage, Agent status and tour keys opened their screens. About Namedrop shows nothing when you run it from the palette. Other Rex builds were tested only with `rex do --origin palette`, which proves what the actions do, not what the app shows.
