@@ -307,7 +307,7 @@
         "installed ClaudeCode/SKILL.md (Herdr owns the packages)"
       ],
       "sources": [
-        {"file": "src/install.rs", "line": 907, "source": "Use the installed executable directly with `--plugin-state` and the state directory (`HERDR_PLUGIN_STATE_DIR` or `NAMEDROP_STATE_DIR`) before the bound operation. Append the location flags with the exact values the delivery's lines or `control.tool.environment` show: `--herdr-socket`, `--herdr-workspace`, and `--herdr-pane` for `HERDR_SOCKET_PATH`, `HERDR_WORKSPACE_ID`, and `HERDR_PANE_ID`, or `--endpoint`, `--space`, and `--pane` for `NAMEDROP_ENDPOINT`, `NAMEDROP_SPACE_ID`, and `NAMEDROP_PANE_ID`."}
+        {"file": "src/install.rs", "line": 912, "source": "Use the installed executable directly with `--plugin-state` and the state directory (`HERDR_PLUGIN_STATE_DIR` or `NAMEDROP_STATE_DIR`) before the bound operation. Append the location flags with the exact values the delivery's lines or `control.tool.environment` show: `--herdr-socket`, `--herdr-workspace`, and `--herdr-pane` for `HERDR_SOCKET_PATH`, `HERDR_WORKSPACE_ID`, and `HERDR_PANE_ID`, or `--endpoint`, `--space`, and `--pane` for `NAMEDROP_ENDPOINT`, `NAMEDROP_SPACE_ID`, and `NAMEDROP_PANE_ID`."}
       ],
       "reason": "The shared packages' SKILL.md when Herdr's install owns them. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
     },
@@ -318,7 +318,7 @@
         "installed Codex/SKILL.md (Herdr owns the packages)"
       ],
       "sources": [
-        {"file": "src/install.rs", "line": 912, "source": "Herdr"}
+        {"file": "src/install.rs", "line": 917, "source": "Herdr"}
       ],
       "reason": "The shared packages' Codex SKILL.md when Herdr's install owns them. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
     },
@@ -486,7 +486,7 @@
         "doctor invalid settings text (Herdr owns the state)"
       ],
       "sources": [
-        {"file": "src/update_check.rs", "line": 50, "source": "herdr/plugins/config/namedrop/settings.json"}
+        {"file": "src/update_check.rs", "line": 44, "source": "herdr/plugins/config/namedrop/settings.json"}
       ],
       "reason": "ND-UPDATE-002 names the settings file it could not read, which for a state that Herdr's install owns is Herdr's. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
     }
@@ -505,15 +505,15 @@
       "file": "scripts/check-update.py",
       "reason": "The update check of a Herdr registration; a standalone install reads source.json instead.",
       "literals": [
-        [54, "plugins"],
-        [55, "plugin_list"],
-        [59, "plugin_id"],
-        [77, "plugin_root"],
-        [92, "--plugin"],
-        [92, "HERDR_BIN_PATH"],
-        [92, "herdr"],
-        [92, "plugin"],
-        [220, "https://raw.githubusercontent.com/{source[\"owner\"]}/{source[\"repo\"]}/{commit}/{prefix}herdr-plugin.toml"]
+        [56, "plugins"],
+        [57, "plugin_list"],
+        [61, "plugin_id"],
+        [79, "plugin_root"],
+        [94, "--plugin"],
+        [94, "HERDR_BIN_PATH"],
+        [94, "herdr"],
+        [94, "plugin"],
+        [222, "https://raw.githubusercontent.com/{source[\"owner\"]}/{source[\"repo\"]}/{commit}/{prefix}herdr-plugin.toml"]
       ]
     },
     {
@@ -787,7 +787,7 @@
       "file": "src/agent_status_model.rs",
       "reason": "An environment or config name read or set, never printed.",
       "literals": [
-        [930, "HERDR_"]
+        [1019, "HERDR_"]
       ]
     },
     {
@@ -842,14 +842,14 @@
       "reason": "Channels' New channel and Add agent, which refuse a Rex session before they read or open anything.",
       "literals": [
         [32, "Herdr isn't reachable. Check that Herdr is running, then try again."],
-        [188, "Herdr couldn't create the workspace. Try again."],
-        [192, "Herdr didn't open the workspace in that folder, so it was closed again. Check the folder, then try again."],
-        [289, "Herdr couldn't open a tab for the agent. Try again."],
-        [293, "Herdr didn't open the tab in this channel's folder, so it was closed again. Try again."],
-        [799, "dashboard: Herdr could not create a workspace: {error}"],
-        [805, "dashboard: Herdr opened {} in {:?}, not in {}"],
-        [906, "dashboard: Herdr could not open a tab: {error}"],
-        [911, "dashboard: Herdr opened {} in {:?}, not in {}"]
+        [222, "Herdr couldn't create the workspace. Try again."],
+        [226, "Herdr didn't open the workspace in that folder, so it was closed again. Check the folder, then try again."],
+        [325, "Herdr couldn't open a tab for the agent. Try again."],
+        [329, "Herdr didn't open the tab in this channel's folder, so it was closed again. Try again."],
+        [841, "dashboard: Herdr could not create a workspace: {error}"],
+        [847, "dashboard: Herdr opened {} in {:?}, not in {}"],
+        [949, "dashboard: Herdr could not open a tab: {error}"],
+        [954, "dashboard: Herdr opened {} in {:?}, not in {}"]
       ]
     },
     {
@@ -907,7 +907,7 @@
       "file": "src/health.rs",
       "reason": "Codex's or Claude Code's own plugin, or Namedrop's --plugin-state flag, which a Rex home uses as a Herdr home does.",
       "literals": [
-        [794, "The Namedrop plugin changed after this session started, and a running session doesn't pick up the change. An answer it gives as its final message won't reach anyone."]
+        [802, "The Namedrop plugin changed after this session started, and a running session doesn't pick up the change. An answer it gives as its final message won't reach anyone."]
       ]
     },
     {
@@ -915,7 +915,7 @@
       "file": "src/health.rs",
       "reason": "ND-SESSION-002's Herdr repair; a Rex home's repair is Activate Namedrop.",
       "literals": [
-        [636, "herdr.integration.install"]
+        [644, "herdr.integration.install"]
       ]
     },
     {
@@ -923,8 +923,8 @@
       "file": "src/health.rs",
       "reason": "The stale-build notice of a Herdr plugin root, which only Herdr's reinstall leaves.",
       "literals": [
-        [1623, "A reinstall rebuilt Namedrop but did not switch to the new build, so every command still runs the earlier release. Update Namedrop switches builds for you on GitHub installs; a bare `herdr plugin install` does not."],
-        [1625, "Switch to the new build? Run the command in this Herdr workspace."]
+        [1631, "A reinstall rebuilt Namedrop but did not switch to the new build, so every command still runs the earlier release. Update Namedrop switches builds for you on GitHub installs; a bare `herdr plugin install` does not."],
+        [1633, "Switch to the new build? Run the command in this Herdr workspace."]
       ]
     },
     {
@@ -932,7 +932,7 @@
       "file": "src/health.rs",
       "reason": "A key of the JSON interface, which stays one for both hosts.",
       "literals": [
-        [1629, "plugin_root"]
+        [1637, "plugin_root"]
       ]
     },
     {
@@ -952,8 +952,8 @@
         [277, "codex plugin marketplace remove namedrop --json"],
         [291, "resolve an absolute UTF-8 HOME before activating the Codex plugin"],
         [294, "resolve an absolute HOME before activating the Codex plugin"],
-        [797, "Bash({} --plugin-state {} {} *)"],
-        [1185, "if [ -n \"${{PLUGIN_ROOT:-}}\" ]; then \"${{PLUGIN_ROOT}}/{script}\"; elif [ -n \"${{CLAUDE_PLUGIN_ROOT:-}}\" ]; then \"${{CLAUDE_PLUGIN_ROOT}}/{script}\"; else {}; fi"]
+        [802, "Bash({} --plugin-state {} {} *)"],
+        [1190, "if [ -n \"${{PLUGIN_ROOT:-}}\" ]; then \"${{PLUGIN_ROOT}}/{script}\"; elif [ -n \"${{CLAUDE_PLUGIN_ROOT:-}}\" ]; then \"${{CLAUDE_PLUGIN_ROOT}}/{script}\"; else {}; fi"]
       ]
     },
     {
@@ -979,10 +979,10 @@
         [94, ".codex-plugin"],
         [384, "plugins"],
         [402, "plugins/cache"],
-        [1150, "namedrop-codex-plugin-v1"],
-        [1165, "https://anthropic.com/claude-code/plugin.schema.json"],
-        [1211, "plugins"],
-        [1272, "plugins"]
+        [1155, "namedrop-codex-plugin-v1"],
+        [1170, "https://anthropic.com/claude-code/plugin.schema.json"],
+        [1216, "plugins"],
+        [1277, "plugins"]
       ]
     },
     {
@@ -990,7 +990,7 @@
       "file": "src/install.rs",
       "reason": "An environment or config name read or set, never printed.",
       "literals": [
-        [1414, "#!/bin/sh\nexec >/dev/null 2>&1\nNAMEDROP_HERDR_TIMEOUT_MS=250 NAMEDROP_REX_TIMEOUT_MS=250 {executable} hook stop --state-directory {state} <&0 >/dev/null 2>&1\nexit 0\n"]
+        [1419, "#!/bin/sh\nexec >/dev/null 2>&1\nNAMEDROP_HERDR_TIMEOUT_MS=250 NAMEDROP_REX_TIMEOUT_MS=250 {executable} hook stop --state-directory {state} <&0 >/dev/null 2>&1\nexit 0\n"]
       ]
     },
     {
@@ -1031,7 +1031,7 @@
       "file": "src/lifecycle.rs",
       "reason": "A check of with_herdr_runtime, which only a Herdr home runs.",
       "literals": [
-        [2200, "Herdr has no pane {pane_id}, so its space is unknown. Pass --herdr-workspace <space-id>."]
+        [2204, "Herdr has no pane {pane_id}, so its space is unknown. Pass --herdr-workspace <space-id>."]
       ]
     },
     {
@@ -1416,7 +1416,7 @@
     },
     {
       "file": "src/health.rs",
-      "line": 1345,
+      "line": 1353,
       "text": "Namedrop could not inspect this Rex session safely.",
       "reason": "Requires a failed host discovery; not staged by the Words homes."
     },
@@ -1428,7 +1428,7 @@
     },
     {
       "file": "src/health.rs",
-      "line": 1753,
+      "line": 1833,
       "text": "Run `namedrop channels --no-open` to start the server again on the same port. Devices that are signed in stay signed in.",
       "reason": "ND-TAILSCALE-001's repair once a tailnet handler's Channels server has stopped, which needs a Tailscale the sweep's homes do not have."
     }

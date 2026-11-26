@@ -630,7 +630,11 @@ where
             );
             let (permission_removal, sandbox_removal, subagent_removal) = match &lease {
                 Ok(lease) => (
-                    crate::install::remove_claude_permissions(lease, runtime.state_directory),
+                    crate::install::remove_claude_permissions(
+                        lease,
+                        runtime.home_directory,
+                        runtime.state_directory,
+                    ),
                     crate::install::codex_sandbox::remove(lease, runtime.state_directory),
                     crate::install::remove_subagent_hooks(
                         lease,

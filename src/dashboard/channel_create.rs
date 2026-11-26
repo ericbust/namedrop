@@ -96,14 +96,48 @@ impl AgentKind {
         }
     }
 
-    /// The whole command typed into the new pane: fixed text, never input.
-    fn command(self) -> Option<&'static str> {
-        match self {
-            Self::Claude => Some("claude"),
-            Self::Codex => Some("codex"),
+    /// The whole command typed into the new pane, never request input:
+    /// fixed text, or for Claude Code the program that `claude_command` in
+    /// Namedrop's settings names, so a new agent uses the account it selects.
+    /// A setting that cannot be used refuses, rather than typing `claude`.
+    fn command(self, state: &Path) -> Result<Option<String>, AgentRefusal> {
+        Ok(match self {
+            Self::Claude => {
+                let setting = crate::update_check::claude_command(
+                    state,
+                    &crate::update_check::ConfigRoots::environment(),
+                )
+                .map_err(|fault| AgentRefusal::ClaudeCommand(fault.reason))?;
+                Some(match setting.command {
+                    None => "claude".to_owned(),
+                    Some(command) => typed_program(
+                        &crate::agent_status_model::locate("claude_command", &command)
+                            .map_err(AgentRefusal::ClaudeCommand)?,
+                    )
+                    .map_err(AgentRefusal::ClaudeCommand)?,
+                })
+            }
+            Self::Codex => Some("codex".to_owned()),
             Self::Terminal => None,
-        }
+        })
     }
+}
+
+/// `program` as a shell line types it: bare when it is an ordinary path,
+/// which every shell runs, else single-quoted. A path that is not UTF-8, or
+/// that holds a control character, cannot be typed faithfully, so it is
+/// refused.
+fn typed_program(program: &Path) -> Result<String, String> {
+    program
+        .to_str()
+        .filter(|text| !text.chars().any(char::is_control))
+        .map(crate::integration::shell_argument)
+        .ok_or_else(|| {
+            format!(
+                "claude_command leads to {}, which a shell line cannot hold",
+                program.display()
+            )
+        })
 }
 
 struct NewAgent {
@@ -222,6 +256,8 @@ enum AgentRefusal {
     FolderNotUsed,
     NameFailed,
     NameUnconfirmed(String),
+    /// Why the Claude Code program cannot be named.
+    ClaudeCommand(String),
 }
 
 impl AgentRefusal {
@@ -292,6 +328,12 @@ impl AgentRefusal {
                 "500 Internal Server Error",
                 "Herdr didn't open the tab in this channel's folder, so it was closed again. Try again."
                     .into(),
+            ),
+            Self::ClaudeCommand(reason) => (
+                CONFLICT,
+                format!(
+                    "Namedrop can't tell which Claude Code program to start: {reason}. Fix claude_command in Namedrop's settings.json, then add the agent again."
+                ),
             ),
             Self::NameFailed => (
                 "500 Internal Server Error",
@@ -900,6 +942,7 @@ fn add(front: &Front, key: &SpaceKey, agent: NewAgent) -> Result<(String, String
     if !Path::new(folder.path()).is_dir() {
         return Err(AgentRefusal::FolderGone(folder.path().to_owned()));
     }
+    let command = agent.kind.command(state)?;
     let tab = herdr
         .create_tab(&workspace.id, folder.path(), &format!("@{}", agent.alias))
         .map_err(|error| {
@@ -950,12 +993,12 @@ fn add(front: &Front, key: &SpaceKey, agent: NewAgent) -> Result<(String, String
     if let ChannelFolder::FirstPane(path) = &folder {
         keep_folder(front, &namespace, path, &live);
     }
-    if let (Some(command), Some(program)) = (agent.kind.command(), agent.kind.started()) {
+    if let (Some(command), Some(program)) = (command, agent.kind.started()) {
         // A pane that didn't start still shows as needing the person, who can
         // start the agent by hand in Herdr, so this is not a refusal.
         let started = DashboardPane::acquire_new(state, &namespace.session_socket_id, &pane)
             .map_err(|error| error.to_string())
-            .and_then(|effects| match effects.start_agent(&herdr.0, command) {
+            .and_then(|effects| match effects.start_agent(&herdr.0, &command) {
                 InputOutcome::Delivered => Ok(()),
                 InputOutcome::Declined(_, error)
                 | InputOutcome::Refused(error)
@@ -978,6 +1021,32 @@ fn add(front: &Front, key: &SpaceKey, agent: NewAgent) -> Result<(String, String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A program is typed bare when every shell runs it so, quoted when it
+    /// must be, and refused when a shell line cannot hold it.
+    #[test]
+    fn the_claude_program_is_typed_as_a_shell_runs_it_or_refused() {
+        use std::os::unix::ffi::OsStrExt;
+        assert_eq!(
+            typed_program(Path::new("/Users/me/.local/bin/claude-personal")),
+            Ok("/Users/me/.local/bin/claude-personal".to_owned())
+        );
+        assert_eq!(
+            typed_program(Path::new("/Users/me/my bin/it's claude")),
+            Ok("'/Users/me/my bin/it'\"'\"'s claude'".to_owned())
+        );
+        for refused in [
+            Path::new("/Users/me/bin/claude\tpersonal"),
+            Path::new("/Users/me/bin/claude\npersonal"),
+            Path::new(std::ffi::OsStr::from_bytes(b"/Users/me/bin/claude\xff")),
+        ] {
+            let reason = typed_program(refused).unwrap_err();
+            assert!(
+                reason.contains("which a shell line cannot hold"),
+                "{reason}"
+            );
+        }
+    }
 
     fn workspace(id: &str, checkout: Option<&str>) -> SpaceView {
         SpaceView {
@@ -1142,13 +1211,19 @@ mod tests {
         );
         assert_eq!(parse("codex", "x", Some("   ")).unwrap().persona, None);
         assert_eq!(
-            [AgentKind::Claude, AgentKind::Codex, AgentKind::Terminal]
-                .map(|kind| (kind.pane_type(), kind.command())),
+            [AgentKind::Claude, AgentKind::Codex, AgentKind::Terminal].map(AgentKind::pane_type),
             [
-                (crate::PaneType::Agent, Some("claude")),
-                (crate::PaneType::Agent, Some("codex")),
-                (crate::PaneType::Terminal, None),
+                crate::PaneType::Agent,
+                crate::PaneType::Agent,
+                crate::PaneType::Terminal,
             ]
+        );
+        // Claude Code's command depends on the settings, so the server test
+        // covers it with its own HOME; these two read none.
+        let nowhere = Path::new("/nonexistent/state");
+        assert_eq!(
+            [AgentKind::Codex, AgentKind::Terminal].map(|kind| kind.command(nowhere).unwrap()),
+            [Some("codex".to_owned()), None]
         );
         let long = "p".repeat(1_001);
         for (kind, name, persona, refusal) in [

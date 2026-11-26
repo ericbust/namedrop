@@ -483,6 +483,15 @@ where
             )));
         }
     }
+    // The runtime's own directories, which are this process's in production,
+    // so a test's Doctor never reads the machine's settings.
+    issues.push(claude_program_issue(
+        runtime.state_directory,
+        &crate::update_check::ConfigRoots::new(
+            runtime.home_directory.map(std::path::Path::to_owned),
+            runtime.agent_config.config.map(std::path::Path::to_owned),
+        ),
+    ));
     match crate::update_check::settings(runtime.state_directory) {
         Err(error) => {
             let path = crate::update_check::settings_path(runtime.state_directory).ok();
@@ -538,7 +547,6 @@ where
             }
         }
     }
-
     let served = crate::codex_app_server::served_codex_panes(runtime, &setup.panes);
     if let Some(served) = &served {
         issues.push(shared_app_server_issue(
@@ -1682,6 +1690,78 @@ fn shared_app_server_issue(
     shared
 }
 
+/// Which program Namedrop's own Claude Code calls run, so a person can check
+/// which Claude Code account they use.
+fn claude_program_issue(
+    state: &std::path::Path,
+    roots: &crate::update_check::ConfigRoots,
+) -> HealthIssue {
+    use crate::agent_status_model::{ClaudeSource, claude_program, find_on_path};
+    const CALLS: &str = "Agent-status summaries, persona suggestions, and channel routing";
+    let runs = |program: &std::ffi::OsStr| {
+        format!(
+            "Namedrop's own Claude Code calls run {}.",
+            std::path::Path::new(program).display()
+        )
+    };
+    let (summary, explanation, file) = match claude_program(state, roots) {
+        Ok((program, ClaudeSource::Override)) => (
+            runs(&program),
+            format!(
+                "{CALLS} run the program that NAMEDROP_AGENT_STATUS_CLAUDE_BIN names, not claude_command."
+            ),
+            None,
+        ),
+        Ok((program, ClaudeSource::Setting(file))) => (
+            runs(&program),
+            format!(
+                "{CALLS} run the program that claude_command names in {}.",
+                file.display()
+            ),
+            Some(file),
+        ),
+        Ok((_, ClaudeSource::Default)) => (
+            match find_on_path("claude") {
+                Some(path) => runs(path.as_os_str()),
+                None => {
+                    "Namedrop's own Claude Code calls run claude, which is not on Doctor's PATH."
+                        .to_owned()
+                }
+            },
+            format!(
+                "{CALLS} run claude from PATH, because the Namedrop settings file sets no claude_command."
+            ),
+            None,
+        ),
+        Err(error) => {
+            let mut failed = issue(
+                "ND-MODEL-002",
+                HealthSeverity::Notice,
+                "Namedrop's own Claude Code calls cannot run.",
+                &format!(
+                    "{CALLS}, and Channels' Add agent for Claude Code, fail until you fix it: {}",
+                    error.reason
+                ),
+                HealthRepairKind::HumanDecision,
+                "Fix claude_command or the Namedrop settings file that holds it, then run Doctor again. Namedrop never runs claude in its place.",
+            );
+            // The file the reason is about.
+            failed.diagnostic = serde_json::json!({"path": error.path});
+            return failed;
+        }
+    };
+    let mut reported = issue(
+        "ND-MODEL-002",
+        HealthSeverity::Info,
+        &summary,
+        &explanation,
+        HealthRepairKind::HumanDecision,
+        "To run another program, such as a launcher that selects another Claude Code account, set claude_command in the Namedrop settings file to its name on PATH or its absolute path.",
+    );
+    reported.diagnostic = serde_json::json!({"path": file});
+    reported
+}
+
 fn issue(
     code: &str,
     severity: HealthSeverity,
@@ -1897,7 +1977,11 @@ pub fn render_health_report_to_text(report: &HealthReport) -> String {
         HealthStatus::NeedsAttention => "Namedrop needs attention.\n".to_owned(),
         HealthStatus::Healthy => passed + "\n",
     };
-    for issue in &report.issues {
+    // A note only informs, so it takes one line, after everything to act on.
+    let note = |issue: &&HealthIssue| {
+        issue.code == "ND-MODEL-002" && issue.severity == HealthSeverity::Info
+    };
+    for issue in report.issues.iter().filter(|issue| !note(issue)) {
         rendered.push('\n');
         rendered.push_str(&terminal_safe_text(&issue.summary));
         rendered.push('\n');
@@ -1949,6 +2033,11 @@ pub fn render_health_report_to_text(report: &HealthReport) -> String {
                 rendered.push('\n');
             }
         }
+    }
+    for issue in report.issues.iter().filter(note) {
+        rendered.push('\n');
+        rendered.push_str(&terminal_safe_text(&issue.summary));
+        rendered.push('\n');
     }
     rendered.trim_end().to_owned()
 }

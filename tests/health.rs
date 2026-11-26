@@ -59,7 +59,18 @@ fn cached_update_is_informational_and_doctor_remains_healthy_and_read_only() {
     assert_eq!(update.diagnostic["last_success_at"], 90);
     assert_eq!(update.diagnostic["last_error"], "offline");
     let text = render_health_report_to_text(&report);
-    assert!(text.starts_with(&render_health_report_to_text(&baseline)));
+    // The baseline's one note, which names the Claude Code program, comes last
+    // in both, after the update notice.
+    let mut quiet = baseline.clone();
+    quiet.issues.retain(|issue| issue.code != "ND-MODEL-002");
+    assert!(text.starts_with(&render_health_report_to_text(&quiet)));
+    let baseline_text = render_health_report_to_text(&baseline);
+    let note = baseline_text.lines().last().unwrap();
+    assert!(
+        note.starts_with("Namedrop's own Claude Code calls run"),
+        "{baseline_text}"
+    );
+    assert_eq!(text.lines().last(), Some(note), "{text}");
     assert!(text.contains("herdr plugin action invoke update --plugin namedrop"));
     assert_eq!(before, fs::read(f.root.join("namedrop.sqlite3")).unwrap());
     assert!(!f.root.join("update-notice.json").exists());
@@ -128,7 +139,7 @@ fn standalone_doctor_uses_download_guidance_without_a_herdr_command() {
 }
 
 #[test]
-fn invalid_update_settings_are_visible_in_doctor_without_a_health_failure() {
+fn invalid_update_settings_are_visible_in_doctor_and_stop_namedrops_claude_calls() {
     let f = Fixture::new();
     if update_profile::isolate(&f.root, &f.home) {
         return;
@@ -145,7 +156,22 @@ fn invalid_update_settings_are_visible_in_doctor_without_a_health_failure() {
     ] {
         fs::write(&path, settings).unwrap();
         let report = diagnose_collaboration(&f.runtime());
-        assert_eq!(report.status, HealthStatus::Healthy);
+        // The update check alone is no health failure. Namedrop's own Claude
+        // Code calls fail closed on the same file, which does need attention.
+        assert_eq!(report.status, HealthStatus::NeedsAttention, "{report:?}");
+        let claude = report
+            .issues
+            .iter()
+            .find(|issue| issue.code == "ND-MODEL-002")
+            .unwrap();
+        assert_eq!(claude.severity, HealthSeverity::Notice, "{claude:?}");
+        assert!(
+            report
+                .issues
+                .iter()
+                .all(|issue| issue.code == "ND-MODEL-002" || issue.severity == HealthSeverity::Info),
+            "{report:?}"
+        );
         let setting = report
             .issues
             .iter()
@@ -161,6 +187,162 @@ fn invalid_update_settings_are_visible_in_doctor_without_a_health_failure() {
             .iter()
             .any(|issue| issue.code.starts_with("ND-UPDATE-"))
     );
+}
+
+#[test]
+fn doctor_names_the_claude_command_namedrop_runs() {
+    let f = Fixture::new();
+    if update_profile::isolate(&f.root, &f.home) {
+        return;
+    }
+    f.register();
+    let claude = |report: &HealthReport| {
+        report
+            .issues
+            .iter()
+            .find(|issue| issue.code == "ND-MODEL-002")
+            .cloned()
+    };
+    let path = f
+        .home
+        .join(".config/herdr/plugins/config/namedrop/settings.json");
+    // Without the setting, Doctor still says what runs: `claude`.
+    let unset = diagnose_collaboration(&f.runtime());
+    assert_eq!(unset.status, HealthStatus::Healthy, "{unset:?}");
+    let default = claude(&unset).unwrap();
+    assert_eq!(default.severity, HealthSeverity::Info);
+    assert!(
+        default.summary.contains("run claude") || default.summary.ends_with("/claude."),
+        "{default:?}"
+    );
+    assert!(
+        default
+            .explanation
+            .contains("because the Namedrop settings file sets no claude_command"),
+        "{default:?}"
+    );
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let launcher = f.home.join("claude-launcher");
+    fs::write(&launcher, "#!/bin/sh\n").unwrap();
+    fs::set_permissions(
+        &launcher,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    fs::write(&path, json!({"claude_command": launcher}).to_string()).unwrap();
+    let report = diagnose_collaboration(&f.runtime());
+    assert_eq!(report.status, HealthStatus::Healthy, "{report:?}");
+    assert!(
+        !report
+            .issues
+            .iter()
+            .any(|issue| issue.code == "ND-UPDATE-002"),
+        "claude_command is a known setting: {report:?}"
+    );
+    let set = claude(&report).unwrap();
+    assert_eq!(set.severity, HealthSeverity::Info);
+    assert_eq!(
+        set.summary,
+        format!(
+            "Namedrop's own Claude Code calls run {}.",
+            launcher.display()
+        )
+    );
+    assert_eq!(set.diagnostic["path"], path.to_string_lossy().as_ref());
+    // A program that cannot run needs attention: the calls fail.
+    fs::write(&path, r#"{"claude_command":""}"#).unwrap();
+    let report = diagnose_collaboration(&f.runtime());
+    assert_eq!(report.status, HealthStatus::NeedsAttention, "{report:?}");
+    let invalid = claude(&report).unwrap();
+    assert_eq!(invalid.severity, HealthSeverity::Notice);
+    assert_eq!(
+        invalid.summary,
+        "Namedrop's own Claude Code calls cannot run."
+    );
+    assert!(
+        invalid.explanation.contains("claude_command is empty"),
+        "{invalid:?}"
+    );
+    assert!(
+        invalid.repair.prompt.contains("Fix claude_command"),
+        "{invalid:?}"
+    );
+    // So does a claude_command in the file this install does not read.
+    fs::remove_file(&path).unwrap();
+    let standalone = f.home.join(".config/namedrop/settings.json");
+    fs::create_dir_all(standalone.parent().unwrap()).unwrap();
+    fs::write(&standalone, json!({"claude_command": launcher}).to_string()).unwrap();
+    let report = diagnose_collaboration(&f.runtime());
+    assert_eq!(report.status, HealthStatus::NeedsAttention, "{report:?}");
+    let misplaced = claude(&report).unwrap();
+    assert_eq!(misplaced.severity, HealthSeverity::Notice);
+    // The target is the file the reason is about: here, the misplaced one.
+    assert_eq!(
+        misplaced.diagnostic["path"],
+        standalone.to_string_lossy().as_ref(),
+        "{misplaced:?}"
+    );
+    assert!(
+        misplaced.explanation.contains(&format!(
+            "claude_command is set in {}, but this install reads {}",
+            standalone.display(),
+            path.display()
+        )),
+        "{misplaced:?}"
+    );
+    // And a settings file that exists but cannot be read: one that does not
+    // parse, and a link that leads nowhere.
+    fs::write(&standalone, r#"{"claude_command":"claude-personal",}"#).unwrap();
+    let unreadable = claude(&diagnose_collaboration(&f.runtime())).unwrap();
+    assert_eq!(
+        unreadable.severity,
+        HealthSeverity::Notice,
+        "{unreadable:?}"
+    );
+    assert!(
+        unreadable
+            .explanation
+            .contains("is invalid, so Namedrop cannot tell"),
+        "{unreadable:?}"
+    );
+    fs::remove_file(&standalone).unwrap();
+    std::os::unix::fs::symlink(f.home.join("nowhere.json"), &path).unwrap();
+    let dangling = claude(&diagnose_collaboration(&f.runtime())).unwrap();
+    assert_eq!(dangling.severity, HealthSeverity::Notice, "{dangling:?}");
+    assert!(
+        dangling
+            .explanation
+            .contains(&format!("{} is invalid", path.display())),
+        "{dangling:?}"
+    );
+}
+
+/// Doctor reads the settings under the runtime's home, which is this
+/// process's own in production. A test's Doctor therefore never reads the
+/// machine's settings, which could otherwise turn its status.
+#[test]
+fn doctor_reads_claude_settings_under_the_runtimes_home() {
+    let f = Fixture::new();
+    let machine = f.root.join("machine-home");
+    if update_profile::isolate(&f.root, &machine) {
+        return;
+    }
+    f.register();
+    for broken in [
+        machine.join(".config/herdr/plugins/config/namedrop/settings.json"),
+        machine.join(".config/namedrop/settings.json"),
+    ] {
+        fs::create_dir_all(broken.parent().unwrap()).unwrap();
+        fs::write(&broken, "{").unwrap();
+    }
+    let report = diagnose_collaboration(&f.runtime());
+    let claude = report
+        .issues
+        .iter()
+        .find(|issue| issue.code == "ND-MODEL-002")
+        .unwrap();
+    assert_eq!(claude.severity, HealthSeverity::Info, "{claude:?}");
+    assert_eq!(report.status, HealthStatus::Healthy, "{report:?}");
 }
 
 /// The U10 review's F5: an owner that is not `standalone` or `herdr`, an
@@ -230,6 +412,23 @@ fn doctor_keeps_herdrs_settings_and_notice_under_an_invalid_owner() {
                 ]
                 .map(str::to_owned)[..]
             ),
+            "{label}"
+        );
+        // Namedrop's own Claude Code calls cannot tell which file applies, and
+        // Doctor points at the owner, not at a settings file.
+        let claude = diagnose_collaboration(&f.runtime())
+            .issues
+            .into_iter()
+            .find(|issue| issue.code == "ND-MODEL-002")
+            .unwrap();
+        assert_eq!(
+            claude.severity,
+            HealthSeverity::Notice,
+            "{label}: {claude:?}"
+        );
+        assert_eq!(
+            claude.diagnostic["path"],
+            owner.to_string_lossy().as_ref(),
             "{label}"
         );
         fs::write(&herdr, "{").unwrap();

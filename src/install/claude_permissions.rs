@@ -63,6 +63,71 @@ pub(super) fn settings_path(directory: &Path) -> Result<PathBuf, String> {
     }
     Ok(directory.join("settings.json"))
 }
+/// The file the permissions are read from and written to. `settings.json`, or
+/// the directory that holds it, may be a symbolic link to a place inside
+/// `home`, as when one Claude Code account's directory links its settings to
+/// another's. The link is followed to a regular file, and that file is
+/// replaced in place, so the link itself stays. A link that leads outside
+/// `home` or to nothing is refused, as is any other link `verify_path` finds.
+fn target(directory: &Path, home: &Path) -> Result<PathBuf, String> {
+    followed(settings_path(directory)?, Some(home))
+}
+/// The file `path` names, by its resolved path, so that two names for one
+/// file, such as one through a `HOME` that is itself a link, compare equal.
+/// When `path` or its directory is a symbolic link, it must lead where
+/// [`target`] allows.
+fn followed(path: PathBuf, home: Option<&Path>) -> Result<PathBuf, String> {
+    let (Some(directory), Some(name)) = (path.parent(), path.file_name()) else {
+        return Ok(path);
+    };
+    let linked = [path.as_path(), directory]
+        .into_iter()
+        .any(|entry| fs::symlink_metadata(entry).is_ok_and(|metadata| metadata.is_symlink()));
+    if !linked {
+        // Resolving only the directories above cannot reach a link that
+        // `verify_path` refuses; a directory not yet created keeps the name.
+        return Ok(path
+            .canonicalize()
+            .or_else(|_| directory.canonicalize().map(|real| real.join(name)))
+            .unwrap_or(path));
+    }
+    let home = home
+        .ok_or_else(|| "no user home directory is available".to_owned())
+        .and_then(|home| home.canonicalize().map_err(|error| error.to_string()))
+        .map_err(|error| {
+            conflict(
+                &path,
+                &format!(
+                    "is reached through a symbolic link, and HOME cannot be resolved: {error}"
+                ),
+            )
+        })?;
+    let resolved = match fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            directory.canonicalize().map(|real| real.join(name))
+        }
+        _ => path.canonicalize(),
+    }
+    .map_err(|error| {
+        conflict(
+            &path,
+            &format!("is reached through a symbolic link that leads nowhere: {error}"),
+        )
+    })?;
+    if !resolved.starts_with(&home) {
+        return Err(conflict(
+            &path,
+            "is reached through a symbolic link that leads outside HOME",
+        ));
+    }
+    verify_path(&resolved).map_err(|error| {
+        conflict(
+            &path,
+            &format!("is reached through a symbolic link, and {error}"),
+        )
+    })?;
+    Ok(resolved)
+}
 fn verify_path(path: &Path) -> Result<(), String> {
     for parent in path.ancestors().take(2) {
         match fs::symlink_metadata(parent) {
@@ -297,24 +362,31 @@ fn lock(state: &Path) -> Result<fs::File, String> {
         .map_err(|error| conflict(&path, &error.to_string()))?;
     Ok(file)
 }
-fn recover(lease: &PackageLease, state: &Path) -> Result<OwnedPermissions, String> {
+/// `home` is where a recorded settings file that has since become a link may
+/// lead; see [`followed`].
+fn recover(
+    lease: &PackageLease,
+    state: &Path,
+    home: Option<&Path>,
+) -> Result<OwnedPermissions, String> {
     let record = read_record(state)?;
     let Some(pending) = &record.pending else {
         return Ok(record);
     };
     let mut changed = false;
     for update in &pending.updates {
-        let hash = snapshot_hash(&read_text(&update.path)?);
+        let hash = snapshot_hash(&read_text(&followed(update.path.clone(), home)?)?);
         changed |= hash != update.before_hash && hash != update.after_hash;
     }
     if changed {
-        return discard_pending(lease, state, record);
+        return discard_pending(lease, state, home, record);
     }
     for update in &pending.updates {
-        if snapshot_hash(&read_text(&update.path)?) == update.after_hash {
+        let path = followed(update.path.clone(), home)?;
+        if snapshot_hash(&read_text(&path)?) == update.after_hash {
             continue;
         }
-        let mut settings = Settings::read(&update.path)?;
+        let mut settings = Settings::read(&path)?;
         for entry in &update.removed {
             settings.remove(entry);
         }
@@ -324,7 +396,7 @@ fn recover(lease: &PackageLease, state: &Path) -> Result<OwnedPermissions, Strin
         let mut replacement = settings.update()?;
         replacement.mode = update.mode;
         if snapshot_hash(&replacement.after) != update.after_hash {
-            return discard_pending(lease, state, record);
+            return discard_pending(lease, state, home, record);
         }
         replacement.publish(lease).map_err(|error| error.message)?;
     }
@@ -334,11 +406,12 @@ fn recover(lease: &PackageLease, state: &Path) -> Result<OwnedPermissions, Strin
 fn discard_pending(
     lease: &PackageLease,
     state: &Path,
+    home: Option<&Path>,
     mut record: OwnedPermissions,
 ) -> Result<OwnedPermissions, String> {
     record.pending = None;
     if !record.entries.is_empty() {
-        let settings = Settings::read(&record.settings_path)?;
+        let settings = Settings::read(&followed(record.settings_path.clone(), home)?)?;
         record.entries.retain(|entry| settings.contains(entry));
     }
     write_record(lease, state, &record)?;
@@ -394,20 +467,28 @@ fn publish(
 }
 pub(super) fn refresh(
     lease: &PackageLease,
+    home: &Path,
     directory: &Path,
     executable: &Path,
     state: &Path,
 ) -> Result<(), String> {
     lease.require_write()?;
     let desired = claude_allow_rules(executable, state)?;
-    let path = settings_path(directory)?;
+    let path = target(directory, home)?;
     let _guard = lock(state)?;
-    let owned = recover(lease, state)?;
+    let owned = recover(lease, state, Some(home))?;
     let mut settings = Settings::read(&path)?;
     let mut updates = Vec::new();
     let mut entries = Vec::new();
-    if !owned.entries.is_empty() && owned.settings_path != path {
-        let mut previous = Settings::read(&owned.settings_path)?;
+    // A recorded file that has since been replaced by a link is the file the
+    // link leads to.
+    let previous_path = if owned.entries.is_empty() {
+        owned.settings_path.clone()
+    } else {
+        followed(owned.settings_path.clone(), Some(home))?
+    };
+    if !owned.entries.is_empty() && previous_path != path {
+        let mut previous = Settings::read(&previous_path)?;
         for entry in &owned.entries {
             previous.remove(entry);
         }
@@ -439,8 +520,11 @@ pub(super) fn refresh(
         updates,
     )
 }
+/// `home` is where a recorded settings file that has since become a link may
+/// lead; see [`followed`].
 pub(crate) fn remove_claude_permissions(
     lease: &PackageLease,
+    home: Option<&Path>,
     state: &Path,
 ) -> Result<usize, String> {
     if !lease.writable()? {
@@ -457,11 +541,11 @@ pub(crate) fn remove_claude_permissions(
     {
         return Ok(0);
     }
-    let mut owned = recover(lease, state)?;
+    let mut owned = recover(lease, state, home)?;
     if owned.entries.is_empty() {
         return Ok(0);
     }
-    let mut settings = Settings::read(&owned.settings_path)?;
+    let mut settings = Settings::read(&followed(owned.settings_path.clone(), home)?)?;
     let mut removed = 0;
     for entry in &owned.entries {
         removed += usize::from(settings.remove(entry));
@@ -470,13 +554,23 @@ pub(crate) fn remove_claude_permissions(
     publish(lease, state, owned, vec![settings.update()?])?;
     Ok(removed)
 }
-pub(super) fn inspect(directory: &Path, executable: &Path, state: &Path) -> Result<(), String> {
-    inspect_rules(directory, executable, state)
+pub(super) fn inspect(
+    home: &Path,
+    directory: &Path,
+    executable: &Path,
+    state: &Path,
+) -> Result<(), String> {
+    inspect_rules(home, directory, executable, state)
         .map_err(|error| format!("{error}; {REPAIR_GUIDANCE}"))
 }
 
-fn inspect_rules(directory: &Path, executable: &Path, state: &Path) -> Result<(), String> {
-    let path = settings_path(directory)?;
+fn inspect_rules(
+    home: &Path,
+    directory: &Path,
+    executable: &Path,
+    state: &Path,
+) -> Result<(), String> {
+    let path = target(directory, home)?;
     let desired = claude_allow_rules(executable, state)?;
     let owned = read_record(state)?;
     if owned.pending.is_some() {
@@ -486,7 +580,7 @@ fn inspect_rules(directory: &Path, executable: &Path, state: &Path) -> Result<()
         ));
     }
     let settings = Settings::read(&path)?;
-    if (!owned.entries.is_empty() && owned.settings_path != path)
+    if (!owned.entries.is_empty() && followed(owned.settings_path.clone(), Some(home))? != path)
         || owned.entries.iter().any(|entry| !desired.contains(entry))
     {
         return Err(conflict(
@@ -546,6 +640,9 @@ mod tests {
     fn post_rename_sync_failure_retains_a_private_recoverable_journal() {
         let root = std::env::temp_dir().join(format!("nd21-sync-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
+        // Settings paths are resolved, so the fault names the resolved file,
+        // as on macOS, where the temporary directory is reached through /var.
+        let root = root.canonicalize().unwrap();
         let directory = root.join("claude");
         fs::create_dir_all(&directory).unwrap();
         let path = directory.join("settings.json");
@@ -557,6 +654,7 @@ mod tests {
         super::super::FAIL_DIRECTORY_SYNC.with(|fault| *fault.borrow_mut() = Some(path.clone()));
         let result = refresh(
             &crate::installed_runtime::test_package_lease(),
+            &root,
             &directory,
             Path::new("/opt/namedrop"),
             &root,
@@ -575,7 +673,12 @@ mod tests {
         for secret in ["PRIVATE_TOKEN", "PRIVATE_HELPER", "apiKeyHelper"] {
             assert!(!record.contains(secret), "{record}");
         }
-        let recovered = recover(&crate::installed_runtime::test_package_lease(), &root).unwrap();
+        let recovered = recover(
+            &crate::installed_runtime::test_package_lease(),
+            &root,
+            Some(&root),
+        )
+        .unwrap();
         assert!(!recovered.entries.is_empty());
         assert!(recovered.pending.is_none());
         fs::remove_dir_all(root).unwrap();

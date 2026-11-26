@@ -520,8 +520,13 @@ pub(crate) fn install_integration_package_with_config(
         replace_if_changed(lease, &path, &contents, Some(0o600))?;
     }
     if runtime == AgentRuntime::ClaudeCode
-        && let Err(error) =
-            claude_permissions::refresh(lease, &config.claude(root), executable, state_directory)
+        && let Err(error) = claude_permissions::refresh(
+            lease,
+            root,
+            &config.claude(root),
+            executable,
+            state_directory,
+        )
     {
         eprintln!(
             "Namedrop skipped Claude Code permissions: {error}; {}",
@@ -672,7 +677,7 @@ pub(crate) fn inspect_integration_package(
         codex_sandbox::inspect(&config.codex(home), state)?;
     }
     if runtime == AgentRuntime::ClaudeCode {
-        claude_permissions::inspect(&config.claude(home), &executable, state)?;
+        claude_permissions::inspect(home, &config.claude(home), &executable, state)?;
     }
     Ok(())
 }
@@ -953,7 +958,7 @@ impl IntegrationPackageInstallation {
                     .ok_or_else(|| "no user home directory is available".to_owned())
                     .and_then(|home| {
                         let executable = PathBuf::from(crate::collaboration_executable()?);
-                        claude_permissions::inspect(&config.claude(home), &executable, state)
+                        claude_permissions::inspect(home, &config.claude(home), &executable, state)
                     });
                 Some(
                     json!({"current": inspection.is_ok(), "repair": if inspection.is_ok() { "Re-run activation." } else { claude_permissions::REPAIR_GUIDANCE }, "error": inspection.err()}),
@@ -1247,7 +1252,7 @@ pub(crate) fn remove_all(
     config: AgentConfigDirectories<'_>,
 ) -> Result<(), String> {
     lease.require_write()?;
-    remove_claude_permissions(lease, state)?;
+    remove_claude_permissions(lease, Some(home), state)?;
     codex_sandbox::remove(lease, state)?;
     let codex = config.codex(home);
     let policy = codex.join("rules/namedrop.rules");

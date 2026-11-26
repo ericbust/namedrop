@@ -404,12 +404,13 @@ class UpdateCheck(unittest.TestCase):
             self.assertNotIn('git', self.calls)
 
     def test_opt_out_and_invalid_settings_do_not_even_inspect_registration(self):
-        for settings in ['{"check_for_updates":false}', '{', '[]', '{"check_for_updates":"false"}', '{"check_for_update":false}']:
+        for settings in ['{"check_for_updates":false}', '{', '[]', '{"check_for_updates":"false"}', '{"check_for_update":false}',
+                         '{"claude_command":7}', '{"claude_command":null}', '{"check_for_updates":false,"claude_command":"claude-personal"}']:
             self.settings.write_text(settings)
             self.check()
             self.assertEqual(self.calls, [])
             self.assertFalse(self.state.exists())
-        self.settings.write_text('{"check_for_updates":true}')
+        self.settings.write_text('{"check_for_updates":true,"claude_command":"claude-personal"}')
         self.check()
         self.assertIn('git', self.calls)
 

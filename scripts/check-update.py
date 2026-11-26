@@ -41,8 +41,10 @@ def read_json(path):
 def enabled(settings):
     try:
         value = read_json(settings)
-        return (isinstance(value, dict) and set(value) <= {'check_for_updates'}
+        # Namedrop reads `claude_command` itself; here it only has to be a string.
+        return (isinstance(value, dict) and set(value) <= {'check_for_updates', 'claude_command'}
                 and isinstance(value.get('check_for_updates', True), bool)
+                and isinstance(value.get('claude_command', ''), str)
                 and value.get('check_for_updates', True))
     except FileNotFoundError:
         return True

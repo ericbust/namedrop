@@ -452,7 +452,7 @@ pub(crate) mod tests {
         ),
         (
             "agent_status_model.rs",
-            "Command::new(claude_binary())",
+            "Command::new(claude_program(state,&crate::update_check::ConfigRoots::environment())?.0)",
             Spawn::Other("the Claude Code summary worker"),
         ),
         (

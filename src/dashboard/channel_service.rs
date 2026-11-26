@@ -223,6 +223,7 @@ fn worker(
                     source: &claim.draft.authored_source,
                     candidates: &claim.candidates,
                 },
+                state,
                 cancel,
             )
         } else {

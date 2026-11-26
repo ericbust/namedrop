@@ -1132,7 +1132,7 @@ fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
-fn shell_argument(value: &str) -> String {
+pub(crate) fn shell_argument(value: &str) -> String {
     if !value.is_empty()
         && value.bytes().all(|byte| {
             byte.is_ascii_alphanumeric()

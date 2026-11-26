@@ -565,8 +565,9 @@ impl DashboardPane {
 
     /// Starts an agent in the pane just opened for it. Nothing has typed into
     /// that pane yet, so its input has no owner to record. The command is
-    /// static text, never anything a request carried.
-    pub(crate) fn start_agent(&self, mux: &impl MuxInput, command: &'static str) -> InputOutcome {
+    /// fixed text or the program Namedrop's settings name, never anything a
+    /// request carried.
+    pub(crate) fn start_agent(&self, mux: &impl MuxInput, command: &str) -> InputOutcome {
         mux.deliver(PaneInput::new(&self.0, InputKind::Line(command)))
     }
 }

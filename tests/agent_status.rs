@@ -8,9 +8,15 @@ mod cleanup;
 
 use std::{
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
+
+/// A state directory no test creates. The synthetic probe requires
+/// `NAMEDROP_AGENT_STATUS_CLAUDE_BIN` for Claude Code, which then takes the
+/// place of every settings file, so it bills only the account that program
+/// selects.
+const STATE: &str = "/nonexistent/namedrop-test-state";
 static NEXT: AtomicU64 = AtomicU64::new(1);
 
 #[test]
@@ -249,13 +255,13 @@ fn live_origin_probe() {
         wait["description"] = json!("Review the status popup before integration.");
     }
     let cold_started = Instant::now();
-    let cold = summarize_agent_status(&snapshot, &cancelled);
+    let cold = summarize_agent_status(&state, &snapshot, &cancelled);
     let cold_ms = cold_started.elapsed().as_millis();
     let mut warm_ms = None;
     let mut cache_reused = false;
     if let Ok(summary) = &cold {
         let warm_started = Instant::now();
-        let warm = summarize_agent_status(&snapshot, &cancelled).unwrap();
+        let warm = summarize_agent_status(&state, &snapshot, &cancelled).unwrap();
         warm_ms = Some(warm_started.elapsed().as_millis());
         cache_reused = &warm == summary;
     }
@@ -423,6 +429,10 @@ fn synthetic_worker_reliability_probe() {
     assert_eq!(env::var("NAMEDROP_VERIFY_LIVE").as_deref(), Ok("1"));
     let host = env::var("NAMEDROP_VERIFY_HOST").unwrap();
     assert!(matches!(host.as_str(), "claude" | "codex"));
+    assert!(
+        host == "codex" || env::var_os("NAMEDROP_AGENT_STATUS_CLAUDE_BIN").is_some(),
+        "name the Claude Code program to run, and so its account, in NAMEDROP_AGENT_STATUS_CLAUDE_BIN"
+    );
     let dense = env::var("NAMEDROP_VERIFY_DENSE").as_deref() == Ok("1");
     let mut panes = Vec::new();
     for index in 0..4 {
@@ -442,13 +452,13 @@ fn synthetic_worker_reliability_probe() {
         "panes":panes,"waits":[],"handoffs_available":true,"warnings":[],"omitted_panes":0,"observed_at_ms":0});
     let cancel = AtomicBool::new(false);
     let start = Instant::now();
-    let result = summarize_agent_status(&snapshot, &cancel);
+    let result = summarize_agent_status(Path::new(STATE), &snapshot, &cancel);
     let elapsed_ms = start.elapsed().as_millis();
     let mut warm_ms = None;
     let mut reused = false;
     if let Ok(summary) = &result {
         let start = Instant::now();
-        let warm = summarize_agent_status(&snapshot, &cancel).unwrap();
+        let warm = summarize_agent_status(Path::new(STATE), &snapshot, &cancel).unwrap();
         warm_ms = Some(start.elapsed().as_millis());
         reused = warm == *summary;
     }

@@ -109,6 +109,9 @@ fn topic_checker_accepts_short_topics_and_detects_ticket_reasons_and_names() {
     assert!(!long.matches);
 }
 
+/// Its Claude Code calls run only the program that
+/// `NAMEDROP_AGENT_STATUS_CLAUDE_BIN` names, such as a launcher that selects
+/// the account to bill; without one they fail. No settings file is read.
 #[test]
 #[ignore = "makes real model calls; requires isolated credentials and explicit eval output"]
 pub(super) fn real_host_router_corpus() {
@@ -124,6 +127,10 @@ pub(super) fn real_host_router_corpus() {
         .unwrap();
     let hosts = env::var("NAMEDROP_ROUTER_EVAL_HOST").unwrap_or_else(|_| "both".to_owned());
     let formats = env::var("NAMEDROP_ROUTER_EVAL_FORMAT").unwrap_or_else(|_| "both".to_owned());
+    assert!(
+        hosts == "codex" || env::var_os("NAMEDROP_AGENT_STATUS_CLAUDE_BIN").is_some(),
+        "name the Claude Code program to run, and so its account, in NAMEDROP_AGENT_STATUS_CLAUDE_BIN"
+    );
     let repetitions: u32 = env::var("NAMEDROP_ROUTER_EVAL_REPETITIONS")
         .unwrap_or_else(|_| "3".to_owned())
         .parse()
@@ -194,6 +201,7 @@ pub(super) fn real_host_router_corpus() {
                     }
                     let started = Instant::now();
                     let capture = capture_worker(
+                        std::path::Path::new(super::tests::STATE),
                         host,
                         &WorkerPrompt {
                             instructions: INSTRUCTIONS,
