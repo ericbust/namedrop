@@ -376,9 +376,7 @@ mod tests {
                 runtime.join("current/namedrop"),
             )
             .unwrap();
-            fs::write(runtime.join("namedrop"), "#!/bin/sh\nexit 0\n").unwrap();
-            fs::set_permissions(runtime.join("namedrop"), fs::Permissions::from_mode(0o755))
-                .unwrap();
+            crate::executable::write_executable(runtime.join("namedrop"), "#!/bin/sh\nexit 0\n");
             if let Some(owner) = owner {
                 fs::write(runtime.join("owner"), owner).unwrap();
             }

@@ -819,7 +819,6 @@ pub(crate) mod tests_support {
     use std::{
         cell::RefCell,
         fs,
-        os::unix::fs::PermissionsExt,
         path::PathBuf,
         sync::atomic::{AtomicU64, Ordering},
     };
@@ -869,15 +868,13 @@ pub(crate) mod tests_support {
             ));
             fs::create_dir_all(&directory).unwrap();
             let rex = directory.join("rex");
-            fs::write(
+            crate::executable::write_executable(
                 &rex,
                 format!(
                     "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n{script}\n",
                     directory.join("calls").display()
                 ),
-            )
-            .unwrap();
-            fs::set_permissions(&rex, fs::Permissions::from_mode(0o755)).unwrap();
+            );
             Self { directory }
         }
 

@@ -8,6 +8,8 @@ mod cleanup;
 
 #[path = "support/codex_app_server.rs"]
 mod codex_app_server;
+#[path = "support/executable.rs"]
+mod executable;
 #[path = "support/sync_cell.rs"]
 mod sync_cell;
 #[path = "support/update_profile.rs"]
@@ -223,12 +225,7 @@ fn doctor_names_the_claude_command_namedrop_runs() {
     );
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     let launcher = f.home.join("claude-launcher");
-    fs::write(&launcher, "#!/bin/sh\n").unwrap();
-    fs::set_permissions(
-        &launcher,
-        std::os::unix::fs::PermissionsExt::from_mode(0o755),
-    )
-    .unwrap();
+    executable::write_executable(&launcher, "#!/bin/sh\n");
     fs::write(&path, json!({"claude_command": launcher}).to_string()).unwrap();
     let report = diagnose_collaboration(&f.runtime());
     assert_eq!(report.status, HealthStatus::Healthy, "{report:?}");

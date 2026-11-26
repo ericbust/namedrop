@@ -150,7 +150,7 @@ mod tests {
 
     fn launcher(state: &State) -> PathBuf {
         let path = state.0.join("launcher with spaces");
-        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        crate::executable::write_executable(&path, "#!/bin/sh\nexit 0\n");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
         path
     }

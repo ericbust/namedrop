@@ -580,11 +580,10 @@ fn a_working_worker_runs_the_selected_runtime_in_its_place() {
     fs::create_dir_all(runtime.join("current")).unwrap();
     std::os::unix::fs::symlink("/usr/bin/true", runtime.join("current/namedrop")).unwrap();
     let launcher = runtime.join("namedrop");
-    fs::write(
+    crate::executable::write_executable(
         &launcher,
         "#!/bin/sh\necho \"$@\" > \"$(dirname \"$0\")/replaced\"\n",
-    )
-    .unwrap();
+    );
     fs::set_permissions(&launcher, fs::Permissions::from_mode(0o700)).unwrap();
     let mut image = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
