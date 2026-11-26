@@ -270,7 +270,11 @@ with open(os.path.join(root, 'router-response.json')) as source:
 if output == 'timeout':
     time.sleep(30)
 elif output == 'delayed':
+    # A test can end without releasing the router; don't outlive it.
+    deadline = time.monotonic() + 120
     while not os.path.exists(os.path.join(root, 'router-release')):
+        if not os.path.isdir(root) or time.monotonic() >= deadline:
+            sys.exit('router was never released')
         time.sleep(0.01)
     print(json.dumps({'to':['planner'], 'reason':'planning'}))
 else:
