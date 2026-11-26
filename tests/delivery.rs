@@ -150,7 +150,7 @@ impl StaticSpace {
             ("pane-recipient", InputOutcome::Delivered),
             (
                 "pane-failure",
-                InputOutcome::Ambiguous("agent.prompt outcome is ambiguous".into()),
+                InputOutcome::Ambiguous("agent.prompt outcome is ambiguous.".into()),
             ),
             (
                 "pane-invalid",
@@ -1321,6 +1321,23 @@ fn human_mention_round_trip(hold_report: bool) {
 
     assert_eq!(ambiguous.held.len(), 1);
     assert!(after_ambiguous.held.is_empty());
+    let held = ambiguous.held[0].clone();
+    let summaries: Vec<String> = StateStore::open(directory.path())
+        .unwrap()
+        .transaction(|transaction| transaction.unresolved_attention_items(&namespace))
+        .unwrap()
+        .into_iter()
+        .filter(|item| item.source_id == held.as_str())
+        .map(|item| item.summary)
+        .collect();
+    assert_eq!(
+        summaries,
+        [
+            "Delivery attempt requires attention after entering Held: agent.prompt outcome is \
+          ambiguous."
+        ],
+        "the held attempt keeps why its input held"
+    );
     assert_eq!(herdr.prompts().len(), 4);
     assert!(herdr.badges().iter().any(|badges| {
         badges.contains(&Badge::Awaiting(0))

@@ -458,6 +458,26 @@ check prints one line. Every command is logged in
 and the timings. The driver leaves the lane up. To run another Rex build, put
 its `rex` first on `PATH` for `rex up`, as [The Rex lane](#the-rex-lane) says.
 
+`--stress N` then sends N more mentions from Claude Code to Codex, one at a
+time. A round is delivered when the reply's delivery to Claude Code is
+acknowledged, as the exchanges judge it, held when the store holds an attempt
+of the mention or of its reply, or timed out after 180 s. For a held attempt,
+the driver records the agent's screen and the reason the store kept on the
+attempt's attention item, deletes the pointer from the agent's box with
+Ctrl-U, and then runs `delivery cancel-held` for it as Doctor's repair does, so
+the next round starts clean. It never presses Enter for a held prompt. Before each
+round it checks that neither box holds a pointer and that the store holds no
+held attempt, and a round that does not end clean (a time-out, a cancel that
+failed, a pointer left in a box) stops the run. It prints
+`STRESS <N> rounds: <D> delivered, <H> held, <T> timed out` and why it
+stopped, keeps the rounds under `stress` in `OUT/evidence.json` however the
+run ends, and fails its check unless every round was delivered. Run it on a
+build before and after a delivery fix to compare the rates:
+
+```sh
+python3 -I rex-step6-live.py --profile rex-step6 --out /tmp/step6 --stress 20
+```
+
 ### Cross-session mentions on Rex
 
 ```sh

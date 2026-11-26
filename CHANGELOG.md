@@ -31,6 +31,7 @@ Namedrop now runs in Rex as well as in Herdr. Rex support is beta and under acti
 - **Type to agent** in Channels sends nothing while Namedrop is typing into the pane, as it does for a delivery. The box shows `Namedrop is typing into <alias> right now, so nothing was sent. Try again.` In 1.11.1, **Type to agent** typed the line even then.
 - A line that you send with **Type to agent** now starts your own turn in that pane, unless it answers a question or a permission prompt that blocks a delivery's agent. **Stop thread** on an earlier delivery's thread then stops the thread but presses no Ctrl-C in that pane, so your turn keeps running. In 1.11.1, **Stop thread** pressed Ctrl-C.
 - **Stop thread** waits up to 5 seconds for other input to an agent's pane to finish before it presses Ctrl-C there. In 1.11.1, it waited up to 2 seconds. The longer wait covers a **Type to agent** input, which keeps the pane for up to about 3 seconds.
+- Doctor's `ND-DELIVERY-001` for a delivery held while Namedrop typed its prompt now says why Namedrop held it, in Herdr and in Rex, such as the error `herdr agent prompt` printed or the change Rex reported before the Enter.
 
 ### Fixed
 

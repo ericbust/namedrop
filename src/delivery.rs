@@ -914,13 +914,24 @@ where
                     .map_err(|error| error.to_string())?;
                 report.failed.push(leased.attempt_id);
             }
-            InputOutcome::Ambiguous(_) => {
+            InputOutcome::Ambiguous(why) => {
                 store
                     .transaction(|transaction| {
                         transaction.transition_delivery_attempt(
                             &namespace,
                             &leased.attempt_id,
                             DeliveryState::Held,
+                            &attribution,
+                        )?;
+                        // Doctor shows why the input held, and a live check
+                        // reads it from the attempt's attention item.
+                        transaction.open_delivery_attempt_attention(
+                            &namespace,
+                            &leased.attempt_id,
+                            &format!(
+                                "Delivery attempt requires attention after entering Held: {}.",
+                                why.trim_end().trim_end_matches('.')
+                            ),
                             &attribution,
                         )
                     })
