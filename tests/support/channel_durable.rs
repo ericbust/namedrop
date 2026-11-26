@@ -406,7 +406,7 @@ pids_path = os.path.join(root,'descendant-pids.json')
 with open(pids_path + '.tmp','w') as out:
     json.dump([os.getpid(),child.pid],out)
 os.replace(pids_path + '.tmp',pids_path)
-while True:
+while os.path.isdir(root):
     time.sleep(.01)
 "#,
     );
