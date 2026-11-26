@@ -478,6 +478,67 @@ build before and after a delivery fix to compare the rates:
 python3 -I rex-step6-live.py --profile rex-step6 --out /tmp/step6 --stress 20
 ```
 
+### Cross-session mentions on Rex
+
+```sh
+./testbed rex up --link /path/to/namedrop --profile rex-xsession --fresh --yes
+python3 -I rex-cross-session-live.py --profile rex-xsession --out /tmp/xsession
+./testbed rex down --profile rex-xsession
+```
+
+[rex-cross-session-live.py](rex-cross-session-live.py) runs on a lane that
+`rex up --fresh` just installed. When the lane's session, A, has no names
+yet, it first runs step 6's palette checks, so A has `@claude` and `@codex`.
+It renames A to `alpha` and starts session B, labelled `beta`, on the same
+lane server, in its own Git directory `PROFILE/beta`. B gets a shell block,
+Claude Code as `PROFILE/bin/claude` and `codex --no-daemon`, with their
+first-run prompts answered as `rex up` answers them. The driver activates B
+and names its agents `@claude` and `@codex` from the palette, the same names as
+A's. It then types these into the agents and judges the store and the screens:
+
+- `#beta @codex` from A's Claude Code, and `#alpha @codex` from B's Claude
+  Code. Each must reach only the named agent, once, as a bridged copy in the
+  recipient's session, with a delivery prompt that names the sender as
+  `#label @name`. The reply must come back to the sender in the same thread.
+- `#all @claude` from A's Codex. It must reach `@claude` in both sessions, the
+  sender's own included, as the docs say, and both replies must come back.
+- A bare `@codex` from B's Claude Code. Though A has a `@codex` too, only B's
+  gets it and replies, and nothing is bridged or shown in A.
+- `#nosuch @codex`, a label no session has, typed into A's Claude Code. A `#`
+  word that names no session stays part of the prompt, so the hook must add
+  nothing and nothing may be sent. The driver then asks that Claude Code to
+  run Namedrop's `send` with the same source, and its transcript must show
+  the refusal
+  `no Rex session is labelled #nosuch; activated Rex sessions: #alpha, #beta`.
+
+Each delivery of a mention and of its replies must settle after one attempt,
+and nothing may repeat afterwards. The driver then reads each Claude Code
+transcript for the roster line
+`Other Rex sessions: 1 other Rex session has named agents (…)`, which must
+list the other session's names. It also runs `address list` with
+`{"workspaces":"all"}` from A's Claude Code, which must name `alpha` and
+`beta` with each session's own `@claude` and `@codex` blocks.
+
+Next, it types `namedrop channels --no-open` into A's shell block, opens the
+printed link as a person does, and reads the page's own routes. The page must
+load, and `/api/spaces` must list both sessions with their labels once the
+page's event stream has subscribed. Each channel must show its `@claude` and
+`@codex`, and a composer post to `@claude` in A and to `@codex` in B must each
+get one answer in their thread. New channel and Add agent must refuse with
+501 and the documented Rex text. Their bodies name a channel and a name that
+already exist, and Add agent asks for a terminal, so they create nothing even
+on a Rex that accepts them. Last, nothing
+may be left awaiting in either session, and Doctor must report `healthy` with
+no item above `info` in each.
+
+`--skip-channels` leaves the Channels part out. `--channels-only` skips the
+mentions on a lane a full run set up, and still runs the roster, address list,
+Channels, backlog and Doctor checks. A failed check does not stop the run.
+Each check prints one line, and the checks of A's and B's palette steps start
+with `A:` and `B:`. `OUT/commands.log` logs every command, and
+`OUT/evidence.json` holds the store rows, the screens and the timings. A rerun
+reuses B and its names. The driver leaves the lane up.
+
 ### The remote-host lab
 
 ```sh
