@@ -1087,14 +1087,13 @@ fn a_re_exec_d_bridge_reaps_the_workers_its_old_image_started() {
     std::os::unix::fs::symlink("/usr/bin/true", runtime.join("current/namedrop")).unwrap();
     let exe = std::env::current_exe().unwrap();
     let launcher = runtime.join("namedrop");
-    fs::write(
+    crate::executable::write_executable(
         &launcher,
         format!(
             "#!/bin/sh\nexec env {IMAGE}=new '{}' \"$@\"\n",
             exe.display()
         ),
-    )
-    .unwrap();
+    );
     fs::set_permissions(&launcher, fs::Permissions::from_mode(0o700)).unwrap();
     let mut image = std::process::Command::new(&exe)
         .args([REEXEC_TEST, "--exact", "--nocapture", "--test-threads=1"])

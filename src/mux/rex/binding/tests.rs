@@ -691,12 +691,7 @@ fn a_real_shell_wrapper_is_skipped_for_the_process_that_ran_it() {
     }
     let state = State::new();
     let wrapper = state.0.join("session-start-wrapper");
-    std::fs::write(&wrapper, "#!/bin/sh\n\"$@\"\nstatus=$?\nexit $status\n").unwrap();
-    std::fs::set_permissions(
-        &wrapper,
-        std::os::unix::fs::PermissionsExt::from_mode(0o755),
-    )
-    .unwrap();
+    crate::executable::write_executable(&wrapper, "#!/bin/sh\n\"$@\"\nstatus=$?\nexit $status\n");
     let out = state.0.join("agent.json");
     let ran = std::process::Command::new(&wrapper)
         .arg(std::env::current_exe().unwrap())

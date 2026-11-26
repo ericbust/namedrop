@@ -1863,15 +1863,13 @@ mod permission_tests {
             (format!("{rex} "), false),
             (rex.replacen("Namedrop", "Nomedrop", 1), false),
         ] {
-            fs::write(
+            crate::executable::write_executable(
                 &executable,
                 format!(
                     "#!/bin/sh\nprintf '%s' '{}'\n",
                     output.replace('\'', "'\"'\"'")
                 ),
-            )
-            .unwrap();
-            fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+            );
             let result = std::process::Command::new("/bin/sh")
                 .arg(&wrapper)
                 .output()
@@ -1929,13 +1927,10 @@ mod permission_tests {
         fs::create_dir_all(&home).unwrap();
         fs::create_dir_all(&state).unwrap();
         let recorder = root.join("namedrop");
-        fs::write(
+        crate::executable::write_executable(
             &recorder,
             "#!/bin/sh\nenv | grep _TIMEOUT_MS= | sort > \"$0.env\"\n",
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&recorder, fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let package =
             install_integration_package(&home, AgentRuntime::ClaudeCode, &recorder, &state)
                 .unwrap();

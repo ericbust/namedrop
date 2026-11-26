@@ -11,11 +11,10 @@ fn refused_config_start_and_unknown_action_write_nothing_and_call_no_host() {
     fs::create_dir_all(root.join("home")).unwrap();
     let herdr = root.join("herdr");
     let called = root.join("host-called");
-    fs::write(
+    executable::write_executable(
         &herdr,
         format!("#!/bin/sh\n/usr/bin/touch '{}'\nexit 1\n", called.display()),
-    )
-    .unwrap();
+    );
     fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
     for args in [
         vec!["rex", "ensure", "--from-server"],

@@ -1,5 +1,7 @@
 #[path = "support/binary.rs"]
 mod binary;
+#[path = "support/executable.rs"]
+mod executable;
 
 use serde_json::{Value, json};
 use std::{
@@ -47,11 +49,10 @@ fn retirement_precedes_every_dispatch_form_and_all_cached_hook_forms() {
     let state = f.0.join("state");
     let state_arg = state.to_str().unwrap();
     let called = f.0.join("host-called");
-    fs::write(
+    executable::write_executable(
         f.0.join("host"),
         format!("#!/bin/sh\ntouch '{}'\nexit 1\n", called.display()),
-    )
-    .unwrap();
+    );
     fs::set_permissions(f.0.join("host"), fs::Permissions::from_mode(0o700)).unwrap();
     for reason in ["removed", "herdr_handoff"] {
         let marker = json!({"reason":reason,"successor":if reason == "removed" {Value::Null} else {json!("/new-herdr")},"at":"2026-11-15T00:00:00Z"});
@@ -180,7 +181,7 @@ fn takeover_resumes_predecessors_and_doctor_reads_liveness_without_the_old_store
     let successor = f.0.join("successor");
     fs::create_dir_all(old.join("runtime")).unwrap();
     fs::write(old.join("runtime/owner"), "standalone\n").unwrap();
-    fs::write(old.join("runtime/namedrop"), "#!/bin/sh\nexit 0\n").unwrap();
+    executable::write_executable(old.join("runtime/namedrop"), "#!/bin/sh\nexit 0\n");
     fs::set_permissions(
         old.join("runtime/namedrop"),
         fs::Permissions::from_mode(0o700),
@@ -481,7 +482,7 @@ fn a_handoff_that_cannot_rewrite_the_module_stays_unsealed_and_succeeds() {
     let successor = f.0.join("successor");
     fs::create_dir_all(old.join("runtime")).unwrap();
     fs::write(old.join("runtime/owner"), "standalone\n").unwrap();
-    fs::write(old.join("runtime/namedrop"), "#!/bin/sh\nexit 0\n").unwrap();
+    executable::write_executable(old.join("runtime/namedrop"), "#!/bin/sh\nexit 0\n");
     fs::set_permissions(
         old.join("runtime/namedrop"),
         fs::Permissions::from_mode(0o700),
