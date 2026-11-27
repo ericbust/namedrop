@@ -106,7 +106,7 @@
         "doctor text (Herdr rebaked the packages)"
       ],
       "sources": [
-        {"file": "src/health.rs", "line": 358, "source": "An older Herdr release updated the packages without updating the Rex module."}
+        {"file": "src/health.rs", "line": 399, "source": "An older Herdr release updated the packages without updating the Rex module."}
       ],
       "reason": "ND-INSTALL-003 (U3): Herdr's install rebaked the packages under the Rex module. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
     },
@@ -118,7 +118,7 @@
         "doctor text (Herdr rebaked the packages)"
       ],
       "sources": [
-        {"file": "src/health.rs", "line": 360, "source": "Update Namedrop in Herdr, then run Activate Namedrop there again."}
+        {"file": "src/health.rs", "line": 401, "source": "Update Namedrop in Herdr, then run Activate Namedrop there again."}
       ],
       "reason": "ND-INSTALL-003's repair. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
     },
@@ -907,7 +907,7 @@
       "file": "src/health.rs",
       "reason": "Codex's or Claude Code's own plugin, or Namedrop's --plugin-state flag, which a Rex home uses as a Herdr home does.",
       "literals": [
-        [802, "The Namedrop plugin changed after this session started, and a running session doesn't pick up the change. An answer it gives as its final message won't reach anyone."]
+        [843, "The Namedrop plugin changed after this session started, and a running session doesn't pick up the change. An answer it gives as its final message won't reach anyone."]
       ]
     },
     {
@@ -915,7 +915,7 @@
       "file": "src/health.rs",
       "reason": "ND-SESSION-002's Herdr repair; a Rex home's repair is Activate Namedrop.",
       "literals": [
-        [644, "herdr.integration.install"]
+        [685, "herdr.integration.install"]
       ]
     },
     {
@@ -923,8 +923,8 @@
       "file": "src/health.rs",
       "reason": "The stale-build notice of a Herdr plugin root, which only Herdr's reinstall leaves.",
       "literals": [
-        [1631, "A reinstall rebuilt Namedrop but did not switch to the new build, so every command still runs the earlier release. Update Namedrop switches builds for you on GitHub installs; a bare `herdr plugin install` does not."],
-        [1633, "Switch to the new build? Run the command in this Herdr workspace."]
+        [1672, "A reinstall rebuilt Namedrop but did not switch to the new build, so every command still runs the earlier release. Update Namedrop switches builds for you on GitHub installs; a bare `herdr plugin install` does not."],
+        [1674, "Switch to the new build? Run the command in this Herdr workspace."]
       ]
     },
     {
@@ -932,7 +932,7 @@
       "file": "src/health.rs",
       "reason": "A key of the JSON interface, which stays one for both hosts.",
       "literals": [
-        [1637, "plugin_root"]
+        [1678, "plugin_root"]
       ]
     },
     {
@@ -1404,19 +1404,19 @@
     },
     {
       "file": "src/health.rs",
-      "line": 195,
+      "line": 236,
       "text": "The Rex session worktree exposes trusted Namedrop state to Codex.",
       "reason": "Requires a Codex writable-root overlap; not staged by the Words homes."
     },
     {
       "file": "src/health.rs",
-      "line": 434,
+      "line": 475,
       "text": "Namedrop is paused in this Rex session.",
       "reason": "Paused health issue is not staged by the Words homes."
     },
     {
       "file": "src/health.rs",
-      "line": 1353,
+      "line": 1394,
       "text": "Namedrop could not inspect this Rex session safely.",
       "reason": "Requires a failed host discovery; not staged by the Words homes."
     },
@@ -1428,7 +1428,7 @@
     },
     {
       "file": "src/health.rs",
-      "line": 1833,
+      "line": 1874,
       "text": "Run `namedrop channels --no-open` to start the server again on the same port. Devices that are signed in stay signed in.",
       "reason": "ND-TAILSCALE-001's repair once a tailnet handler's Channels server has stopped, which needs a Tailscale the sweep's homes do not have."
     }

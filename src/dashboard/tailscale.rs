@@ -997,6 +997,7 @@ mod tests {
             port: owned.backend_port,
             instance: "test".into(),
             started_at_ms: 0,
+            executable: None,
             ui: super::super::server_files::UiSource::Embedded,
         };
         fixture.put(
