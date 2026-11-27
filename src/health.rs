@@ -1737,7 +1737,7 @@ fn claude_program_issue(
     state: &std::path::Path,
     roots: &crate::update_check::ConfigRoots,
 ) -> HealthIssue {
-    use crate::agent_status_model::{ClaudeSource, claude_program, find_on_path};
+    use crate::agent_status_model::{ClaudeSource, claude_program};
     const CALLS: &str = "Agent-status summaries, persona suggestions, and channel routing";
     let runs = |program: &std::ffi::OsStr| {
         format!(
@@ -1761,16 +1761,15 @@ fn claude_program_issue(
             ),
             Some(file),
         ),
-        Ok((_, ClaudeSource::Default)) => (
-            match find_on_path("claude") {
-                Some(path) => runs(path.as_os_str()),
-                None => {
-                    "Namedrop's own Claude Code calls run claude, which is not on Doctor's PATH."
-                        .to_owned()
-                }
+        Ok((program, ClaudeSource::Default)) => (
+            if std::path::Path::new(&program).is_absolute() {
+                runs(&program)
+            } else {
+                "Namedrop's own Claude Code calls run claude. Doctor found no executable on PATH or in ~/.local/bin."
+                    .to_owned()
             },
             format!(
-                "{CALLS} run claude from PATH, because the Namedrop settings file sets no claude_command."
+                "{CALLS} look for claude on PATH, then in ~/.local/bin, because the Namedrop settings file sets no claude_command."
             ),
             None,
         ),

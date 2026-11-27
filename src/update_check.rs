@@ -66,7 +66,7 @@ impl ConfigRoots {
         }
     }
 
-    fn absolute_home(&self) -> Option<&Path> {
+    pub(crate) fn absolute_home(&self) -> Option<&Path> {
         self.home.as_deref().filter(|path| path.is_absolute())
     }
 }

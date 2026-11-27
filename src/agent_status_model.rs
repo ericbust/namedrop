@@ -347,15 +347,14 @@ pub(crate) enum ClaudeSource {
     Override,
     /// `claude_command` in this settings file.
     Setting(PathBuf),
-    /// `claude`, since the settings file sets no `claude_command`.
+    /// The default Claude Code executable.
     Default,
 }
 
 /// The program for Namedrop's own Claude Code calls:
 /// `NAMEDROP_AGENT_STATUS_CLAUDE_BIN`, else the `claude_command` setting,
-/// else `claude` on `PATH`. A value that cannot run and a setting that
-/// cannot be read are errors, never plain `claude`, which could sign in to
-/// another account.
+/// else `claude` on `PATH` or in the native install directory. An unusable
+/// override or unreadable setting is an error to avoid using another account.
 ///
 /// `roots` locate the settings files: this process's own for a worker, and
 /// the runtime's for Doctor.
@@ -384,7 +383,12 @@ pub(crate) fn claude_program(
                     ClaudeSource::Setting(setting.file),
                 )
             }),
-        None => Ok(("claude".into(), ClaudeSource::Default)),
+        None => Ok((
+            default_model_program("claude", roots.absolute_home())
+                .map(PathBuf::into_os_string)
+                .unwrap_or_else(|| "claude".into()),
+            ClaudeSource::Default,
+        )),
     }
 }
 
@@ -411,7 +415,7 @@ pub(crate) fn locate(name: &str, value: &str) -> Result<PathBuf, String> {
 }
 
 /// The first executable file named `name` in a directory of `PATH`.
-pub(crate) fn find_on_path(name: &str) -> Option<PathBuf> {
+fn find_on_path(name: &str) -> Option<PathBuf> {
     env::split_paths(&env::var_os("PATH")?)
         .map(|directory| directory.join(name))
         .find(|candidate| candidate.is_absolute() && executable(candidate))
@@ -421,8 +425,13 @@ fn executable(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
 }
 
-fn codex_binary() -> String {
-    env::var("NAMEDROP_AGENT_STATUS_CODEX_BIN").unwrap_or_else(|_| "codex".to_owned())
+fn default_model_program(name: &str, home: Option<&Path>) -> Option<PathBuf> {
+    find_on_path(name).or_else(|| {
+        // App-launched hosts can omit the native installer directory from PATH.
+        home.filter(|path| path.is_absolute())
+            .map(|path| path.join(".local/bin").join(name))
+            .filter(|path| executable(path))
+    })
 }
 
 /// The containment wrapper. Tests substitute a recorder to assert the exact
@@ -584,23 +593,23 @@ fn oversized(file: &fs::File) -> bool {
         .unwrap_or(false)
 }
 
-/// Resolves a CLI on `PATH` to a real path, which the sandbox profile needs in
-/// order to permit exactly one executable.
-fn resolve_executable(name: &str) -> Result<PathBuf, String> {
-    let candidate = PathBuf::from(name);
-    let found = if candidate.is_absolute() {
-        candidate
-    } else {
-        env::var_os("PATH")
+/// Resolves Codex to the real path that the sandbox can permit and execute.
+fn codex_program() -> Result<PathBuf, String> {
+    let override_name = env::var("NAMEDROP_AGENT_STATUS_CODEX_BIN").ok();
+    let found = match override_name.as_deref() {
+        None => default_model_program("codex", env::var_os("HOME").as_deref().map(Path::new)),
+        Some(name) if Path::new(name).is_absolute() => Some(PathBuf::from(name)),
+        Some(name) => env::var_os("PATH")
             .map(|path| {
                 env::split_paths(&path)
                     .map(|directory| directory.join(name))
                     .find(|entry| entry.is_file())
             })
-            .unwrap_or_default()
-            .ok_or_else(|| format!("{name} is not installed"))?
+            .unwrap_or_default(),
     };
+    let name = override_name.as_deref().unwrap_or("codex");
     found
+        .ok_or_else(|| format!("{name} is not installed"))?
         .canonicalize()
         .map_err(|error| format!("failed to resolve {name}: {error}"))
 }
@@ -658,7 +667,7 @@ fn codex_home() -> Result<PathBuf, String> {
 #[cfg(target_os = "linux")]
 pub(crate) fn codex_worker_support() -> Result<(), String> {
     crate::linux_sandbox::check_support()?;
-    crate::linux_sandbox::native_codex(&resolve_executable(&codex_binary())?).map(|_| ())
+    crate::linux_sandbox::native_codex(&codex_program()?).map(|_| ())
 }
 
 #[cfg(target_os = "macos")]
@@ -821,7 +830,7 @@ fn codex_plan(
     payload: &str,
     structured: bool,
 ) -> Result<WorkerPlan, String> {
-    let binary = resolve_executable(&codex_binary())?;
+    let binary = codex_program()?;
 
     let directory = reserve_worker_directory()?;
     let schema_path = reserve_scratch(&directory, "schema.json")?;
