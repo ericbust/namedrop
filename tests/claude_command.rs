@@ -58,7 +58,7 @@ impl Fixture {
         .unwrap();
         for program in [
             bin.join("claude"),
-            bin.join("claude-personal"),
+            bin.join("claude-launcher"),
             bin.join("override"),
             elsewhere.join("launcher"),
         ] {
@@ -120,10 +120,10 @@ fn claude_command_picks_the_program_for_namedrops_own_claude_calls() {
     assert_eq!(f.suggest().1, "claude\n", "a file without the setting");
 
     // A program name is looked up on PATH.
-    f.write_settings(&herdr, r#"{"claude_command":"claude-personal"}"#);
+    f.write_settings(&herdr, r#"{"claude_command":"claude-launcher"}"#);
     let (result, ran) = f.suggest();
     assert_eq!(result.as_deref(), Ok("Reviews code."), "name: {ran}");
-    assert_eq!(ran, "claude-personal\n", "name");
+    assert_eq!(ran, "claude-launcher\n", "name");
 
     // An absolute path runs even when it is not on PATH.
     let launcher = f.root.0.join("elsewhere/launcher");
@@ -150,7 +150,7 @@ fn claude_command_picks_the_program_for_namedrops_own_claude_calls() {
             "claude_command not-executable is not on PATH",
         ),
         (
-            r#"{"claude_command":"bin/claude-personal"}"#.to_owned(),
+            r#"{"claude_command":"bin/claude-launcher"}"#.to_owned(),
             "must be a program name or an absolute path",
         ),
         (
@@ -169,7 +169,7 @@ fn claude_command_picks_the_program_for_namedrops_own_claude_calls() {
             "settings.json is invalid",
         ),
         (
-            r#"{"claude_command":["claude-personal"]}"#.to_owned(),
+            r#"{"claude_command":["claude-launcher"]}"#.to_owned(),
             "settings.json is invalid",
         ),
         ("{".to_owned(), "settings.json is invalid"),
@@ -182,7 +182,7 @@ fn claude_command_picks_the_program_for_namedrops_own_claude_calls() {
     }
 
     // The test hook wins over the setting, and is checked the same way.
-    f.write_settings(&herdr, r#"{"claude_command":"claude-personal"}"#);
+    f.write_settings(&herdr, r#"{"claude_command":"claude-launcher"}"#);
     let hook = |value: &Path| {
         // Safety: as in `Fixture::new`.
         unsafe { env::set_var("NAMEDROP_AGENT_STATUS_CLAUDE_BIN", value) };
@@ -208,7 +208,7 @@ fn claude_command_picks_the_program_for_namedrops_own_claude_calls() {
     // names both files.
     let standalone = f.root.0.join("home/.config/namedrop/settings.json");
     fs::remove_file(&herdr).unwrap();
-    f.write_settings(&standalone, r#"{"claude_command":"claude-personal"}"#);
+    f.write_settings(&standalone, r#"{"claude_command":"claude-launcher"}"#);
     let (result, ran) = f.suggest();
     let error = result.expect_err("a claude_command in the unread file");
     assert!(
@@ -221,8 +221,8 @@ fn claude_command_picks_the_program_for_namedrops_own_claude_calls() {
     );
     assert_eq!(ran, "", "an unread claude_command must run nothing");
     // The same value in both files is no conflict.
-    f.write_settings(&herdr, r#"{"claude_command":"claude-personal"}"#);
-    assert_eq!(f.suggest().1, "claude-personal\n", "the same value in both");
+    f.write_settings(&herdr, r#"{"claude_command":"claude-launcher"}"#);
+    assert_eq!(f.suggest().1, "claude-launcher\n", "the same value in both");
     fs::remove_file(&standalone).unwrap();
     // Herdr's file under `~/.config` while this process reads `XDG_CONFIG_HOME`.
     unsafe { env::set_var("XDG_CONFIG_HOME", f.root.0.join("xdg")) };
@@ -237,7 +237,7 @@ fn claude_command_picks_the_program_for_namedrops_own_claude_calls() {
     unsafe { env::remove_var("XDG_CONFIG_HOME") };
 
     // A value set differently in both files fails, and says how to settle it.
-    f.write_settings(&herdr, r#"{"claude_command":"claude-personal"}"#);
+    f.write_settings(&herdr, r#"{"claude_command":"claude-launcher"}"#);
     f.write_settings(
         &standalone,
         &format!(r#"{{"claude_command":"{}"}}"#, launcher.display()),
@@ -256,7 +256,7 @@ fn claude_command_picks_the_program_for_namedrops_own_claude_calls() {
     assert_eq!(ran, "", "a conflicting claude_command must run nothing");
     // A file this install does not read that cannot be parsed might set it,
     // so nothing runs.
-    f.write_settings(&standalone, r#"{"claude_command":"claude-personal",}"#);
+    f.write_settings(&standalone, r#"{"claude_command":"claude-launcher",}"#);
     let (result, ran) = f.suggest();
     let error = result.expect_err("an unreadable unread file");
     assert!(
@@ -300,7 +300,7 @@ fn claude_command_picks_the_program_for_namedrops_own_claude_calls() {
     assert_eq!(ran, "", "a dangling directory link must run nothing");
     fs::remove_file(&herdr_config).unwrap();
     fs::rename(&moved, &herdr_config).unwrap();
-    f.write_settings(&herdr, r#"{"claude_command":"claude-personal"}"#);
+    f.write_settings(&herdr, r#"{"claude_command":"claude-launcher"}"#);
 
     // An owner that cannot be read leaves the file unknown, so nothing runs.
     fs::create_dir_all(f.state.join("runtime")).unwrap();

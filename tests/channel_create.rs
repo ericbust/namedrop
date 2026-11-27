@@ -883,7 +883,7 @@ fn a_new_claude_agent_starts_the_program_claude_command_names() {
     };
     // An ordinary path is typed bare, which every shell runs; one that needs
     // quoting is single-quoted, a quote inside it included.
-    let plain = f.root.join("bin/claude-personal");
+    let plain = f.root.join("bin/claude-launcher");
     let quoted = f.root.join("bin dir/it's claude");
     for (name, launcher, typed) in [
         ("coder", &plain, plain.display().to_string()),
@@ -909,7 +909,7 @@ fn a_new_claude_agent_starts_the_program_claude_command_names() {
 
     // A setting that cannot be used, or a program a shell line cannot hold,
     // refuses before any tab opens.
-    let tabbed = f.root.join("bin/claude\tpersonal");
+    let tabbed = f.root.join("bin/claude\tlauncher");
     executable::write_executable(&tabbed, "#!/bin/sh\n");
     for (settings_text, reason) in [
         (
