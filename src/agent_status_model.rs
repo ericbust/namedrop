@@ -347,15 +347,14 @@ pub(crate) enum ClaudeSource {
     Override,
     /// `claude_command` in this settings file.
     Setting(PathBuf),
-    /// `claude`, since the settings file sets no `claude_command`.
+    /// The default Claude Code executable.
     Default,
 }
 
 /// The program for Namedrop's own Claude Code calls:
 /// `NAMEDROP_AGENT_STATUS_CLAUDE_BIN`, else the `claude_command` setting,
-/// else `claude` on `PATH`. A value that cannot run and a setting that
-/// cannot be read are errors, never plain `claude`, which could sign in to
-/// another account.
+/// else `claude` on `PATH` or in the native install directory. An unusable
+/// override or unreadable setting is an error to avoid using another account.
 ///
 /// `roots` locate the settings files: this process's own for a worker, and
 /// the runtime's for Doctor.
@@ -384,7 +383,21 @@ pub(crate) fn claude_program(
                     ClaudeSource::Setting(setting.file),
                 )
             }),
-        None => Ok(("claude".into(), ClaudeSource::Default)),
+        None => {
+            let program = find_on_path("claude").or_else(|| {
+                // App-launched hosts can omit the native installer directory from PATH.
+                roots
+                    .absolute_home()
+                    .map(|home| home.join(".local/bin/claude"))
+                    .filter(|path| executable(path))
+            });
+            Ok((
+                program
+                    .map(PathBuf::into_os_string)
+                    .unwrap_or_else(|| "claude".into()),
+                ClaudeSource::Default,
+            ))
+        }
     }
 }
 
@@ -411,7 +424,7 @@ pub(crate) fn locate(name: &str, value: &str) -> Result<PathBuf, String> {
 }
 
 /// The first executable file named `name` in a directory of `PATH`.
-pub(crate) fn find_on_path(name: &str) -> Option<PathBuf> {
+fn find_on_path(name: &str) -> Option<PathBuf> {
     env::split_paths(&env::var_os("PATH")?)
         .map(|directory| directory.join(name))
         .find(|candidate| candidate.is_absolute() && executable(candidate))

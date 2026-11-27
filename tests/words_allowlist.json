@@ -787,7 +787,7 @@
       "file": "src/agent_status_model.rs",
       "reason": "An environment or config name read or set, never printed.",
       "literals": [
-        [1019, "HERDR_"]
+        [1032, "HERDR_"]
       ]
     },
     {
@@ -1428,7 +1428,7 @@
     },
     {
       "file": "src/health.rs",
-      "line": 1874,
+      "line": 1873,
       "text": "Run `namedrop channels --no-open` to start the server again on the same port. Devices that are signed in stay signed in.",
       "reason": "ND-TAILSCALE-001's repair once a tailnet handler's Channels server has stopped, which needs a Tailscale the sweep's homes do not have."
     }

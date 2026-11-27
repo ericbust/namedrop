@@ -26,7 +26,7 @@ fn fake(path: &Path, record: &Path) {
     executable::write_executable(
         path,
         format!(
-            "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{name}' >> '{}'\ncat '{}'\n",
+            "#!/bin/sh\n/bin/cat >/dev/null\nprintf '%s\\n' '{name}' >> '{}'\n/bin/cat '{}'\n",
             record.display(),
             response.display()
         ),
@@ -116,6 +116,30 @@ fn claude_command_picks_the_program_for_namedrops_own_claude_calls() {
     let (result, ran) = f.suggest();
     assert_eq!(result.as_deref(), Ok("Reviews code."), "absent: {ran}");
     assert_eq!(ran, "claude\n", "absent");
+
+    let local_bin = f.root.0.join("home/.local/bin");
+    fs::create_dir_all(&local_bin).unwrap();
+    let native_claude = f.root.0.join("elsewhere/native-claude");
+    fake(&native_claude, &f.record);
+    std::os::unix::fs::symlink(&native_claude, local_bin.join("claude")).unwrap();
+    let owner_path = f.state.join("runtime/owner");
+    fs::create_dir_all(owner_path.parent().unwrap()).unwrap();
+    let full_path = env::var_os("PATH").unwrap();
+    // Model a screen whose PATH has no Claude Code executable. Keep the search
+    // inside the fixture so this can never pick up another Claude Code install.
+    // Safety: this test is the only test in the binary.
+    unsafe { env::set_var("PATH", &f.state) };
+    for owner in ["standalone", "herdr"] {
+        fs::write(&owner_path, owner).unwrap();
+        let (result, ran) = f.suggest();
+        assert_eq!(result.as_deref(), Ok("Reviews code."), "{owner}: {ran}");
+        assert_eq!(ran, "native-claude\n", "{owner}");
+    }
+    fs::remove_file(owner_path).unwrap();
+    // Safety: this test is the only test in the binary.
+    unsafe { env::set_var("PATH", full_path) };
+    assert_eq!(f.suggest().1, "claude\n", "PATH takes precedence");
+
     f.write_settings(&herdr, r#"{"check_for_updates":false}"#);
     assert_eq!(f.suggest().1, "claude\n", "a file without the setting");
 
