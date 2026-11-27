@@ -1530,6 +1530,165 @@ mod tests {
         files
     }
 
+    const DISCOVERY_WATCHDOG: Duration = Duration::from_secs(10);
+
+    fn discovery_fixture(
+        name: &str,
+    ) -> (
+        RunningServerFiles,
+        StateNamespace,
+        crate::mux::fake::FakeMux,
+    ) {
+        let files = schema_test_files(name);
+        let namespace = StateNamespace::for_space("socket-a", "w1");
+        StateStore::open(files.state())
+            .unwrap()
+            .transaction(|tx| {
+                tx.activate_worktree(
+                    &namespace,
+                    &MutationAttribution::new(ActorKind::Plugin, "test", 1),
+                )
+            })
+            .unwrap();
+        let mux = crate::mux::fake::FakeMux::world()
+            .endpoint("socket-a")
+            .space("w1")
+            .build();
+        (files, namespace, mux)
+    }
+
+    fn hold_next_discovery_read(mux: &crate::mux::fake::FakeMux) -> (Receiver<()>, Sender<()>) {
+        use crate::mux::fake::Read;
+        let (started, reading) = std::sync::mpsc::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let waiting = Mutex::new(Some(blocked));
+        mux.on_read(move |_, read| {
+            if matches!(
+                read,
+                Read::Survey {
+                    depth: Depth::Spaces,
+                    ..
+                }
+            ) {
+                // Keep the lock while blocked so an inline read on the hub
+                // thread cannot slip past the one-shot gate.
+                let mut waiting = waiting.lock().unwrap();
+                if let Some(blocked) = waiting.take() {
+                    let _ = started.send(());
+                    let _ = blocked.recv_timeout(DISCOVERY_WATCHDOG);
+                }
+            }
+            Ok(())
+        });
+        (reading, release)
+    }
+
+    fn discovery_subscription(
+        hub: &mut Hub<'_>,
+        subscription: Subscription,
+        id: u64,
+        notify: &Sender<HubCommand>,
+    ) -> Receiver<Frame> {
+        let (frames, inbox) = sync_channel(8);
+        assert!(
+            hub.step(Ok(HubCommand::Subscribe {
+                id,
+                subscription,
+                frames,
+                notify: notify.clone(),
+            }))
+            .is_none()
+        );
+        inbox
+    }
+
+    #[test]
+    fn cold_ready_with_fast_discovery_does_not_wait_for_a_hub_tick() {
+        let (files, namespace, mux) = discovery_fixture("cold-ready-wake");
+        let mut hub = test_hub(&files);
+        let (reading, release) = hold_next_discovery_read(&mux);
+        hub.mux = Arc::new(mux);
+        let (notify, commands) = std::sync::mpsc::channel();
+        let all = discovery_subscription(&mut hub, Subscription::All, 1, &notify);
+
+        reading
+            .recv_timeout(DISCOVERY_WATCHDOG)
+            .expect("first discovery read did not start");
+        assert!(
+            all.try_recv().is_err(),
+            "replay finished before discovery answered"
+        );
+        release.send(()).unwrap();
+        let wake = commands
+            .recv_timeout(DISCOVERY_WATCHDOG)
+            .expect("discovery did not wake the hub");
+        assert!(matches!(wake, HubCommand::DiscoveryReady));
+        // Drive the wake through the production loop's step without sending a tick.
+        assert!(hub.step(Ok(wake)).is_none());
+        let Frame::Spaces(events) = all
+            .try_recv()
+            .expect("discovery wake did not publish replay")
+        else {
+            panic!("expected an initial all-space replay");
+        };
+        let key = SpaceKey::of(&namespace);
+        assert!(matches!(
+            events.as_ref(),
+            [SpaceEvent::Space { key: discovered, .. }, SpaceEvent::Ready { keys }]
+                if discovered == &key && keys == std::slice::from_ref(&key)
+        ));
+        drop(hub);
+        fs::remove_dir_all(files.state()).unwrap();
+    }
+
+    #[test]
+    fn both_routes_publish_database_changes_while_a_herdr_read_is_still_blocked() {
+        let (files, namespace, mux) = discovery_fixture("publication-during-discovery");
+        let mut hub = test_hub(&files);
+        hub.mux = Arc::new(mux.clone());
+        let key = SpaceKey::of(&namespace);
+        let (notify, commands) = std::sync::mpsc::channel();
+        let all = discovery_subscription(&mut hub, Subscription::All, 1, &notify);
+        let wake = commands
+            .recv_timeout(DISCOVERY_WATCHDOG)
+            .expect("initial discovery did not wake the hub");
+        assert!(hub.step(Ok(wake)).is_none());
+        assert!(matches!(all.try_recv(), Ok(Frame::Spaces(_))));
+        let legacy = discovery_subscription(&mut hub, Subscription::Space(key.clone()), 2, &notify);
+        assert!(matches!(legacy.try_recv(), Ok(Frame::Snapshot(_))));
+
+        let (reading, release) = hold_next_discovery_read(&mux);
+        reading
+            .recv_timeout(DISCOVERY_WATCHDOG)
+            .expect("next discovery read did not start");
+        add_address(files.state(), &namespace, "during-read");
+        assert!(hub.step(Err(RecvTimeoutError::Timeout)).is_none());
+
+        let Frame::Snapshot(frame) = legacy
+            .try_recv()
+            .expect("legacy publication waited for discovery")
+        else {
+            panic!("expected a legacy snapshot");
+        };
+        assert!(frame.contains("@during-read"), "{frame}");
+        let Frame::Spaces(events) = all
+            .try_recv()
+            .expect("all-space publication waited for discovery")
+        else {
+            panic!("expected an all-space update");
+        };
+        assert!(matches!(
+            events.as_ref(),
+            [SpaceEvent::Space { key: observed, frame }]
+                if observed == &key && frame.contains("@during-read")
+        ));
+        release
+            .send(())
+            .expect("discovery read ended before both frames were published");
+        drop(hub);
+        fs::remove_dir_all(files.state()).unwrap();
+    }
+
     fn schema_test_hub(files: &RunningServerFiles) -> Hub<'_> {
         let mut hub = test_hub(files);
         assert!(hub.open_store());
