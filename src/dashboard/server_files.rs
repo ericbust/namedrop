@@ -5,6 +5,7 @@ use std::{
     ffi::CString,
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
+    ops::Deref,
     os::{
         fd::{AsFd, AsRawFd, FromRawFd, OwnedFd},
         unix::{
@@ -204,7 +205,6 @@ pub(crate) fn outdated_runtime(state: &Path) -> Option<(ServerInfo, PathBuf)> {
     let files = ServerFiles {
         state: state.to_path_buf(),
         dir: state.join("dashboard"),
-        startup_executable: None,
     };
     let info = files.info()?;
     if info.executable.as_ref() == Some(&installed) {
@@ -245,7 +245,48 @@ impl Token {
 pub(crate) struct ServerFiles {
     state: PathBuf,
     dir: PathBuf,
+}
+
+#[derive(Clone)]
+pub(crate) struct RunningServerFiles {
+    files: ServerFiles,
     startup_executable: Option<PathBuf>,
+}
+
+impl RunningServerFiles {
+    pub fn at(state: &Path) -> Result<Self, String> {
+        let startup_executable = std::env::current_exe().and_then(fs::canonicalize).ok();
+        Ok(Self {
+            files: ServerFiles::at(state)?,
+            startup_executable,
+        })
+    }
+
+    pub fn recorded_executable(&self) -> Option<PathBuf> {
+        self.startup_executable
+            .as_ref()
+            .filter(|path| path.to_str().is_some())
+            .cloned()
+    }
+
+    pub fn runtime_changed(&self) -> bool {
+        let runtime = self.state().join("runtime");
+        runtime.join("namedrop").exists()
+            && fs::canonicalize(runtime.join("current/namedrop")).ok() != self.startup_executable
+    }
+
+    pub fn restarting(&self) -> bool {
+        fs::symlink_metadata(self.state().join("runtime/migration.json")).is_ok()
+            || self.runtime_changed()
+    }
+}
+
+impl Deref for RunningServerFiles {
+    type Target = ServerFiles;
+
+    fn deref(&self) -> &Self::Target {
+        &self.files
+    }
 }
 
 impl ServerFiles {
@@ -256,13 +297,7 @@ impl ServerFiles {
         Ok(Self {
             state: state.to_path_buf(),
             dir,
-            startup_executable: None,
         })
-    }
-
-    pub fn with_startup_executable(mut self, executable: Option<PathBuf>) -> Self {
-        self.startup_executable = executable;
-        self
     }
 
     pub fn state(&self) -> &Path {
@@ -499,17 +534,6 @@ impl ServerFiles {
 
     pub fn clear_bind_failure(&self) {
         let _ = fs::remove_file(self.dir.join(BIND_FAILURE));
-    }
-
-    pub fn runtime_changed(&self) -> bool {
-        let runtime = self.state.join("runtime");
-        runtime.join("namedrop").exists()
-            && fs::canonicalize(runtime.join("current/namedrop")).ok() != self.startup_executable
-    }
-
-    pub fn restarting(&self) -> bool {
-        fs::symlink_metadata(self.state.join("runtime/migration.json")).is_ok()
-            || self.runtime_changed()
     }
 
     pub fn handoff(
