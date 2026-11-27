@@ -208,14 +208,20 @@ fn doctor_names_the_claude_command_namedrop_runs() {
     let path = f
         .home
         .join(".config/herdr/plugins/config/namedrop/settings.json");
-    // Without the setting, Doctor still says what runs: `claude`.
+    let launcher = f.home.join("claude-launcher");
+    executable::write_executable(&launcher, "#!/bin/sh\n");
+    // Safety: update_profile::isolate runs this test alone in a child process.
+    unsafe {
+        std::env::set_var("PATH", &f.root);
+        std::env::remove_var("NAMEDROP_AGENT_STATUS_CLAUDE_BIN");
+    }
     let unset = diagnose_collaboration(&f.runtime());
     assert_eq!(unset.status, HealthStatus::Healthy, "{unset:?}");
     let default = claude(&unset).unwrap();
     assert_eq!(default.severity, HealthSeverity::Info);
-    assert!(
-        default.summary.contains("run claude") || default.summary.ends_with("/claude."),
-        "{default:?}"
+    assert_eq!(
+        default.summary,
+        "Namedrop's own Claude Code calls run claude. Doctor found no executable on PATH or in ~/.local/bin."
     );
     assert!(
         default
@@ -224,8 +230,6 @@ fn doctor_names_the_claude_command_namedrop_runs() {
         "{default:?}"
     );
     fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let launcher = f.home.join("claude-launcher");
-    executable::write_executable(&launcher, "#!/bin/sh\n");
     fs::write(&path, json!({"claude_command": launcher}).to_string()).unwrap();
     let report = diagnose_collaboration(&f.runtime());
     assert_eq!(report.status, HealthStatus::Healthy, "{report:?}");
@@ -311,6 +315,35 @@ fn doctor_names_the_claude_command_namedrop_runs() {
             .explanation
             .contains(&format!("{} is invalid", path.display())),
         "{dangling:?}"
+    );
+}
+
+#[test]
+fn doctor_names_the_claude_command_from_the_runtime_home() {
+    let f = Fixture::new();
+    let process_home = f.root.join("process-home");
+    if update_profile::isolate(&f.root, &process_home) {
+        return;
+    }
+    f.register();
+    let claude = f.home.join(".local/bin/claude");
+    fs::create_dir_all(claude.parent().unwrap()).unwrap();
+    executable::write_executable(&claude, "#!/bin/sh\n");
+    // Safety: update_profile::isolate runs this test alone in a child process.
+    unsafe {
+        std::env::set_var("PATH", &f.root);
+        std::env::remove_var("NAMEDROP_AGENT_STATUS_CLAUDE_BIN");
+    }
+    let report = diagnose_collaboration(&f.runtime());
+    let finding = report
+        .issues
+        .iter()
+        .find(|issue| issue.code == "ND-MODEL-002")
+        .unwrap();
+    assert_eq!(finding.severity, HealthSeverity::Info);
+    assert_eq!(
+        finding.summary,
+        format!("Namedrop's own Claude Code calls run {}.", claude.display())
     );
 }
 

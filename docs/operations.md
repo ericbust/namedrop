@@ -809,7 +809,7 @@ Namedrop's Claude Code requests fail and say why, and never fall back to `claude
 
 A Channels server reads `claude_command` each time it routes a post. A server from before 1.12.0 routes with `claude` until it stops. On macOS such a server can keep running after an update. Doctor reports `ND-CHANNELS-002` when it cannot verify the server's runtime. [Restart Channels after an update](#restart-channels-after-an-update) gives the commands that stop it.
 
-An older Namedrop does not know `claude_command`. It treats a file with that setting as invalid, so its update checks stop and its Doctor shows ND-UPDATE-002. If you add the setting to Herdr's file while Herdr still runs 1.11.1 or earlier, you no longer see the notice that offers 1.12.0. Update first, then add the setting. For Codex requests, the worker looks for `codex` on its own `PATH`, then in `~/.local/bin`. The sandbox runs the resolved executable. Codex requests use the Codex home that `CODEX_HOME` names.
+An older Namedrop does not know `claude_command`. It treats a file with that setting as invalid, so its update checks stop and its Doctor shows ND-UPDATE-002. If you add the setting to Herdr's file while Herdr still runs 1.11.1 or earlier, you no longer see the notice that offers 1.12.0. Update first, then add the setting. Codex requests have no equivalent setting. The worker looks for `codex` on its own `PATH`, then in `~/.local/bin`. The sandbox runs the resolved executable. Codex requests use the Codex home that `CODEX_HOME` names.
 
 ## Upgrade
 
