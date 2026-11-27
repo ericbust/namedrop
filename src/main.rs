@@ -173,11 +173,14 @@ fn main() -> ExitCode {
                     && inherited.dev() == expected.dev()
                     && inherited.ino() == expected.ino()
             });
+        let selected_image =
+            fs::canonicalize(state.join("runtime/current/namedrop")).is_ok_and(|selected| {
+                namedrop::runtime_executable_image().is_ok_and(|image| image == selected)
+            });
         if !state.is_absolute()
             || !gate_matches
             || !state.join("runtime/migration.json").is_file()
-            || fs::canonicalize(state.join("runtime/current/namedrop")).ok()
-                != env::current_exe().and_then(fs::canonicalize).ok()
+            || !selected_image
         {
             eprintln!(
                 "State migration requires the selected runtime, inherited command gate, and a pending activation."
@@ -427,26 +430,18 @@ fn main() -> ExitCode {
     // started before activation completed or before a failed switch rolled back.
     if let Some(state) = selected_state.as_deref()
         && !cli.dashboard_inherit_claim()
+        && let Err(error) = namedrop::runtime_reexec_if_replaced(state)
     {
-        let launcher = state.join("runtime/namedrop");
-        if launcher.exists() {
-            let selected = fs::canonicalize(state.join("runtime/current/namedrop"));
-            let running = env::current_exe().and_then(fs::canonicalize);
-            if selected.as_ref().ok() != running.as_ref().ok() || selected.is_err() {
-                use std::os::unix::process::CommandExt;
-                let error = Command::new(launcher).args(env::args_os().skip(1)).exec();
-                if cli.rex_action().is_some() {
-                    return rex_action_result(Err(format!(
-                        "Could not run the selected Namedrop runtime: {error}"
-                    )));
-                }
-                eprintln!("Could not run the selected Namedrop runtime: {error}");
-                // A layer may wait long for its key, and an update, the
-                // repair here, needs the gate meanwhile.
-                drop(command_guard);
-                return refuse_before_screen(&cli, inherited, 69);
-            }
+        if cli.rex_action().is_some() {
+            return rex_action_result(Err(format!(
+                "Could not run the selected Namedrop runtime: {error}"
+            )));
         }
+        eprintln!("Could not run the selected Namedrop runtime: {error}");
+        // A layer may wait long for its key, and an update, the
+        // repair here, needs the gate meanwhile.
+        drop(command_guard);
+        return refuse_before_screen(&cli, inherited, 69);
     }
     if let Some((print_config, false)) = cli.install_options() {
         return finish(

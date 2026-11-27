@@ -256,7 +256,7 @@ trait Host {
     /// Under the command gate, runs a replaced runtime in this process's
     /// place, as the same command, and hands it the workers. Returns only
     /// when there is none to run.
-    fn reexec_if_replaced(&mut self);
+    fn reexec_if_replaced(&mut self) -> Result<(), String>;
     /// Starts the relay's worker of each label with an item queued or a
     /// thread open, unless it runs.
     fn start_relay_workers(&mut self);
@@ -285,11 +285,15 @@ impl Host for Processes<'_> {
         &self.workers
     }
 
-    fn reexec_if_replaced(&mut self) {
+    fn reexec_if_replaced(&mut self) -> Result<(), String> {
         use std::os::unix::process::CommandExt;
-        if let Some(mut command) = crate::installed_runtime::replacement(self.state) {
-            let _ = command.env(INHERITED_WORKERS, self.workers.live()).exec();
+        if let Some(mut command) = crate::installed_runtime::replacement(self.state)? {
+            return Err(command
+                .env(INHERITED_WORKERS, self.workers.live())
+                .exec()
+                .to_string());
         }
+        Ok(())
     }
 
     fn start_relay_workers(&mut self) {
@@ -538,7 +542,7 @@ fn flush(
     }
     let retry = Instant::now() + RETRY;
     let Some((_gate, activated)) = gate.ok().and_then(|gate| {
-        host.reexec_if_replaced();
+        host.reexec_if_replaced().ok()?;
         Some((gate, activated_spaces(state, endpoint)?))
     }) else {
         // Which spaces are activated is unknown, so the next try resyncs

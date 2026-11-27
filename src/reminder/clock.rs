@@ -1,10 +1,11 @@
-use crate::{Clock, LifecycleRuntime, ProcessIds, StateStore, SystemClock, mux::Budget};
+use crate::{
+    Clock, LifecycleRuntime, ProcessIds, StateStore, SystemClock, installed_runtime, mux::Budget,
+};
 use rusqlite::{Connection, OpenFlags};
 use std::{
     fs,
     os::unix::{fs::OpenOptionsExt, process::CommandExt},
     path::Path,
-    process::Command,
     thread,
     time::Duration,
 };
@@ -217,8 +218,8 @@ pub fn run_clock(state: &Path, socket: &str) -> Result<(), String> {
             return ensure_clock(state, Some(socket), crate::daemon::Starter::Caller);
         }
         let selected = selected_executable(state)?;
-        let changed = fs::canonicalize(&selected).ok()
-            != std::env::current_exe().and_then(fs::canonicalize).ok();
+        let changed =
+            fs::canonicalize(&selected).ok() != installed_runtime::executable_image().ok();
         if changed
             || !plan.due.is_empty()
             || !plan.catch_up.is_empty()
@@ -229,16 +230,10 @@ pub fn run_clock(state: &Path, socket: &str) -> Result<(), String> {
         {
             let gate = crate::runtime_command_guard(state, None)?;
             let selected = selected_executable(state)?;
-            if fs::canonicalize(&selected).ok()
-                != std::env::current_exe().and_then(fs::canonicalize).ok()
-            {
+            if let Some(mut command) = installed_runtime::reexec_command(&selected, &selected)? {
                 drop(gate);
                 lock.unlock().map_err(|e| e.to_string())?;
-                let error = Command::new(selected)
-                    .arg("reminder-clock")
-                    .arg(state)
-                    .arg(socket)
-                    .exec();
+                let error = command.arg("reminder-clock").arg(state).arg(socket).exec();
                 return Err(error.to_string());
             }
             match cycle_with(

@@ -170,3 +170,22 @@ fn linux_preflight_requires_landlock_and_named_prerequisites() {
     assert_eq!(code, Some(1), "{out}");
     assert!(out.contains("missing required: codex\n"), "{out}");
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn command_gate_rechecks_the_running_image() {
+    let output = crate::binary::command("python3")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/runtime_image.py"
+        ))
+        .arg(crate::binary::namedrop_path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

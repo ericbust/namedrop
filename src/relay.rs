@@ -98,7 +98,7 @@ pub fn run_worker(state: &Path, endpoint: &crate::mux::Endpoint, label: &str) {
             for space in woken.take() {
                 wake(&space);
             }
-        });
+        })?;
         Ok(gate)
     };
     hold(state, endpoint, label, &mut || {
@@ -130,14 +130,16 @@ fn hand_over_if_replaced(
     state: &Path,
     workers: &crate::rex_bridge::Workers,
     before: &mut dyn FnMut(),
-) {
+) -> Result<(), String> {
     use std::os::unix::process::CommandExt;
-    if let Some(mut command) = crate::installed_runtime::replacement(state) {
+    if let Some(mut command) = crate::installed_runtime::replacement(state)? {
         before();
-        let _ = command
+        return Err(command
             .env(crate::rex_bridge::INHERITED_WORKERS, workers.live())
-            .exec();
+            .exec()
+            .to_string());
     }
+    Ok(())
 }
 
 /// Runs `work` while holding the worker's lock for `label`, and again while

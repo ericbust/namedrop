@@ -93,8 +93,6 @@ pub(crate) use install::{
 };
 pub use installed_runtime::command_guard as runtime_command_guard;
 #[doc(hidden)]
-pub use installed_runtime::executable as runtime_executable;
-#[doc(hidden)]
 pub use installed_runtime::package_refusal;
 pub use installed_runtime::reexec_if_replaced as runtime_reexec_if_replaced;
 #[doc(hidden)]
@@ -103,6 +101,10 @@ pub use installed_runtime::{
     Retirement, begin_removal as runtime_begin_removal,
     command_guard_allow_removed as runtime_removal_guard, own_state as runtime_own_state,
     retirement, standalone as runtime_standalone,
+};
+#[doc(hidden)]
+pub use installed_runtime::{
+    executable as runtime_executable, executable_image as runtime_executable_image,
 };
 pub use integration::{
     AgentRuntime, AttachedContext, CONTEXT_DELIVERY_OPERATIONS, CatalogExample, CatalogOperation,

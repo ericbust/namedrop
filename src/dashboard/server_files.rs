@@ -255,7 +255,7 @@ pub(crate) struct RunningServerFiles {
 
 impl RunningServerFiles {
     pub fn at(state: &Path) -> Result<Self, String> {
-        let startup_executable = std::env::current_exe().and_then(fs::canonicalize).ok();
+        let startup_executable = crate::installed_runtime::executable_image().ok();
         Ok(Self {
             files: ServerFiles::at(state)?,
             startup_executable,
@@ -272,7 +272,12 @@ impl RunningServerFiles {
     pub fn runtime_changed(&self) -> bool {
         let runtime = self.state().join("runtime");
         runtime.join("namedrop").exists()
-            && fs::canonicalize(runtime.join("current/namedrop")).ok() != self.startup_executable
+            && self.startup_executable.as_ref().is_some_and(|image| {
+                fs::canonicalize(runtime.join("current/namedrop"))
+                    .as_ref()
+                    .ok()
+                    != Some(image)
+            })
     }
 
     pub fn restarting(&self) -> bool {

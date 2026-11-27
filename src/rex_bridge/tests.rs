@@ -275,10 +275,11 @@ impl Host for FakeHost {
         &self.workers
     }
 
-    fn reexec_if_replaced(&mut self) {
+    fn reexec_if_replaced(&mut self) -> Result<(), String> {
         if self.replaced {
             std::panic::resume_unwind(Box::new(Replaced));
         }
+        Ok(())
     }
 
     fn start_relay_workers(&mut self) {
@@ -1149,7 +1150,8 @@ fn old_image() {
         endpoint: &endpoint,
         workers,
     }
-    .reexec_if_replaced();
+    .reexec_if_replaced()
+    .unwrap();
     panic!("the bridge did not re-exec");
 }
 

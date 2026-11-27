@@ -416,24 +416,14 @@ pub(crate) mod tests {
 
     /// Every production `Command::new` whose program is not a string literal
     /// naming one of `UTILITIES`, by file and call. A Namedrop self-spawn goes through `daemon::command`
-    /// or `daemon::scrub`; the four exceptions keep their identity on purpose.
+    /// or `daemon::scrub`; the exceptions keep their identity on purpose.
     const SPAWNS: &[(&str, &str, Spawn)] = &[
         ("daemon.rs", "Command::new(executable)", Spawn::Door),
         ("stop_hook.rs", "Command::new(executable)", Spawn::Scrubbed),
         (
-            "main.rs",
-            "Command::new(launcher)",
-            Spawn::Exception("the runtime re-exec replaces this process and keeps its identity"),
-        ),
-        (
             "installed_runtime.rs",
             "Command::new(launcher)",
             Spawn::Exception("the runtime re-exec replaces this process and keeps its identity"),
-        ),
-        (
-            "reminder/clock.rs",
-            "Command::new(selected)",
-            Spawn::Exception("the clock's re-exec into a replaced runtime keeps its identity"),
         ),
         (
             "dashboard/server_files.rs",
