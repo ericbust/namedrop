@@ -92,6 +92,12 @@ else
 fi
 "#,
         );
+        let log = fs::File::options()
+            .create(true)
+            .append(true)
+            .open(root.join("server.log"))
+            .unwrap();
+        log.set_len(0).unwrap();
         let child = crate::binary::namedrop()
             .arg("--plugin-state")
             .arg(root.join("state"))
@@ -106,7 +112,7 @@ fi
             .env("ND_TEST_ROOT", root)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(fs::File::create(root.join("server.log")).unwrap())
+            .stderr(log)
             .spawn()
             .unwrap();
         let deadline = Instant::now() + WAIT;
@@ -648,7 +654,7 @@ fn discovery_logs_failures_and_recovery_once_per_socket_state_change() {
 #[test]
 fn slow_discovery_gives_every_socket_a_full_turn() {
     let directory = TestDirectory::new();
-    let seconds: f64 = include_str!("../src/dashboard/hub.rs")
+    let seconds = include_str!("../src/dashboard/hub.rs")
         .split_once("const HERDR_TIMEOUT: Duration = Duration::from_secs(")
         .expect("fixture must use the configured Herdr read deadline")
         .1
@@ -657,23 +663,53 @@ fn slow_discovery_gives_every_socket_a_full_turn() {
         .0
         .parse()
         .unwrap();
-    let delay = (seconds * 0.6).to_string();
-    for socket in ["slow-a", "slow-b"] {
+    let read_timeout = Duration::from_secs(seconds);
+    let delay = (read_timeout.as_secs_f64() * 0.6).to_string();
+    let sockets = ["slow-a", "slow-b"];
+    for socket in sockets {
         activate_on(&directory.path().join("state"), socket, "a");
         snapshot_on(directory.path(), socket, &[("a", None)]);
         fs::write(directory.path().join(format!("delay-{socket}")), &delay).unwrap();
     }
+    let log_path = directory.path().join("server.log");
+    // Keep the fake Herdr's call records in order with the hub's failure reports.
+    std::os::unix::fs::symlink(&log_path, directory.path().join("calls")).unwrap();
     let server = Server::start(directory.path(), &[]);
     let mut all = server.events("/api/events");
     let mut seen = HashSet::new();
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while seen.len() < 2 && Instant::now() < deadline {
+    // The deadline budgets two sweeps at the read deadline plus WAIT for
+    // scheduling and publishing the frames.
+    let sweep = read_timeout * u32::try_from(sockets.len()).unwrap();
+    let bound = 2 * sweep + WAIT;
+    let deadline = Instant::now() + bound;
+    while seen.len() < sockets.len() && Instant::now() < deadline {
         if let Some((event, data)) = all.next(deadline.saturating_duration_since(Instant::now())) {
             assert_eq!(event, "space");
             seen.insert(data["key"].as_str().unwrap().to_owned());
         }
     }
-    let expected: HashSet<_> = ["slow-a", "slow-b"]
+    let log = fs::read_to_string(&log_path).unwrap();
+    let mut attempts = Vec::new();
+    for line in log.lines() {
+        if sockets.contains(&line) {
+            attempts.push(line);
+        } else if let Some(socket) = line
+            .strip_prefix("dashboard: live workspaces on ")
+            .and_then(|line| line.strip_suffix(" unavailable"))
+            && sockets.contains(&socket)
+            && attempts.last() != Some(&socket)
+        {
+            // A failure can be the only record if the probe never ran the script.
+            attempts.push(socket);
+        }
+    }
+    let first_sweep: HashSet<_> = attempts.iter().take(sockets.len()).copied().collect();
+    assert_eq!(
+        first_sweep,
+        sockets.into_iter().collect(),
+        "the first sweep did not probe every socket: {attempts:?}"
+    );
+    let expected: HashSet<_> = sockets
         .into_iter()
         .map(|socket| {
             SpaceKey::of(&StateNamespace::for_space(socket, "a"))
@@ -681,7 +717,10 @@ fn slow_discovery_gives_every_socket_a_full_turn() {
                 .to_owned()
         })
         .collect();
-    assert_eq!(seen, expected, "one socket was starved");
+    assert_eq!(
+        seen, expected,
+        "missing space frames within {bound:?} (two sweeps at the read deadline plus the WAIT margin); probes: {attempts:?}, server log: {log}"
+    );
 }
 
 #[test]
