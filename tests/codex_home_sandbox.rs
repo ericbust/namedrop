@@ -16,8 +16,7 @@ use std::{
     sync::atomic::AtomicBool,
 };
 
-/// A state directory no test creates. The fake CLI comes from
-/// `NAMEDROP_AGENT_STATUS_CLAUDE_BIN`, so its settings are never read.
+/// A state directory no test creates. Codex does not read its settings.
 const STATE: &str = "/nonexistent/namedrop-test-state";
 
 const STAND_IN: &str = r#"
@@ -107,7 +106,7 @@ fn compile(directory: &Path) -> PathBuf {
 }
 
 #[test]
-fn the_worker_resolves_a_codex_home_it_was_given() {
+fn the_worker_resolves_the_codex_executable_and_credential_home() {
     // By its real path, so the one link below is the only one Codex meets.
     let root = env::temp_dir()
         .canonicalize()
@@ -187,15 +186,20 @@ fn the_worker_resolves_a_codex_home_it_was_given() {
         fs::create_dir_all(&layout.home).unwrap();
         fs::create_dir_all(&layout.files).unwrap();
         fs::write(layout.files.join("auth.json"), "{}").unwrap();
+        // Exercise the native installation's symlink without a usable PATH.
+        let local_bin = layout.home.join(".local/bin");
+        fs::create_dir_all(&local_bin).unwrap();
+        std::os::unix::fs::symlink(&codex, local_bin.join("codex")).unwrap();
         // Safety: this file holds one test, so no other thread reads the
         // environment while it changes.
         unsafe {
             env::set_var("HOME", &layout.home);
+            env::set_var("PATH", &root);
+            env::remove_var("NAMEDROP_AGENT_STATUS_CODEX_BIN");
             match &layout.given {
                 Some(given) => env::set_var("CODEX_HOME", given),
                 None => env::remove_var("CODEX_HOME"),
             }
-            env::set_var("NAMEDROP_AGENT_STATUS_CODEX_BIN", &codex);
             env::remove_var("NAMEDROP_AGENT_STATUS_SANDBOX_BIN");
             env::set_var(
                 "STAND_IN_PRIVATE",

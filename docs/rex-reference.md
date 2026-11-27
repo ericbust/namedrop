@@ -185,7 +185,7 @@ Namedrop's Claude Code calls fail with the reason, and never run `claude` instea
 - Namedrop cannot read the install's owner, so it cannot tell which file applies.
 - Another settings file sets `claude_command`, and the file the install reads does not set it to the same value. The reason names both files.
 
-`NAMEDROP_AGENT_STATUS_CLAUDE_BIN`, which tests use, takes the place of `claude_command`, by the same rules. Doctor reports `ND-MODEL-002`. Codex calls have no such setting: their sandbox lets exactly one Codex executable run, so a launcher script cannot start Codex.
+`NAMEDROP_AGENT_STATUS_CLAUDE_BIN`, which tests use, takes the place of `claude_command`, by the same rules. Doctor reports `ND-MODEL-002`. For Codex calls, Namedrop looks for `codex` on `PATH`, then in `~/.local/bin`. The sandbox allows only the resolved Codex executable, so a launcher script cannot start Codex.
 
 ## One machine with Herdr and Rex
 
