@@ -1,7 +1,7 @@
 //! The one thread that owns the SQLite connection and every subscriber.
 //! HTTP threads reach it only through `HubCommand`, so nothing is shared and
 //! no read transaction outlives a single snapshot build.
-use super::server_files::ServerFiles;
+use super::server_files::RunningServerFiles;
 use super::snapshot::{self, DashboardSnapshot, RepoRef, SpaceKey, SpaceSummary};
 use crate::{
     StateNamespace, StateStore, StoreErrorKind,
@@ -386,7 +386,7 @@ fn subagent_presence(
 
 struct Hub<'a> {
     mux: Arc<dyn MuxConnector>,
-    files: &'a ServerFiles,
+    files: &'a RunningServerFiles,
     instance: &'a str,
     /// The test override; without one the saved setting decides, read as it changes.
     idle: Option<Duration>,
@@ -416,7 +416,7 @@ struct Hub<'a> {
 }
 
 pub(crate) fn run(
-    files: &ServerFiles,
+    files: &RunningServerFiles,
     instance: &str,
     idle: Option<Duration>,
     commands: Receiver<HubCommand>,
@@ -561,10 +561,7 @@ impl Hub<'_> {
         let runtime = self.files.state().join("runtime");
         let wants_handoff = if fs::symlink_metadata(runtime.join("migration.json")).is_ok() {
             Some("an update is migrating state")
-        } else if runtime.join("namedrop").exists()
-            && fs::canonicalize(runtime.join("current/namedrop")).ok()
-                != std::env::current_exe().and_then(fs::canonicalize).ok()
-        {
+        } else if self.files.runtime_changed() {
             Some("a newer release is current")
         } else if self
             .store
@@ -1379,7 +1376,7 @@ mod tests {
             .unwrap();
     }
 
-    fn test_hub(files: &ServerFiles) -> Hub<'_> {
+    fn test_hub(files: &RunningServerFiles) -> Hub<'_> {
         Hub {
             mux: Arc::new(crate::mux::Connector::new(std::path::Path::new(""))),
             files,
@@ -1425,7 +1422,7 @@ mod tests {
                 )
             })
             .unwrap();
-        let files = ServerFiles::at(&state).unwrap();
+        let files = RunningServerFiles::at(&state).unwrap();
         let key = SpaceKey::of(&namespace);
         files.record_label(key.as_str(), "repo").unwrap();
         let mut hub = test_hub(&files);
@@ -1455,7 +1452,7 @@ mod tests {
             "namedrop-hub-fallback-tokens-{}",
             std::process::id()
         ));
-        let files = ServerFiles::at(&state).unwrap();
+        let files = RunningServerFiles::at(&state).unwrap();
         let mut hub = test_hub(&files);
         for label in [None, Some(""), Some("all")] {
             let namespace = StateNamespace::for_space("socket-a", "w1");
@@ -1503,12 +1500,12 @@ mod tests {
         });
     }
 
-    fn schema_test_files(name: &str) -> ServerFiles {
+    fn schema_test_files(name: &str) -> RunningServerFiles {
         let state =
             std::env::temp_dir().join(format!("namedrop-hub-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&state);
         StateStore::open(&state).unwrap();
-        let files = ServerFiles::at(&state).unwrap();
+        let files = RunningServerFiles::at(&state).unwrap();
         let claim = files.claim().unwrap().unwrap();
         files
             .publish(
@@ -1518,7 +1515,7 @@ mod tests {
                     port: 0,
                     instance: "test".to_owned(),
                     started_at_ms: now_ms(),
-                    executable: None,
+                    executable: files.recorded_executable(),
                     ui: Default::default(),
                 },
             )
@@ -1526,7 +1523,7 @@ mod tests {
         files
     }
 
-    fn schema_test_hub(files: &ServerFiles) -> Hub<'_> {
+    fn schema_test_hub(files: &RunningServerFiles) -> Hub<'_> {
         let mut hub = test_hub(files);
         assert!(hub.open_store());
         hub.store
@@ -1926,7 +1923,7 @@ mod tests {
             std::env::temp_dir().join(format!("namedrop-hub-schema-busy-{}", std::process::id()));
         let _ = fs::remove_dir_all(&state);
         StateStore::open(&state).unwrap();
-        let files = ServerFiles::at(&state).unwrap();
+        let files = RunningServerFiles::at(&state).unwrap();
         let claim = files.claim().unwrap().unwrap();
         files
             .publish(
@@ -1978,7 +1975,7 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&state);
         StateStore::open(&state).unwrap();
-        let files = ServerFiles::at(&state).unwrap();
+        let files = RunningServerFiles::at(&state).unwrap();
         let mut hub = test_hub(&files);
         assert!(hub.open_store());
         let writer = rusqlite::Connection::open(state.join("namedrop.sqlite3")).unwrap();
@@ -2068,7 +2065,7 @@ mod tests {
                 )
             })
             .unwrap();
-        let files = ServerFiles::at(&state).unwrap();
+        let files = RunningServerFiles::at(&state).unwrap();
         let mut hub = test_hub(&files);
         let (frames, inbox) = sync_channel(8);
         hub.handle(HubCommand::Subscribe {
@@ -2133,7 +2130,7 @@ mod tests {
                 .map(|_| ())
             })
             .unwrap();
-        let files = ServerFiles::at(&state).unwrap();
+        let files = RunningServerFiles::at(&state).unwrap();
         let mut hub = test_hub(&files);
         let (frames, inbox) = sync_channel(8);
         hub.handle(HubCommand::Subscribe {
@@ -2190,7 +2187,7 @@ mod tests {
                 )
             })
             .unwrap();
-        let files = ServerFiles::at(&state).unwrap();
+        let files = RunningServerFiles::at(&state).unwrap();
         let mut hub = test_hub(&files);
         let key = SpaceKey::of(&namespace);
         let (frames, legacy) = sync_channel(8);
@@ -2275,7 +2272,7 @@ mod tests {
                 )
             })
             .unwrap();
-        let files = ServerFiles::at(&state).unwrap();
+        let files = RunningServerFiles::at(&state).unwrap();
         let mut hub = test_hub(&files);
         let key = SpaceKey::of(&namespace);
         let (frames, legacy) = sync_channel(8);

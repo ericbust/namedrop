@@ -1,5 +1,7 @@
 use super::hub::{Frame, HubCommand, SpaceEvent, Subscription};
-use super::server_files::{ServerFiles, Token, UiSource, open_directory};
+#[cfg(test)]
+use super::server_files::ServerFiles;
+use super::server_files::{RunningServerFiles, Token, UiSource, open_directory};
 use super::snapshot::{self, SpaceKey};
 use crate::{
     StateStore,
@@ -77,7 +79,7 @@ pub(crate) struct Front {
     /// Every multiplexer read the HTTP threads make connects through this.
     pub mux: Arc<dyn MuxConnector>,
     pub port: u16,
-    pub files: ServerFiles,
+    pub files: RunningServerFiles,
     pub token: Token,
     pub session: Token,
     pub instance: String,

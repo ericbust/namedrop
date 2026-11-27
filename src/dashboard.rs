@@ -37,10 +37,10 @@ use crate::{
     mux::{Connector, Depth, MuxConnector, MuxRead, Scope},
 };
 use serde_json::{Value, json};
-use server_files::{ServerFiles, ServerInfo, Token, UiSource};
+use server_files::{RunningServerFiles, ServerFiles, ServerInfo, Token, UiSource};
 use snapshot::{RepoRef, SpaceKey};
 use std::{
-    fs::{self, File},
+    fs::File,
     io::{Read, Write},
     net::{Ipv4Addr, TcpListener, TcpStream},
     path::Path,
@@ -357,11 +357,7 @@ fn run_server(
     ui: UiSource,
     inherit_claim: bool,
 ) -> Result<(), String> {
-    let executable = std::env::current_exe()
-        .and_then(fs::canonicalize)
-        .ok()
-        .filter(|path| path.to_str().is_some());
-    let files = ServerFiles::at(state)?;
+    let files = RunningServerFiles::at(state)?;
     let claim = if inherit_claim {
         files.inherit_claim()?
     } else {
@@ -401,7 +397,7 @@ fn run_server(
             port,
             instance: instance.clone(),
             started_at_ms: hub::now_ms(),
-            executable,
+            executable: files.recorded_executable(),
             ui: ui.clone(),
         },
     )?;
@@ -413,7 +409,7 @@ fn run_server(
     let front = Arc::new(http::Front {
         mux: mux.clone(),
         port,
-        files: ServerFiles::at(state)?,
+        files: files.clone(),
         token: files.token()?,
         session,
         instance: instance.clone(),
