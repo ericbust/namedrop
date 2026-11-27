@@ -561,10 +561,7 @@ impl Hub<'_> {
         let runtime = self.files.state().join("runtime");
         let wants_handoff = if fs::symlink_metadata(runtime.join("migration.json")).is_ok() {
             Some("an update is migrating state")
-        } else if runtime.join("namedrop").exists()
-            && fs::canonicalize(runtime.join("current/namedrop")).ok()
-                != std::env::current_exe().and_then(fs::canonicalize).ok()
-        {
+        } else if self.files.runtime_changed() {
             Some("a newer release is current")
         } else if self
             .store
@@ -1508,7 +1505,10 @@ mod tests {
             std::env::temp_dir().join(format!("namedrop-hub-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&state);
         StateStore::open(&state).unwrap();
-        let files = ServerFiles::at(&state).unwrap();
+        let executable = std::env::current_exe().and_then(fs::canonicalize).unwrap();
+        let files = ServerFiles::at(&state)
+            .unwrap()
+            .with_startup_executable(Some(executable.clone()));
         let claim = files.claim().unwrap().unwrap();
         files
             .publish(
@@ -1518,7 +1518,7 @@ mod tests {
                     port: 0,
                     instance: "test".to_owned(),
                     started_at_ms: now_ms(),
-                    executable: None,
+                    executable: Some(executable),
                     ui: Default::default(),
                 },
             )

@@ -876,6 +876,101 @@ fn upgrade_handoff_keeps_directory_port_and_browser_session() {
 }
 
 #[test]
+fn launcher_started_server_hands_off_after_current_switches() {
+    let dashboard = Dashboard::new();
+    let runtime = dashboard.state().join("runtime");
+    let old = runtime.join("releases").join("a".repeat(64));
+    let new = runtime.join("releases").join("b".repeat(64));
+    for release in [&old, &new] {
+        fs::create_dir_all(release).unwrap();
+        copy_executable(binary::namedrop_path(), release.join("namedrop"));
+        fs::write(
+            release.join("runtime.json"),
+            include_str!("../runtime.json"),
+        )
+        .unwrap();
+    }
+    let launcher = include_str!("../scripts/runtime.py")
+        .split_once("LAUNCHER = '''")
+        .unwrap()
+        .1
+        .split_once("'''")
+        .unwrap()
+        .0;
+    write_executable(runtime.join("namedrop"), launcher);
+    let current = runtime.join("current");
+    symlink(&old, &current).unwrap();
+
+    let ui = dashboard.ui("dist");
+    let opened = dashboard.open(Some(&ui));
+    let first = dashboard.info();
+    let mut events = fix_two_subscribe(&dashboard, &opened);
+    let cookie = dashboard.cookie();
+    let token = fs::read_to_string(dashboard.state().join("dashboard/token")).unwrap();
+    let assert_phase = |info: &Value, restarting: bool| {
+        let response = dashboard.get(&format!("/healthz?t={token}"), false);
+        response.status(200);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&response.body).unwrap(),
+            serde_json::json!({"instance": info["instance"], "restarting": restarting})
+        );
+    };
+    assert_eq!(
+        first["executable"],
+        fs::canonicalize(old.join("namedrop"))
+            .unwrap()
+            .to_str()
+            .unwrap()
+    );
+    assert_phase(&first, false);
+    assert!(doctor_channels_runtime(&dashboard).is_none());
+
+    // An unreadable ownership record pauses the hub's handoff while HTTP still serves.
+    let ownership = dashboard.state().join("dashboard/tailscale.json");
+    fs::write(&ownership, "{").unwrap();
+    let staged = runtime.join("next");
+    symlink(&new, &staged).unwrap();
+    fs::rename(&staged, &current).unwrap();
+
+    assert_phase(&first, true);
+    assert!(
+        doctor_channels_runtime(&dashboard).is_none(),
+        "Doctor warned about a server preparing to hand off"
+    );
+    fs::remove_file(ownership).unwrap();
+
+    let mut line = String::new();
+    loop {
+        line.clear();
+        assert_ne!(
+            events.read_line(&mut line).unwrap(),
+            0,
+            "server closed the stream before announcing its handoff"
+        );
+        if line.starts_with("event: restarting") {
+            break;
+        }
+    }
+    let successor = eventually(|| {
+        let info = dashboard.info();
+        (info["instance"] != first["instance"]).then_some(info)
+    })
+    .expect("upgrade publishes a successor");
+    assert_eq!(
+        successor["executable"],
+        fs::canonicalize(new.join("namedrop"))
+            .unwrap()
+            .to_str()
+            .unwrap()
+    );
+    assert_eq!(successor["port"], first["port"]);
+    assert_eq!(successor["ui"], first["ui"]);
+    assert_eq!(dashboard.cookie(), cookie);
+    assert_eq!(dashboard.open(Some(&ui))["server"], "running");
+    assert_phase(&successor, false);
+}
+
+#[test]
 fn old_embedded_metadata_defaults_to_embedded_and_stale_metadata_does_not_choose_a_ui() {
     let dashboard = Dashboard::new();
     dashboard.open(None);

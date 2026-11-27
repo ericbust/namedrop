@@ -357,11 +357,8 @@ fn run_server(
     ui: UiSource,
     inherit_claim: bool,
 ) -> Result<(), String> {
-    let executable = std::env::current_exe()
-        .and_then(fs::canonicalize)
-        .ok()
-        .filter(|path| path.to_str().is_some());
-    let files = ServerFiles::at(state)?;
+    let executable = std::env::current_exe().and_then(fs::canonicalize).ok();
+    let files = ServerFiles::at(state)?.with_startup_executable(executable.clone());
     let claim = if inherit_claim {
         files.inherit_claim()?
     } else {
@@ -401,7 +398,7 @@ fn run_server(
             port,
             instance: instance.clone(),
             started_at_ms: hub::now_ms(),
-            executable,
+            executable: executable.filter(|path| path.to_str().is_some()),
             ui: ui.clone(),
         },
     )?;
@@ -413,7 +410,7 @@ fn run_server(
     let front = Arc::new(http::Front {
         mux: mux.clone(),
         port,
-        files: ServerFiles::at(state)?,
+        files: files.clone(),
         token: files.token()?,
         session,
         instance: instance.clone(),

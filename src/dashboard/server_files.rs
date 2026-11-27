@@ -204,6 +204,7 @@ pub(crate) fn outdated_runtime(state: &Path) -> Option<(ServerInfo, PathBuf)> {
     let files = ServerFiles {
         state: state.to_path_buf(),
         dir: state.join("dashboard"),
+        startup_executable: None,
     };
     let info = files.info()?;
     if info.executable.as_ref() == Some(&installed) {
@@ -240,9 +241,11 @@ impl Token {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct ServerFiles {
     state: PathBuf,
     dir: PathBuf,
+    startup_executable: Option<PathBuf>,
 }
 
 impl ServerFiles {
@@ -253,7 +256,13 @@ impl ServerFiles {
         Ok(Self {
             state: state.to_path_buf(),
             dir,
+            startup_executable: None,
         })
+    }
+
+    pub fn with_startup_executable(mut self, executable: Option<PathBuf>) -> Self {
+        self.startup_executable = executable;
+        self
     }
 
     pub fn state(&self) -> &Path {
@@ -492,12 +501,15 @@ impl ServerFiles {
         let _ = fs::remove_file(self.dir.join(BIND_FAILURE));
     }
 
-    pub fn restarting(&self) -> bool {
+    pub fn runtime_changed(&self) -> bool {
         let runtime = self.state.join("runtime");
-        fs::symlink_metadata(runtime.join("migration.json")).is_ok()
-            || (runtime.join("namedrop").exists()
-                && fs::canonicalize(runtime.join("current/namedrop")).ok()
-                    != std::env::current_exe().and_then(fs::canonicalize).ok())
+        runtime.join("namedrop").exists()
+            && fs::canonicalize(runtime.join("current/namedrop")).ok() != self.startup_executable
+    }
+
+    pub fn restarting(&self) -> bool {
+        fs::symlink_metadata(self.state.join("runtime/migration.json")).is_ok()
+            || self.runtime_changed()
     }
 
     pub fn handoff(
