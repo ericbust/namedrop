@@ -458,15 +458,9 @@ pub(crate) fn run(
         } else {
             TICK
         };
-        match commands.recv_timeout(wait) {
-            Ok(command) => hub.handle(command),
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => break Verdict::Exit("listener stopped"),
-        }
-        if let Some(verdict) = hub.verdict() {
+        if let Some(verdict) = hub.step(commands.recv_timeout(wait)) {
             break verdict;
         }
-        hub.refresh(None);
     };
     if matches!(verdict, Verdict::Handoff(_)) {
         for subscriber in hub.subscribers.values() {
@@ -479,6 +473,19 @@ pub(crate) fn run(
 }
 
 impl Hub<'_> {
+    fn step(&mut self, next: Result<HubCommand, RecvTimeoutError>) -> Option<Verdict> {
+        match next {
+            Ok(command) => self.handle(command),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return Some(Verdict::Exit("listener stopped")),
+        }
+        if let Some(verdict) = self.verdict() {
+            return Some(verdict);
+        }
+        self.refresh(None);
+        None
+    }
+
     fn handle(&mut self, command: HubCommand) {
         match command {
             HubCommand::Subscribe {
