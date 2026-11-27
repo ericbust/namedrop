@@ -22,7 +22,7 @@ use std::{
     collections::BTreeMap,
     fs::{self, File},
     io::{BufRead, BufReader, Read, Write},
-    net::TcpStream,
+    net::{TcpListener, TcpStream},
     os::{
         fd::{AsRawFd, FromRawFd},
         unix::fs::{PermissionsExt, symlink},
@@ -45,7 +45,13 @@ impl Dashboard {
         let herdr = directory.path().join("herdr");
         write_executable(
             &herdr,
-            "#!/bin/sh\nprintf '{\"result\":{\"workspace\":{\"label\":\"test\"}}}'\n",
+            r#"#!/bin/sh
+case "$1 $2" in
+  'worktree list') printf '%s\n' '{"error":{"code":"not_git_worktree"}}' >&2; exit 1 ;;
+  'pane list') printf '%s\n' '{"result":{"panes":[]}}' ;;
+  *) printf '%s\n' '{"result":{"workspace":{"label":"test"}}}' ;;
+esac
+"#,
         );
         Self { directory }
     }
@@ -70,6 +76,15 @@ impl Dashboard {
     }
 
     fn command_named(&self, ui: Option<&Path>, name: &str, human: bool) -> Command {
+        let mut command = self.namedrop(human);
+        command.args([name, "--no-open"]);
+        if let Some(path) = ui {
+            command.arg("--ui").arg(path);
+        }
+        command
+    }
+
+    fn namedrop(&self, human: bool) -> Command {
         let mut command = crate::binary::namedrop();
         command
             .current_dir(self.root())
@@ -77,16 +92,12 @@ impl Dashboard {
             .args([if human { "--human" } else { "--json" }, "--plugin-state"])
             .arg(self.state())
             .args(["--herdr-socket", "assets-test", "--herdr-workspace", "w1"])
-            .args([name, "--no-open"])
             .env_remove("HERDR_PANE_ID")
             .env_remove("HERDR_WORKSPACE_ID")
             .env_remove("HERDR_SOCKET_PATH")
             .env_remove("HERDR_PLUGIN_STATE_DIR")
             .env("HERDR_BIN_PATH", self.root().join("herdr"))
             .env("NAMEDROP_DASHBOARD_IDLE_MS", "10000");
-        if let Some(path) = ui {
-            command.arg("--ui").arg(path);
-        }
         command
     }
 
@@ -896,6 +907,226 @@ fn old_embedded_metadata_defaults_to_embedded_and_stale_metadata_does_not_choose
     stale.open(None);
     assert_eq!(stale.info()["ui"], "Embedded");
     assert_eq!(stale.get("/", true).body, INDEX_HTML);
+}
+
+fn select_doctor_runtime(dashboard: &Dashboard, executable: &Path) -> PathBuf {
+    let runtime = dashboard.state().join("runtime");
+    let release = executable.parent().unwrap();
+    fs::create_dir_all(&runtime).unwrap();
+    let staged = runtime.join("next");
+    symlink(release, &staged).unwrap();
+    fs::rename(staged, runtime.join("current")).unwrap();
+    fs::canonicalize(runtime.join("current/namedrop")).unwrap()
+}
+
+fn doctor_channels_runtime(dashboard: &Dashboard) -> Option<Value> {
+    let output = dashboard.namedrop(false).arg("doctor").output().unwrap();
+    assert!(matches!(output.status.code(), Some(0 | 1)), "{output:?}");
+    let result: Value =
+        serde_json::from_slice(&output.stdout).unwrap_or_else(|_| panic!("{output:?}"));
+    result["data"]["issues"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{result}"))
+        .iter()
+        .find(|issue| issue["code"] == "ND-CHANNELS-002")
+        .cloned()
+}
+
+fn record_previous_doctor_server(dashboard: &Dashboard, pid: u32, port: u16) -> File {
+    let installed = select_doctor_runtime(dashboard, Path::new(binary::namedrop_path()));
+    let directory = dashboard.state().join("dashboard");
+    fs::create_dir(&directory).unwrap();
+    let record = serde_json::json!({
+        "pid": pid,
+        "port": port,
+        "instance": "previous",
+        "started_at_ms": 0,
+        "executable": installed.with_file_name("old-namedrop"),
+    });
+    fs::write(directory.join("server.json"), record.to_string()).unwrap();
+    fs::write(directory.join("token"), "ab".repeat(32)).unwrap();
+    File::create(directory.join("server.lock")).unwrap()
+}
+
+#[test]
+fn doctor_channels_runtime_ignores_a_restarting_server() {
+    let dashboard = Dashboard::new();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let claim = record_previous_doctor_server(
+        &dashboard,
+        std::process::id(),
+        listener.local_addr().unwrap().port(),
+    );
+    claim.try_lock().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) =
+            eventually(|| listener.accept().ok()).expect("Doctor probed /healthz");
+        stream.set_nonblocking(false).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut request = BufReader::new(&mut stream);
+        let mut line = String::new();
+        request.read_line(&mut line).unwrap();
+        assert_eq!(
+            line,
+            format!("GET /healthz?t={} HTTP/1.1\r\n", "ab".repeat(32))
+        );
+        loop {
+            line.clear();
+            assert_ne!(request.read_line(&mut line).unwrap(), 0);
+            if line == "\r\n" {
+                break;
+            }
+        }
+        stream.write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{\"instance\":\"previous\",\"restarting\":true}").unwrap();
+    });
+
+    let issue = doctor_channels_runtime(&dashboard);
+    server.join().unwrap();
+    assert!(issue.is_none(), "Doctor warned during handoff: {issue:?}");
+}
+
+#[test]
+fn doctor_channels_runtime_ignores_a_record_with_a_dead_pid_and_unheld_lock() {
+    let dashboard = Dashboard::new();
+    let mut exited = binary::command("true").spawn().unwrap();
+    assert!(exited.wait().unwrap().success());
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let _unheld = record_previous_doctor_server(
+        &dashboard,
+        exited.id(),
+        listener.local_addr().unwrap().port(),
+    );
+    drop(listener);
+
+    assert!(doctor_channels_runtime(&dashboard).is_none());
+}
+
+#[test]
+fn doctor_channels_runtime_times_out_waiting_for_a_server_that_does_not_answer() {
+    let dashboard = Dashboard::new();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let _unheld = record_previous_doctor_server(
+        &dashboard,
+        std::process::id(),
+        listener.local_addr().unwrap().port(),
+    );
+    let started = Instant::now();
+    assert!(doctor_channels_runtime(&dashboard).is_none());
+    let elapsed = started.elapsed();
+    listener.set_nonblocking(true).unwrap();
+    listener
+        .accept()
+        .expect("Doctor probed the unresponsive port");
+    assert!(
+        (Duration::from_millis(800)..Duration::from_secs(5)).contains(&elapsed),
+        "Doctor should wait about one second for /healthz, took {elapsed:?}"
+    );
+}
+
+#[test]
+fn doctor_channels_runtime_warns_after_current_switches() {
+    let dashboard = Dashboard::new();
+    let running = select_doctor_runtime(&dashboard, Path::new(binary::namedrop_path()));
+    dashboard.open(None);
+    let pid = dashboard.info()["pid"].as_u64().unwrap();
+    let replacement = dashboard.root().join("new release/namedrop");
+    fs::create_dir_all(replacement.parent().unwrap()).unwrap();
+    copy_executable(binary::namedrop_path(), &replacement);
+    let installed = select_doctor_runtime(&dashboard, &replacement);
+
+    let issue = doctor_channels_runtime(&dashboard)
+        .expect("Doctor should warn about the previous Channels runtime");
+    assert_eq!(issue["severity"], "notice");
+    assert_eq!(issue["diagnostic"]["pid"], pid);
+    assert_eq!(
+        issue["diagnostic"]["running_executable"],
+        running.to_str().unwrap()
+    );
+    assert_eq!(
+        issue["diagnostic"]["installed_executable"],
+        installed.to_str().unwrap()
+    );
+    assert_eq!(issue["repair"]["kind"], "human_decision");
+    let prompt = issue["repair"]["prompt"].as_str().unwrap();
+    assert!(
+        prompt.contains(&format!("`ps -ww -o command= -p {pid}`")),
+        "{prompt}"
+    );
+    assert!(prompt.contains(&format!("`kill {pid}`")), "{prompt}");
+    assert!(prompt.contains("`namedrop channels`"), "{prompt}");
+}
+
+#[test]
+fn doctor_channels_runtime_accepts_the_current_server() {
+    let dashboard = Dashboard::new();
+    let installed = select_doctor_runtime(&dashboard, Path::new(binary::namedrop_path()));
+    dashboard.open(None);
+    assert_eq!(dashboard.info()["executable"], installed.to_str().unwrap());
+    assert!(doctor_channels_runtime(&dashboard).is_none());
+}
+
+#[test]
+fn doctor_channels_runtime_ignores_an_absent_server() {
+    let dashboard = Dashboard::new();
+    let installed = select_doctor_runtime(&dashboard, Path::new(binary::namedrop_path()));
+    let directory = dashboard.state().join("dashboard");
+    assert!(doctor_channels_runtime(&dashboard).is_none());
+    assert!(!directory.exists());
+
+    // Copy the full record of a live but unrelated instance into this state.
+    let other = Dashboard::new();
+    other.open(None);
+    let mut record = other.info();
+    record["executable"] = serde_json::json!(installed.with_file_name("old-namedrop"));
+    fs::create_dir(&directory).unwrap();
+    fs::write(directory.join("server.json"), record.to_string()).unwrap();
+    assert!(doctor_channels_runtime(&dashboard).is_none());
+    assert!(!directory.join("server.lock").exists());
+    assert!(!directory.join("token").exists());
+
+    // A claim and a recycled address still do not match the recorded instance.
+    let claim = File::create(directory.join("server.lock")).unwrap();
+    claim.try_lock().unwrap();
+    fs::copy(
+        other.state().join("dashboard/token"),
+        directory.join("token"),
+    )
+    .unwrap();
+    record["instance"] = "stale".into();
+    fs::write(directory.join("server.json"), record.to_string()).unwrap();
+    assert!(doctor_channels_runtime(&dashboard).is_none());
+}
+
+#[test]
+fn doctor_channels_runtime_handles_old_server_records() {
+    let dashboard = Dashboard::new();
+    select_doctor_runtime(&dashboard, Path::new(binary::namedrop_path()));
+    dashboard.open(None);
+    let info = dashboard.info();
+    let legacy = serde_json::json!({
+        "pid": info["pid"],
+        "port": info["port"],
+        "instance": info["instance"],
+        "started_at_ms": info["started_at_ms"],
+    });
+    let metadata = dashboard.state().join("dashboard/server.json");
+    let staged_metadata = metadata.with_extension("json.tmp");
+    fs::write(&staged_metadata, legacy.to_string()).unwrap();
+    fs::rename(staged_metadata, metadata).unwrap();
+
+    let issue = doctor_channels_runtime(&dashboard)
+        .expect("Doctor should flag a live legacy Channels record");
+    assert_eq!(issue["severity"], "notice");
+    assert_eq!(
+        issue["summary"],
+        "Doctor cannot verify the Channels server runtime."
+    );
+    assert_eq!(issue["diagnostic"]["pid"], legacy["pid"]);
+    assert!(issue["diagnostic"]["running_executable"].is_null());
+    assert_eq!(dashboard.open(None)["server"], "running");
 }
 
 #[test]

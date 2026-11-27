@@ -193,8 +193,31 @@ pub(crate) struct ServerInfo {
     pub port: u16,
     pub instance: String,
     pub started_at_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable: Option<PathBuf>,
     #[serde(default)]
     pub ui: UiSource,
+}
+
+pub(crate) fn outdated_runtime(state: &Path) -> Option<(ServerInfo, PathBuf)> {
+    let installed = fs::canonicalize(state.join("runtime/current/namedrop")).ok()?;
+    let files = ServerFiles {
+        state: state.to_path_buf(),
+        dir: state.join("dashboard"),
+    };
+    let info = files.info()?;
+    if info.executable.as_ref() == Some(&installed) {
+        return None;
+    }
+    let token = fs::read_to_string(files.dir.join("token")).ok()?;
+    if token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    matches!(
+        super::answers(&info, &Token(token)),
+        Some(super::ServerPhase::Running)
+    )
+    .then_some((info, installed))
 }
 
 /// Held for the server's lifetime; the kernel releases it on any exit, so a

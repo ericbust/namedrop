@@ -389,6 +389,18 @@ Doctor on Rex reports `ND-INTEGRATION-003` when an installed Codex or Claude Cod
 | Repair | When the program can run, "To run another program, such as a launcher that selects another Claude Code account, set claude_command in the Namedrop settings file to its name on PATH or its absolute path." When the calls cannot run, "Fix claude_command or the Namedrop settings file that holds it, then run Doctor again. Namedrop never runs claude in its place." |
 | Diagnostic | `path`: the file the finding is about. That is the settings file that sets `claude_command`, or, when the calls cannot run, the file or link the reason names, such as `runtime/owner` in the state directory for an owner that cannot be read. It is `null` for the default `claude`, for `NAMEDROP_AGENT_STATUS_CLAUDE_BIN`, and when the settings file cannot be located because there is no `HOME` |
 
+### ND-CHANNELS-002
+
+Doctor reports this in Herdr and Rex when a running Channels server's executable differs from the one selected by `runtime/current`, or when the running server did not record its executable. Doctor skips a server that reports a restart in progress.
+
+| Field | Text |
+|---|---|
+| Severity | `notice` |
+| Summary | "Channels is running a previous Namedrop runtime." or "Doctor cannot verify the Channels server runtime." |
+| Explanation | The paths of the running and installed executables. For an older record, "The running server did not record its executable." |
+| Repair | When nothing is being sent, run `ps -ww -o command= -p <pid>`. If it shows `namedrop` running `dashboard-server`, run `kill <pid>`. Then run `namedrop channels`. |
+| Diagnostic | `pid`, `running_executable` (`null` for a record without the executable), and `installed_executable` |
+
 ### ND-SESSION-002
 
 | Field | Text |

@@ -19,7 +19,7 @@ pub(crate) mod tailscale;
 mod thread_controls;
 
 pub(crate) use images::DIRECTORY as CHANNEL_IMAGES_DIRECTORY;
-pub(crate) use server_files::current_operator_session;
+pub(crate) use server_files::{current_operator_session, outdated_runtime};
 
 /// Internal child entry point. A private stdin pipe ties an observer to its
 /// dashboard's lifetime, including a quiet terminal after dashboard SIGKILL.
@@ -40,7 +40,7 @@ use serde_json::{Value, json};
 use server_files::{ServerFiles, ServerInfo, Token, UiSource};
 use snapshot::{RepoRef, SpaceKey};
 use std::{
-    fs::File,
+    fs::{self, File},
     io::{Read, Write},
     net::{Ipv4Addr, TcpListener, TcpStream},
     path::Path,
@@ -280,12 +280,14 @@ enum ServerPhase {
     Restarting,
 }
 
-/// Liveness is the claim plus this instance answering on its port; a stale
-/// `server.json` from a crashed server never matches.
+/// Checks that the recorded instance answers on its port.
 fn answers(info: &ServerInfo, token: &Token) -> Option<ServerPhase> {
     let probe = || -> std::io::Result<String> {
-        let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, info.port))?;
-        stream.set_read_timeout(Some(Duration::from_secs(1)))?;
+        let timeout = Duration::from_secs(1);
+        let addr = (Ipv4Addr::LOCALHOST, info.port).into();
+        let mut stream = TcpStream::connect_timeout(&addr, timeout)?;
+        stream.set_read_timeout(Some(timeout))?;
+        stream.set_write_timeout(Some(timeout))?;
         write!(
             stream,
             "GET /healthz?t={} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n",
@@ -355,6 +357,10 @@ fn run_server(
     ui: UiSource,
     inherit_claim: bool,
 ) -> Result<(), String> {
+    let executable = std::env::current_exe()
+        .and_then(fs::canonicalize)
+        .ok()
+        .filter(|path| path.to_str().is_some());
     let files = ServerFiles::at(state)?;
     let claim = if inherit_claim {
         files.inherit_claim()?
@@ -395,6 +401,7 @@ fn run_server(
             port,
             instance: instance.clone(),
             started_at_ms: hub::now_ms(),
+            executable,
             ui: ui.clone(),
         },
     )?;

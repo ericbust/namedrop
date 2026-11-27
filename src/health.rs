@@ -166,7 +166,48 @@ where
         check.diagnostic = serde_json::json!({"idle": idle.json()});
         report.issues.push(check);
     }
+    if let Some(check) = channels_runtime_issue(runtime.state_directory) {
+        if report.status == HealthStatus::Healthy {
+            report.status = HealthStatus::NeedsAttention;
+        }
+        report.issues.push(check);
+    }
     report
+}
+
+fn channels_runtime_issue(state: &std::path::Path) -> Option<HealthIssue> {
+    let (server, installed) = crate::dashboard::outdated_runtime(state)?;
+    let (summary, explanation) = match &server.executable {
+        Some(running) => (
+            "Channels is running a previous Namedrop runtime.",
+            format!(
+                "The running server started from {}. The installation now selects {}.",
+                running.display(),
+                installed.display()
+            ),
+        ),
+        None => (
+            "Doctor cannot verify the Channels server runtime.",
+            "The running server did not record its executable.".to_owned(),
+        ),
+    };
+    let pid = server.pid;
+    let mut check = issue(
+        "ND-CHANNELS-002",
+        HealthSeverity::Notice,
+        summary,
+        &explanation,
+        HealthRepairKind::HumanDecision,
+        &format!(
+            "When nothing is being sent, run `ps -ww -o command= -p {pid}`. If it shows `namedrop` running `dashboard-server`, run `kill {pid}`. Then run `namedrop channels`."
+        ),
+    );
+    check.diagnostic = serde_json::json!({
+        "pid": pid,
+        "running_executable": server.executable,
+        "installed_executable": installed.display().to_string(),
+    });
+    Some(check)
 }
 
 fn diagnose_space<M, C, I>(runtime: &LifecycleRuntime<'_, M, C, I>) -> HealthReport

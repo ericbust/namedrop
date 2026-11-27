@@ -1518,6 +1518,7 @@ mod tests {
                     port: 0,
                     instance: "test".to_owned(),
                     started_at_ms: now_ms(),
+                    executable: None,
                     ui: Default::default(),
                 },
             )
@@ -1935,6 +1936,7 @@ mod tests {
                     port: 0,
                     instance: "test".to_owned(),
                     started_at_ms: now_ms(),
+                    executable: None,
                     ui: Default::default(),
                 },
             )
