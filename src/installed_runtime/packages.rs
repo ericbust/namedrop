@@ -277,11 +277,10 @@ fn locked(
         },
     };
     let local = lock(&runtime.join("packages.lock"), "runtime package lock")?;
-    let selected =
-        fs::canonicalize(runtime.join("current/namedrop")).map_err(|error| error.to_string())?;
-    let running = super::executable_image().map_err(|error| error.to_string())?;
+    let selected = super::running_executable_matches(&runtime.join("current/namedrop"))
+        .map_err(|error| error.to_string())?;
     let verdict = match home {
-        _ if selected != running => Verdict::Leave,
+        _ if !selected => Verdict::Leave,
         Some(home) => decide(mine, state, home, writer)?,
         None => Verdict::Write,
     };

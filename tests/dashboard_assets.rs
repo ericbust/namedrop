@@ -1161,6 +1161,17 @@ fn doctor_channels_runtime_accepts_the_current_server() {
     dashboard.open(None);
     assert_eq!(dashboard.info()["executable"], installed.to_str().unwrap());
     assert!(doctor_channels_runtime(&dashboard).is_none());
+    #[cfg(target_os = "macos")]
+    {
+        let alias = Path::new("/System/Volumes/Data").join(installed.strip_prefix("/").unwrap());
+        let mut info = dashboard.info();
+        info["executable"] = serde_json::json!(alias);
+        let dir = dashboard.state().join("dashboard");
+        let staged = dir.join("server.next");
+        fs::write(&staged, info.to_string()).unwrap();
+        fs::rename(staged, dir.join("server.json")).unwrap();
+        assert!(doctor_channels_runtime(&dashboard).is_none());
+    }
 }
 
 #[test]

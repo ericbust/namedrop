@@ -218,8 +218,10 @@ pub fn run_clock(state: &Path, socket: &str) -> Result<(), String> {
             return ensure_clock(state, Some(socket), crate::daemon::Starter::Caller);
         }
         let selected = selected_executable(state)?;
-        let changed =
-            fs::canonicalize(&selected).ok() != installed_runtime::executable_image().ok();
+        let changed = !installed_runtime::running_executable_matches(&selected).unwrap_or(false);
+        if !changed {
+            installed_runtime::forget_reexec_attempt();
+        }
         if changed
             || !plan.due.is_empty()
             || !plan.catch_up.is_empty()

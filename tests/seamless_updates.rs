@@ -171,7 +171,7 @@ fn linux_preflight_requires_landlock_and_named_prerequisites() {
     assert!(out.contains("missing required: codex\n"), "{out}");
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn command_gate_rechecks_the_running_image() {
     let output = crate::binary::command("python3")

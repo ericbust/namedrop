@@ -39,6 +39,12 @@ use std::{os::unix::fs::PermissionsExt, time::SystemTime};
 type Runtime<'a> = LifecycleRuntime<'a, Arc<dyn Mux>, SystemClock, ProcessIds>;
 
 fn main() -> ExitCode {
+    let attempt = env::var_os(namedrop::RUNTIME_REEXEC_ATTEMPT);
+    if attempt.is_some() {
+        // SAFETY: no threads have started yet.
+        unsafe { env::remove_var(namedrop::RUNTIME_REEXEC_ATTEMPT) };
+    }
+    namedrop::runtime_remember_reexec_attempt(attempt);
     let inherited: &dyn Inherited = &namedrop::mux::home::ThisProcess;
     // The contract query reads no state and makes no Rex call, so an
     // updater can ask it of any runtime, a retired state's included.
@@ -173,14 +179,13 @@ fn main() -> ExitCode {
                     && inherited.dev() == expected.dev()
                     && inherited.ino() == expected.ino()
             });
-        let selected_image =
-            fs::canonicalize(state.join("runtime/current/namedrop")).is_ok_and(|selected| {
-                namedrop::runtime_executable_image().is_ok_and(|image| image == selected)
-            });
         if !state.is_absolute()
             || !gate_matches
             || !state.join("runtime/migration.json").is_file()
-            || !selected_image
+            || !namedrop::runtime_running_executable_matches(
+                &state.join("runtime/current/namedrop"),
+            )
+            .unwrap_or(false)
         {
             eprintln!(
                 "State migration requires the selected runtime, inherited command gate, and a pending activation."

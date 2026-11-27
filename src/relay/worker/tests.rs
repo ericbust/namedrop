@@ -2514,11 +2514,36 @@ fn a_worker_works_again_for_an_item_queued_as_it_lets_go() {
                     .unwrap();
             }
         }
+        true
     });
     assert_eq!(runs, 2);
     let mut again = 0;
-    crate::relay::hold(&space.state, &endpoint, "devbox", &mut || again += 1);
+    crate::relay::hold(&space.state, &endpoint, "devbox", &mut || {
+        again += 1;
+        true
+    });
     assert_eq!(again, 1, "with nothing queued it works once");
+}
+
+#[test]
+fn a_refused_runtime_handoff_stops_the_relay_before_opening_its_store() {
+    let space = Space::new(REX);
+    let endpoint = Endpoint::parse(REX);
+    let calls = std::cell::Cell::new(0);
+    work(&mut Run {
+        state: &space.state,
+        endpoint: &endpoint,
+        label: "devbox",
+        gate: &|| {
+            calls.set(calls.get() + 1);
+            Err("launcher kept the old runtime".to_owned())
+        },
+        pause: &mut |_| panic!("worker retried after a failed runtime check"),
+        woken: &std::cell::RefCell::default(),
+        wake: &mut |_| panic!("worker woke a pane after a failed runtime check"),
+    });
+    assert_eq!(calls.get(), 1);
+    assert!(!space.state.join("relay.sqlite3").exists());
 }
 
 /// B's `host_id` is read again each round, so an item sent after the

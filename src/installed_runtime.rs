@@ -10,10 +10,13 @@ pub(crate) fn test_package_lease() -> PackageLease {
 }
 use sha2::Digest;
 use std::{
-    env, fs, io,
-    os::unix::fs::OpenOptionsExt,
+    env,
+    ffi::OsString,
+    fs, io,
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
     process::Command,
+    sync::{Mutex, OnceLock},
 };
 
 /// Hold across the command, including dispatch and shared package writes. The
@@ -127,6 +130,7 @@ pub fn reexec_if_replaced(state: &std::path::Path) -> Result<(), String> {
 pub(crate) fn replacement(state: &Path) -> Result<Option<Command>, String> {
     let launcher = state.join("runtime/namedrop");
     if !launcher.exists() {
+        forget_reexec_attempt();
         return Ok(None);
     }
     Ok(
@@ -138,26 +142,90 @@ pub(crate) fn replacement(state: &Path) -> Result<Option<Command>, String> {
 }
 
 pub(crate) fn reexec_command(launcher: &Path, selected: &Path) -> Result<Option<Command>, String> {
-    let running = executable_image().map_err(|error| error.to_string())?;
-    let selected = fs::canonicalize(selected).map_err(|error| error.to_string())?;
-    if running == selected {
+    let identity = ExecutableIdentity::read(selected).map_err(|error| error.to_string())?;
+    let mut previous = incoming_reexec().lock().unwrap();
+    if identity.is_running() {
+        previous.take();
         return Ok(None);
     }
 
-    // exec preserves the PID. A child process inherits the marker but has a
-    // different PID, and a later runtime selection has a different target.
-    const ATTEMPT: &str = "NAMEDROP_RUNTIME_REEXEC";
-    let mut attempt = std::ffi::OsString::from(format!("{}:", std::process::id()));
-    attempt.push(&selected);
-    if env::var_os(ATTEMPT).as_ref() == Some(&attempt) {
+    // A retry of a rejected hop must wait for a different selection.
+    let attempt = reexec_attempt_marker(identity);
+    if previous.as_ref() == Some(&attempt) {
         return Err(format!(
             "The launcher did not select {}. The previous executable is still running.",
             selected.display()
         ));
     }
+    previous.take();
     let mut command = Command::new(launcher);
-    command.env(ATTEMPT, attempt);
+    command.env(REEXEC_ATTEMPT, attempt);
     Ok(Some(command))
+}
+
+pub const REEXEC_ATTEMPT: &str = "NAMEDROP_RUNTIME_REEXEC";
+static INCOMING_REEXEC: OnceLock<Mutex<Option<OsString>>> = OnceLock::new();
+
+pub fn remember_reexec_attempt(attempt: Option<OsString>) {
+    let _ = INCOMING_REEXEC.set(Mutex::new(attempt));
+}
+
+fn incoming_reexec() -> &'static Mutex<Option<OsString>> {
+    INCOMING_REEXEC.get_or_init(|| Mutex::new(env::var_os(REEXEC_ATTEMPT)))
+}
+
+pub(crate) fn forget_reexec_attempt() {
+    incoming_reexec().lock().unwrap().take();
+}
+
+fn reexec_attempt_marker(identity: ExecutableIdentity) -> OsString {
+    format!(
+        "{}:{}:{}",
+        std::process::id(),
+        identity.device,
+        identity.inode
+    )
+    .into()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ExecutableIdentity {
+    device: u64,
+    inode: u64,
+}
+
+impl ExecutableIdentity {
+    pub(crate) fn read(path: &Path) -> io::Result<Self> {
+        let metadata = fs::metadata(path)?;
+        Ok(Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+
+    pub(crate) fn running() -> io::Result<Self> {
+        #[cfg(target_os = "linux")]
+        {
+            // The kernel link can still be statted after its file is unlinked.
+            Self::read(Path::new("/proc/self/exe"))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Self::read(&executable_image()?)
+        }
+    }
+
+    pub(crate) fn matches(self, other: Option<Self>) -> bool {
+        other == Some(self)
+    }
+
+    fn is_running(self) -> bool {
+        self.matches(Self::running().ok())
+    }
+}
+
+pub fn running_executable_matches(path: &Path) -> io::Result<bool> {
+    Ok(ExecutableIdentity::read(path)?.is_running())
 }
 
 /// The running executable image. On macOS current_exe can point through the
@@ -329,5 +397,5 @@ pub fn package_refusal(home: Option<&std::path::Path>, state: &std::path::Path) 
     packages::refusal_notice(home, state)
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod image_tests;

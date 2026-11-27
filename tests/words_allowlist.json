@@ -833,7 +833,7 @@
       "file": "src/daemon.rs",
       "reason": "An environment or config name read or set, never printed.",
       "literals": [
-        [61, "NAMEDROP_HERDR_TIMEOUT_MS"]
+        [62, "NAMEDROP_HERDR_TIMEOUT_MS"]
       ]
     },
     {
@@ -1053,11 +1053,11 @@
       "file": "src/main.rs",
       "reason": "Herdr's plugin event hook, which Herdr alone sends.",
       "literals": [
-        [1374, "HERDR_PLUGIN_EVENT_JSON"],
-        [1388, "HERDR_PLUGIN_EVENT"],
-        [1389, "HERDR_PLUGIN_EVENT is required for an event hook"],
-        [1782, "HERDR_PLUGIN_EVENT_JSON"],
-        [1783, "HERDR_PLUGIN_EVENT_JSON is required for an event hook"]
+        [1379, "HERDR_PLUGIN_EVENT_JSON"],
+        [1393, "HERDR_PLUGIN_EVENT"],
+        [1394, "HERDR_PLUGIN_EVENT is required for an event hook"],
+        [1787, "HERDR_PLUGIN_EVENT_JSON"],
+        [1788, "HERDR_PLUGIN_EVENT_JSON is required for an event hook"]
       ]
     },
     {
@@ -1065,7 +1065,7 @@
       "file": "src/main.rs",
       "reason": "An environment or config name read or set, never printed.",
       "literals": [
-        [1627, "PLUGIN_ROOT"]
+        [1632, "PLUGIN_ROOT"]
       ]
     },
     {
@@ -1073,7 +1073,7 @@
       "file": "src/main.rs",
       "reason": "An internal invariant that no input reaches.",
       "literals": [
-        [1481, "a Herdr home has a location"]
+        [1486, "a Herdr home has a location"]
       ]
     },
     {
@@ -1081,7 +1081,7 @@
       "file": "src/main.rs",
       "reason": "The hidden dashboard-server's own argv, which `channels` builds with a state.",
       "literals": [
-        [1723, "--plugin-state, HERDR_PLUGIN_STATE_DIR or NAMEDROP_STATE_DIR is required"]
+        [1728, "--plugin-state, HERDR_PLUGIN_STATE_DIR or NAMEDROP_STATE_DIR is required"]
       ]
     },
     {

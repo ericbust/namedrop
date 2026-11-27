@@ -75,7 +75,9 @@ pub(crate) fn work(run: &mut Run<'_>) {
         }
         // An update while the worker waited selects another runtime, which
         // takes the worker's place before it does anything more.
-        drop((run.gate)());
+        if (run.gate)().is_err() {
+            return;
+        }
         let wait = {
             let woken = run.woken;
             let mut once = |space: &SpaceId| {

@@ -240,6 +240,7 @@ struct FakeHost {
     spawned: Vec<String>,
     pids: Vec<u32>,
     replaced: bool,
+    reexec_error: Option<&'static str>,
     workers: Workers,
     /// When the bridge started the relay's workers, and how often it does.
     relay_starts: Vec<Instant>,
@@ -279,7 +280,8 @@ impl Host for FakeHost {
         if self.replaced {
             std::panic::resume_unwind(Box::new(Replaced));
         }
-        Ok(())
+        self.reexec_error
+            .map_or(Ok(()), |error| Err(error.to_owned()))
     }
 
     fn start_relay_workers(&mut self) {
@@ -1706,6 +1708,28 @@ fn an_unreadable_store_owes_one_resync_of_every_space_not_one_per_space() {
     flush(&state.0, &endpoint(), &mut pending, &mut host, &lock);
     assert_eq!(state.queued("session:s"), [resync("session:s")]);
     assert_eq!(state.queued("session:t"), [resync("session:t")]);
+}
+
+#[test]
+fn a_refused_runtime_handoff_stops_the_bridge_before_queueing() {
+    let state = State::new();
+    let lock = take(&state);
+    let mut host = FakeHost {
+        reexec_error: Some("launcher kept the old runtime"),
+        ..Default::default()
+    };
+    let mut pending = Pending::default();
+    pending.resync_every_space(Instant::now());
+    assert!(!flush(
+        &state.0,
+        &endpoint(),
+        &mut pending,
+        &mut host,
+        &lock
+    ));
+    assert!(state.queued("session:s").is_empty());
+    assert!(host.spawned.is_empty());
+    assert!(pending.due().is_none());
 }
 
 /// A flush that could not queue tries again a second later, even as new

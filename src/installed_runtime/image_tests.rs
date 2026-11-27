@@ -17,6 +17,13 @@ fn release(state: &Path, digit: &str) -> PathBuf {
         .join("namedrop")
 }
 
+fn select(state: &Path, digit: &str) {
+    let runtime = state.join("runtime");
+    let next = runtime.join("next");
+    std::os::unix::fs::symlink(release(state, digit).parent().unwrap(), &next).unwrap();
+    fs::rename(next, runtime.join("current")).unwrap();
+}
+
 fn until(mut ready: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(8);
     while !ready() {
@@ -81,9 +88,7 @@ fn through_launcher(test: &str, check: impl FnOnce(&Path)) {
             .unwrap(),
     );
     until(|| state.join("ready").is_file());
-    let next = runtime.join("next");
-    std::os::unix::fs::symlink(new.parent().unwrap(), &next).unwrap();
-    fs::rename(next, runtime.join("current")).unwrap();
+    select(state, "b");
     fs::write(state.join("switched"), []).unwrap();
     let mut status = None;
     until(|| {
@@ -97,10 +102,16 @@ fn through_launcher(test: &str, check: impl FnOnce(&Path)) {
 #[test]
 fn executable_image_stays_with_the_running_release() {
     through_launcher("executable_image_stays_with_the_running_release", |state| {
-        assert_eq!(
-            executable_image().unwrap(),
-            fs::canonicalize(release(state, "a")).unwrap()
-        );
+        let old = release(state, "a");
+        assert_eq!(executable_image().unwrap(), fs::canonicalize(&old).unwrap());
+        let identity = ExecutableIdentity::read(&old).unwrap();
+        assert_eq!(ExecutableIdentity::running().unwrap(), identity);
+        assert!(!identity.matches(ExecutableIdentity::read(&release(state, "b")).ok()));
+        #[cfg(target_os = "linux")]
+        {
+            fs::remove_file(old).unwrap();
+            assert_eq!(ExecutableIdentity::running().unwrap(), identity);
+        }
     });
 }
 
@@ -113,4 +124,36 @@ fn replaced_helper_runs_the_selected_image() {
             Some(fs::canonicalize(release(state, "b")).unwrap())
         );
     });
+}
+
+#[test]
+fn a_startup_match_consumes_the_previous_exec_attempt() {
+    through_launcher(
+        "a_startup_match_consumes_the_previous_exec_attempt",
+        |state| {
+            let attempted = ExecutableIdentity::read(&release(state, "b")).unwrap();
+            remember_reexec_attempt(Some(reexec_attempt_marker(attempted)));
+            select(state, "a");
+            assert!(replacement(state).unwrap().is_none());
+            select(state, "b");
+            assert!(replacement(state).unwrap().is_some());
+        },
+    );
+}
+
+#[test]
+fn retrying_a_refused_exec_waits_for_a_different_selection() {
+    through_launcher(
+        "retrying_a_refused_exec_waits_for_a_different_selection",
+        |state| {
+            let attempted = ExecutableIdentity::read(&release(state, "b")).unwrap();
+            remember_reexec_attempt(Some(reexec_attempt_marker(attempted)));
+            assert!(replacement(state).unwrap_err().contains("still running"));
+            assert!(replacement(state).unwrap_err().contains("still running"));
+            select(state, "a");
+            assert!(replacement(state).unwrap().is_none());
+            select(state, "b");
+            assert!(replacement(state).unwrap().is_some());
+        },
+    );
 }
