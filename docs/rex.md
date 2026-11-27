@@ -183,7 +183,7 @@ To turn off the check, create `~/.config/namedrop/settings.json` with this conte
 {"check_for_updates": false}
 ```
 
-Agent-status summaries and persona suggestions run `claude` with the environment of the Rex server. To use another Claude Code account for them, add `claude_command` to the same file, the one your install reads. Set it to a program name on the server's `PATH` or an absolute path, such as a launcher that selects another Claude Code account:
+For agent-status summaries, persona suggestions and channel routing, Namedrop looks for `claude` on the Rex server's `PATH`, then in `~/.local/bin`. To use another Claude Code account for them, add `claude_command` to the same file, the one your install reads. Set it to a program name on the server's `PATH` or an absolute path, such as a launcher that selects another Claude Code account:
 
 ```json
 {"claude_command": "/path/to/your-launcher"}
