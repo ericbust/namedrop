@@ -796,7 +796,7 @@ Update checks use `settings.json` in that plugin configuration directory: `$XDG_
 Namedrop runs Claude Code itself for agent-status summaries, persona suggestions and channel routing, and starts it in the panes that Channels' **Add agent** opens. By default it runs `claude` from the `PATH` of the Namedrop process that makes the request: a screen that Herdr or Rex opens, or the Channels server. That process's environment then decides which Claude Code account the request uses. For **Add agent**, the new pane's shell finds `claude` on its own `PATH`, and its environment decides the account. To choose the account yourself, set `claude_command` in the same `settings.json`, for example to a launcher that selects another Claude Code account:
 
 ```json
-{"claude_command": "claude-personal"}
+{"claude_command": "/path/to/your-launcher"}
 ```
 
 The value is one program: a name or an absolute path, with no arguments. Namedrop looks up a name on that process's `PATH`, which comes from the Herdr or Rex server and may differ from your shell's `PATH`. If it cannot find the name, use an absolute path. Namedrop runs the program with the same arguments it gives `claude`, so a launcher must pass its arguments on, as `exec claude "$@"` does.

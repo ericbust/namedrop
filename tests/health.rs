@@ -289,7 +289,7 @@ fn doctor_names_the_claude_command_namedrop_runs() {
     );
     // And a settings file that exists but cannot be read: one that does not
     // parse, and a link that leads nowhere.
-    fs::write(&standalone, r#"{"claude_command":"claude-personal",}"#).unwrap();
+    fs::write(&standalone, r#"{"claude_command":"claude-launcher",}"#).unwrap();
     let unreadable = claude(&diagnose_collaboration(&f.runtime())).unwrap();
     assert_eq!(
         unreadable.severity,

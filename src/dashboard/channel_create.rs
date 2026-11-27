@@ -1028,16 +1028,16 @@ mod tests {
     fn the_claude_program_is_typed_as_a_shell_runs_it_or_refused() {
         use std::os::unix::ffi::OsStrExt;
         assert_eq!(
-            typed_program(Path::new("/Users/me/.local/bin/claude-personal")),
-            Ok("/Users/me/.local/bin/claude-personal".to_owned())
+            typed_program(Path::new("/Users/me/.local/bin/claude-launcher")),
+            Ok("/Users/me/.local/bin/claude-launcher".to_owned())
         );
         assert_eq!(
             typed_program(Path::new("/Users/me/my bin/it's claude")),
             Ok("'/Users/me/my bin/it'\"'\"'s claude'".to_owned())
         );
         for refused in [
-            Path::new("/Users/me/bin/claude\tpersonal"),
-            Path::new("/Users/me/bin/claude\npersonal"),
+            Path::new("/Users/me/bin/claude\tlauncher"),
+            Path::new("/Users/me/bin/claude\nlauncher"),
             Path::new(std::ffi::OsStr::from_bytes(b"/Users/me/bin/claude\xff")),
         ] {
             let reason = typed_program(refused).unwrap_err();
