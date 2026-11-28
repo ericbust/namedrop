@@ -152,6 +152,7 @@ pub(crate) fn reexec_command(launcher: &Path, selected: &Path) -> Result<Option<
     // A retry of a rejected hop must wait for a different selection.
     let attempt = reexec_attempt_marker(identity);
     if previous.as_ref() == Some(&attempt) {
+        let selected = fs::canonicalize(selected).unwrap_or_else(|_| selected.to_path_buf());
         return Err(format!(
             "The launcher did not select {}. The previous executable is still running.",
             selected.display()

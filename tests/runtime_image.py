@@ -66,6 +66,7 @@ def check(binary, root, keeps_old_image=False, unlink_old=False):
                 assert stdout.splitlines() == ['selected-image'], (child.returncode, stdout[:300], stderr[:300])
                 if keeps_old_image:
                     assert child.returncode != 0 and 'still running' in stderr, (stdout, stderr)
+                    assert str(new.resolve()) in stderr, stderr
                 else:
                     assert child.returncode == 0, (stdout, stderr)
             finally:

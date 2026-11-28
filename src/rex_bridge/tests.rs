@@ -1732,6 +1732,53 @@ fn a_refused_runtime_handoff_stops_the_bridge_before_queueing() {
     assert!(pending.due().is_none());
 }
 
+#[test]
+fn bridge_stops_when_a_scheduled_flush_cannot_hand_off() {
+    let state = State::new();
+    let stop = Wake::new().unwrap();
+    let server = Dials::new(
+        &state,
+        vec![Dial::Lasts {
+            lasts: Duration::from_millis(500),
+            deletes: false,
+        }],
+    );
+    let mut host = FakeHost {
+        reexec_error: Some("launcher kept the old runtime"),
+        ..Default::default()
+    };
+    bridged_with(&state, &server, &stop, &NO_WAIT, &mut host);
+    assert_eq!(
+        server.dialed().len(),
+        1,
+        "bridge dialed again after a refused handoff"
+    );
+    assert!(state.queued("session:s").is_empty());
+}
+
+#[test]
+fn bridge_stops_when_a_final_flush_cannot_hand_off() {
+    let state = State::new();
+    let stop = Wake::new().unwrap();
+    let server = Script::new(vec![(
+        Some("host-a"),
+        vec![Next::Ended("connection closed".to_owned())],
+        None,
+    )]);
+    let mut host = FakeHost {
+        reexec_error: Some("launcher kept the old runtime"),
+        ..Default::default()
+    };
+    bridged_with(&state, &server, &stop, &NO_WAIT, &mut host);
+    assert_eq!(server.waits.lock().unwrap().len(), 1);
+    assert_eq!(
+        server.dialed.lock().unwrap().len(),
+        1,
+        "bridge dialed again after the final flush refused the handoff"
+    );
+    assert!(state.queued("session:s").is_empty());
+}
+
 /// A flush that could not queue tries again a second later, even as new
 /// events keep coming in that second.
 #[test]

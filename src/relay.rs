@@ -97,19 +97,18 @@ pub fn run_worker(state: &Path, endpoint: &crate::mux::Endpoint, label: &str) {
         if stopped.get() {
             return Err("relay runtime check already failed".to_owned());
         }
-        let result = crate::runtime_command_guard(state, None).and_then(|gate| {
-            hand_over_if_replaced(state, &workers, &mut || {
-                for space in woken.take() {
-                    wake(&space);
-                }
-            })?;
-            Ok(gate)
+        let gate = crate::runtime_command_guard(state, None)?;
+        let result = hand_over_if_replaced(state, &workers, &mut || {
+            for space in woken.take() {
+                wake(&space);
+            }
         });
         if let Err(error) = &result {
             stopped.set(true);
-            eprintln!("Relay worker could not check or hand off its runtime: {error}");
+            eprintln!("Relay worker could not hand off its runtime: {error}");
         }
-        result
+        result?;
+        Ok(gate)
     };
     hold(state, endpoint, label, &mut || {
         worker::work(&mut worker::Run {
