@@ -157,3 +157,23 @@ fn retrying_a_refused_exec_waits_for_a_different_selection() {
         },
     );
 }
+
+#[test]
+fn a_missing_selected_runtime_names_the_executable_path() {
+    let fixture = Fixture {
+        state: env::temp_dir().join(format!("namedrop-image-missing-{}", std::process::id())),
+        child: None,
+    };
+    let runtime = fixture.state.join("runtime");
+    fs::create_dir_all(&runtime).unwrap();
+    fs::write(runtime.join("namedrop"), []).unwrap();
+
+    let error = replacement(&fixture.state).unwrap_err();
+    assert!(
+        error.contains(&format!(
+            "Could not read the selected runtime {}",
+            runtime.join("current/namedrop").display()
+        )),
+        "{error}"
+    );
+}

@@ -2572,7 +2572,7 @@ fn a_worker_retries_an_unavailable_command_gate() {
 }
 
 #[test]
-fn a_refused_runtime_handoff_stops_the_relay_before_opening_its_store() {
+fn a_worker_can_stop_on_a_gate_error_without_opening_its_store() {
     let space = Space::new(REX);
     let endpoint = Endpoint::parse(REX);
     let calls = std::cell::Cell::new(0);
@@ -2582,7 +2582,7 @@ fn a_refused_runtime_handoff_stops_the_relay_before_opening_its_store() {
         label: "devbox",
         gate: &|| {
             calls.set(calls.get() + 1);
-            Err("launcher kept the old runtime".to_owned())
+            Err("command gate unavailable".to_owned())
         },
         pause: &mut |_| false,
         woken: &std::cell::RefCell::default(),

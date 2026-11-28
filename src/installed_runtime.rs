@@ -142,7 +142,12 @@ pub(crate) fn replacement(state: &Path) -> Result<Option<Command>, String> {
 }
 
 pub(crate) fn reexec_command(launcher: &Path, selected: &Path) -> Result<Option<Command>, String> {
-    let identity = ExecutableIdentity::read(selected).map_err(|error| error.to_string())?;
+    let identity = ExecutableIdentity::read(selected).map_err(|error| {
+        format!(
+            "Could not read the selected runtime {}: {error}",
+            selected.display()
+        )
+    })?;
     let mut previous = incoming_reexec().lock().unwrap();
     if identity.is_running() {
         previous.take();
