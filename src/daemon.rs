@@ -47,7 +47,7 @@ pub enum Starter {
 /// hook's runtime, which say which agent ran it. `REX_BIN_DIR`, `REX_HOME`,
 /// and `REX_RUNTIME_DIR` stay, because they say how to run `rex`, not where
 /// this process runs.
-const SCRUBBED: [&str; 7] = [
+const SCRUBBED: [&str; 8] = [
     "REX_BLOCK",
     "REX_SESSION",
     "REX_CLIENT",
@@ -55,6 +55,7 @@ const SCRUBBED: [&str; 7] = [
     "CLAUDE_SESSION_ID",
     crate::mux::home::HOOK_RUNTIME,
     crate::rex_bridge::INHERITED_WORKERS,
+    crate::installed_runtime::REEXEC_ATTEMPT,
 ];
 
 /// The multiplexer timeouts, which a daemon of [`Starter::StopHook`] drops.
@@ -167,6 +168,7 @@ pub(crate) mod tests {
                 "CLAUDE_SESSION_ID",
                 "NAMEDROP_HOOK_RUNTIME",
                 "NAMEDROP_REX_BRIDGE_WORKERS",
+                "NAMEDROP_RUNTIME_REEXEC",
             ] {
                 assert_eq!(environment.get(name), Some(&None), "{starter:?} {name}");
             }
@@ -190,7 +192,7 @@ pub(crate) mod tests {
             }
             assert_eq!(
                 environment.len(),
-                if timeouts { 22 } else { 20 },
+                if timeouts { 23 } else { 21 },
                 "{environment:?}"
             );
         }
@@ -416,24 +418,14 @@ pub(crate) mod tests {
 
     /// Every production `Command::new` whose program is not a string literal
     /// naming one of `UTILITIES`, by file and call. A Namedrop self-spawn goes through `daemon::command`
-    /// or `daemon::scrub`; the four exceptions keep their identity on purpose.
+    /// or `daemon::scrub`; the exceptions keep their identity on purpose.
     const SPAWNS: &[(&str, &str, Spawn)] = &[
         ("daemon.rs", "Command::new(executable)", Spawn::Door),
         ("stop_hook.rs", "Command::new(executable)", Spawn::Scrubbed),
         (
-            "main.rs",
-            "Command::new(launcher)",
-            Spawn::Exception("the runtime re-exec replaces this process and keeps its identity"),
-        ),
-        (
             "installed_runtime.rs",
             "Command::new(launcher)",
             Spawn::Exception("the runtime re-exec replaces this process and keeps its identity"),
-        ),
-        (
-            "reminder/clock.rs",
-            "Command::new(selected)",
-            Spawn::Exception("the clock's re-exec into a replaced runtime keeps its identity"),
         ),
         (
             "dashboard/server_files.rs",

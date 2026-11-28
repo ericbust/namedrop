@@ -9,7 +9,15 @@ pub(crate) fn test_package_lease() -> PackageLease {
     PackageLease::development()
 }
 use sha2::Digest;
-use std::{fs, os::unix::fs::OpenOptionsExt, path::PathBuf};
+use std::{
+    env,
+    ffi::OsString,
+    fs, io,
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    path::{Path, PathBuf},
+    process::Command,
+    sync::{Mutex, OnceLock},
+};
 
 /// Hold across the command, including dispatch and shared package writes. The
 /// updater takes the exclusive lock while old commands drain and state migrates.
@@ -111,7 +119,7 @@ fn interrupted(state: &std::path::Path) -> String {
 /// reason the selected one could not start.
 pub fn reexec_if_replaced(state: &std::path::Path) -> Result<(), String> {
     use std::os::unix::process::CommandExt;
-    match replacement(state) {
+    match replacement(state)? {
         Some(mut command) => Err(command.exec().to_string()),
         None => Ok(()),
     }
@@ -119,16 +127,127 @@ pub fn reexec_if_replaced(state: &std::path::Path) -> Result<(), String> {
 
 /// The command that runs the selected runtime with this process's own
 /// arguments, once an update has selected another runtime.
-pub(crate) fn replacement(state: &std::path::Path) -> Option<std::process::Command> {
+pub(crate) fn replacement(state: &Path) -> Result<Option<Command>, String> {
     let launcher = state.join("runtime/namedrop");
-    (launcher.is_file()
-        && fs::canonicalize(state.join("runtime/current/namedrop")).ok()
-            != std::env::current_exe().and_then(fs::canonicalize).ok())
-    .then(|| {
-        let mut command = std::process::Command::new(launcher);
-        command.args(std::env::args_os().skip(1));
-        command
-    })
+    if !launcher.exists() {
+        forget_reexec_attempt();
+        return Ok(None);
+    }
+    Ok(
+        reexec_command(&launcher, &state.join("runtime/current/namedrop"))?.map(|mut command| {
+            command.args(env::args_os().skip(1));
+            command
+        }),
+    )
+}
+
+pub(crate) fn reexec_command(launcher: &Path, selected: &Path) -> Result<Option<Command>, String> {
+    let identity = ExecutableIdentity::read(selected).map_err(|error| {
+        format!(
+            "Could not read the selected runtime {}: {error}",
+            selected.display()
+        )
+    })?;
+    let mut previous = incoming_reexec().lock().unwrap();
+    if identity.is_running() {
+        previous.take();
+        return Ok(None);
+    }
+
+    // A retry of a rejected hop must wait for a different selection.
+    let attempt = reexec_attempt_marker(identity);
+    if previous.as_ref() == Some(&attempt) {
+        let selected = fs::canonicalize(selected).unwrap_or_else(|_| selected.to_path_buf());
+        return Err(format!(
+            "The launcher did not select {}. The previous executable is still running.",
+            selected.display()
+        ));
+    }
+    previous.take();
+    let mut command = Command::new(launcher);
+    command.env(REEXEC_ATTEMPT, attempt);
+    Ok(Some(command))
+}
+
+pub const REEXEC_ATTEMPT: &str = "NAMEDROP_RUNTIME_REEXEC";
+static INCOMING_REEXEC: OnceLock<Mutex<Option<OsString>>> = OnceLock::new();
+
+pub fn remember_reexec_attempt(attempt: Option<OsString>) {
+    let _ = INCOMING_REEXEC.set(Mutex::new(attempt));
+}
+
+fn incoming_reexec() -> &'static Mutex<Option<OsString>> {
+    INCOMING_REEXEC.get_or_init(|| Mutex::new(env::var_os(REEXEC_ATTEMPT)))
+}
+
+pub(crate) fn forget_reexec_attempt() {
+    incoming_reexec().lock().unwrap().take();
+}
+
+fn reexec_attempt_marker(identity: ExecutableIdentity) -> OsString {
+    format!(
+        "{}:{}:{}",
+        std::process::id(),
+        identity.device,
+        identity.inode
+    )
+    .into()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ExecutableIdentity {
+    device: u64,
+    inode: u64,
+}
+
+impl ExecutableIdentity {
+    pub(crate) fn read(path: &Path) -> io::Result<Self> {
+        let metadata = fs::metadata(path)?;
+        Ok(Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+
+    pub(crate) fn running() -> io::Result<Self> {
+        #[cfg(target_os = "linux")]
+        {
+            // The kernel link can still be statted after its file is unlinked.
+            Self::read(Path::new("/proc/self/exe"))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Self::read(&executable_image()?)
+        }
+    }
+
+    pub(crate) fn matches(self, other: Option<Self>) -> bool {
+        other == Some(self)
+    }
+
+    fn is_running(self) -> bool {
+        self.matches(Self::running().ok())
+    }
+}
+
+pub fn running_executable_matches(path: &Path) -> io::Result<bool> {
+    Ok(ExecutableIdentity::read(path)?.is_running())
+}
+
+/// The running executable image. On macOS current_exe can point through the
+/// movable runtime/current link, whereas libproc reports the executable vnode.
+pub fn executable_image() -> io::Result<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        use crate::mux::processes::{LocalProcesses, ThisMachine};
+        ThisMachine
+            .executable(std::process::id())
+            .ok_or_else(|| io::Error::other("could not read the running executable image"))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        env::current_exe().and_then(fs::canonicalize)
+    }
 }
 
 /// The state directory this installed runtime belongs to, or `None` for a
@@ -141,9 +260,7 @@ pub fn own_state() -> Option<PathBuf> {
 }
 
 pub(crate) fn directory() -> Result<Option<PathBuf>, String> {
-    let executable = std::env::current_exe()
-        .and_then(fs::canonicalize)
-        .map_err(|error| error.to_string())?;
+    let executable = executable_image().map_err(|error| error.to_string())?;
     let Some(release) = executable.parent() else {
         return Ok(None);
     };
@@ -285,3 +402,6 @@ pub fn validate_update_manifest(path: &std::path::Path) -> Result<(), String> {
 pub fn package_refusal(home: Option<&std::path::Path>, state: &std::path::Path) -> Option<String> {
     packages::refusal_notice(home, state)
 }
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod image_tests;

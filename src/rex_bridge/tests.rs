@@ -240,6 +240,7 @@ struct FakeHost {
     spawned: Vec<String>,
     pids: Vec<u32>,
     replaced: bool,
+    reexec_error: Option<&'static str>,
     workers: Workers,
     /// When the bridge started the relay's workers, and how often it does.
     relay_starts: Vec<Instant>,
@@ -275,10 +276,12 @@ impl Host for FakeHost {
         &self.workers
     }
 
-    fn reexec_if_replaced(&mut self) {
+    fn reexec_if_replaced(&mut self) -> Result<(), String> {
         if self.replaced {
             std::panic::resume_unwind(Box::new(Replaced));
         }
+        self.reexec_error
+            .map_or(Ok(()), |error| Err(error.to_owned()))
     }
 
     fn start_relay_workers(&mut self) {
@@ -1149,7 +1152,8 @@ fn old_image() {
         endpoint: &endpoint,
         workers,
     }
-    .reexec_if_replaced();
+    .reexec_if_replaced()
+    .unwrap();
     panic!("the bridge did not re-exec");
 }
 
@@ -1704,6 +1708,75 @@ fn an_unreadable_store_owes_one_resync_of_every_space_not_one_per_space() {
     flush(&state.0, &endpoint(), &mut pending, &mut host, &lock);
     assert_eq!(state.queued("session:s"), [resync("session:s")]);
     assert_eq!(state.queued("session:t"), [resync("session:t")]);
+}
+
+#[test]
+fn a_refused_runtime_handoff_stops_the_bridge_before_queueing() {
+    let state = State::new();
+    let lock = take(&state);
+    let mut host = FakeHost {
+        reexec_error: Some("launcher kept the old runtime"),
+        ..Default::default()
+    };
+    let mut pending = Pending::default();
+    pending.resync_every_space(Instant::now());
+    assert!(!flush(
+        &state.0,
+        &endpoint(),
+        &mut pending,
+        &mut host,
+        &lock
+    ));
+    assert!(state.queued("session:s").is_empty());
+    assert!(host.spawned.is_empty());
+    assert!(pending.due().is_none());
+}
+
+#[test]
+fn bridge_stops_when_a_scheduled_flush_cannot_hand_off() {
+    let state = State::new();
+    let stop = Wake::new().unwrap();
+    let server = Dials::new(
+        &state,
+        vec![Dial::Lasts {
+            lasts: Duration::from_millis(500),
+            deletes: false,
+        }],
+    );
+    let mut host = FakeHost {
+        reexec_error: Some("launcher kept the old runtime"),
+        ..Default::default()
+    };
+    bridged_with(&state, &server, &stop, &NO_WAIT, &mut host);
+    assert_eq!(
+        server.dialed().len(),
+        1,
+        "bridge dialed again after a refused handoff"
+    );
+    assert!(state.queued("session:s").is_empty());
+}
+
+#[test]
+fn bridge_stops_when_a_final_flush_cannot_hand_off() {
+    let state = State::new();
+    let stop = Wake::new().unwrap();
+    let server = Script::new(vec![(
+        Some("host-a"),
+        vec![Next::Ended("connection closed".to_owned())],
+        None,
+    )]);
+    let mut host = FakeHost {
+        reexec_error: Some("launcher kept the old runtime"),
+        ..Default::default()
+    };
+    bridged_with(&state, &server, &stop, &NO_WAIT, &mut host);
+    assert_eq!(server.waits.lock().unwrap().len(), 1);
+    assert_eq!(
+        server.dialed.lock().unwrap().len(),
+        1,
+        "bridge dialed again after the final flush refused the handoff"
+    );
+    assert!(state.queued("session:s").is_empty());
 }
 
 /// A flush that could not queue tries again a second later, even as new

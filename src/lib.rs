@@ -93,12 +93,16 @@ pub(crate) use install::{
 };
 pub use installed_runtime::command_guard as runtime_command_guard;
 #[doc(hidden)]
-pub use installed_runtime::executable as runtime_executable;
-#[doc(hidden)]
 pub use installed_runtime::package_refusal;
 pub use installed_runtime::reexec_if_replaced as runtime_reexec_if_replaced;
 #[doc(hidden)]
 pub use installed_runtime::validate_update_manifest;
+#[doc(hidden)]
+pub use installed_runtime::{
+    REEXEC_ATTEMPT as RUNTIME_REEXEC_ATTEMPT, executable as runtime_executable,
+    remember_reexec_attempt as runtime_remember_reexec_attempt,
+    running_executable_matches as runtime_running_executable_matches,
+};
 pub use installed_runtime::{
     Retirement, begin_removal as runtime_begin_removal,
     command_guard_allow_removed as runtime_removal_guard, own_state as runtime_own_state,

@@ -85,12 +85,16 @@ esac
     }
 
     fn namedrop(&self, human: bool) -> Command {
+        self.namedrop_in(&self.state(), human)
+    }
+
+    fn namedrop_in(&self, state: &Path, human: bool) -> Command {
         let mut command = crate::binary::namedrop();
         command
             .current_dir(self.root())
             .env("TMPDIR", self.root())
             .args([if human { "--human" } else { "--json" }, "--plugin-state"])
-            .arg(self.state())
+            .arg(state)
             .args(["--herdr-socket", "assets-test", "--herdr-workspace", "w1"])
             .env_remove("HERDR_PANE_ID")
             .env_remove("HERDR_WORKSPACE_ID")
@@ -970,6 +974,72 @@ fn launcher_started_server_hands_off_after_current_switches() {
     assert_phase(&successor, false);
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn channels_server_keeps_serving_when_state_uses_the_data_volume_alias() {
+    use std::os::unix::fs::MetadataExt;
+
+    let dashboard = Dashboard::new();
+    let runtime = dashboard.state().join("runtime");
+    let release = PathBuf::from("releases").join("a".repeat(64));
+    fs::create_dir_all(runtime.join(&release)).unwrap();
+    let state = fs::canonicalize(dashboard.state()).unwrap();
+    let alias = Path::new("/System/Volumes/Data").join(state.strip_prefix("/").unwrap());
+    if !alias.is_dir() {
+        return;
+    }
+
+    let image = runtime.join(&release).join("namedrop");
+    copy_executable(binary::namedrop_path(), &image);
+    fs::write(
+        runtime.join(&release).join("runtime.json"),
+        include_str!("../runtime.json"),
+    )
+    .unwrap();
+    let launcher = include_str!("../scripts/runtime.py")
+        .split_once("LAUNCHER = '''")
+        .unwrap()
+        .1
+        .split_once("'''")
+        .unwrap()
+        .0;
+    write_executable(runtime.join("namedrop"), launcher);
+    symlink(&release, runtime.join("current")).unwrap();
+
+    let selected = fs::canonicalize(alias.join("runtime/current/namedrop")).unwrap();
+    assert_ne!(selected, fs::canonicalize(&image).unwrap());
+    let selected = fs::metadata(selected).unwrap();
+    let image = fs::metadata(image).unwrap();
+    assert_eq!((selected.dev(), selected.ino()), (image.dev(), image.ino()));
+
+    let opened = data(
+        dashboard
+            .namedrop_in(&alias, false)
+            .args(["channels", "--no-open"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(opened["server"], "started");
+    let first = dashboard.info();
+    let token = fs::read_to_string(dashboard.state().join("dashboard/token")).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let response = dashboard.get(&format!("/healthz?t={token}"), false);
+        response.status(200);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&response.body).unwrap(),
+            serde_json::json!({"instance": first["instance"], "restarting": false})
+        );
+        let current = dashboard.info();
+        assert_eq!(current["pid"], first["pid"]);
+        assert_eq!(current["instance"], first["instance"]);
+        if Instant::now() >= deadline {
+            break;
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+}
+
 #[test]
 fn old_embedded_metadata_defaults_to_embedded_and_stale_metadata_does_not_choose_a_ui() {
     let dashboard = Dashboard::new();
@@ -1161,6 +1231,17 @@ fn doctor_channels_runtime_accepts_the_current_server() {
     dashboard.open(None);
     assert_eq!(dashboard.info()["executable"], installed.to_str().unwrap());
     assert!(doctor_channels_runtime(&dashboard).is_none());
+    #[cfg(target_os = "macos")]
+    {
+        let alias = Path::new("/System/Volumes/Data").join(installed.strip_prefix("/").unwrap());
+        let mut info = dashboard.info();
+        info["executable"] = serde_json::json!(alias);
+        let dir = dashboard.state().join("dashboard");
+        let staged = dir.join("server.next");
+        fs::write(&staged, info.to_string()).unwrap();
+        fs::rename(staged, dir.join("server.json")).unwrap();
+        assert!(doctor_channels_runtime(&dashboard).is_none());
+    }
 }
 
 #[test]

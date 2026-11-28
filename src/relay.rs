@@ -92,13 +92,22 @@ pub fn run_worker(state: &Path, endpoint: &crate::mux::Endpoint, label: &str) {
     let wake = |space: &crate::SpaceId| {
         wake_reaped(state, endpoint, space, &mut |child| workers.reap(child));
     };
+    let stopped = std::cell::Cell::new(false);
     let gate = || {
+        if stopped.get() {
+            return Err("relay runtime check already failed".to_owned());
+        }
         let gate = crate::runtime_command_guard(state, None)?;
-        hand_over_if_replaced(state, &workers, &mut || {
+        let result = hand_over_if_replaced(state, &workers, &mut || {
             for space in woken.take() {
                 wake(&space);
             }
         });
+        if let Err(error) = &result {
+            stopped.set(true);
+            eprintln!("Relay worker could not hand off its runtime: {error}");
+        }
+        result?;
         Ok(gate)
     };
     hold(state, endpoint, label, &mut || {
@@ -108,6 +117,9 @@ pub fn run_worker(state: &Path, endpoint: &crate::mux::Endpoint, label: &str) {
             label,
             gate: &gate,
             pause: &mut |within| {
+                if stopped.get() {
+                    return false;
+                }
                 wait_for_new(
                     state,
                     endpoint,
@@ -120,6 +132,7 @@ pub fn run_worker(state: &Path, endpoint: &crate::mux::Endpoint, label: &str) {
             woken: &woken,
             wake: &mut |space| wake(space),
         });
+        !stopped.get()
     });
 }
 
@@ -130,21 +143,28 @@ fn hand_over_if_replaced(
     state: &Path,
     workers: &crate::rex_bridge::Workers,
     before: &mut dyn FnMut(),
-) {
+) -> Result<(), String> {
     use std::os::unix::process::CommandExt;
-    if let Some(mut command) = crate::installed_runtime::replacement(state) {
+    if let Some(mut command) = crate::installed_runtime::replacement(state)? {
         before();
-        let _ = command
+        return Err(command
             .env(crate::rex_bridge::INHERITED_WORKERS, workers.live())
-            .exec();
+            .exec()
+            .to_string());
     }
+    Ok(())
 }
 
 /// Runs `work` while holding the worker's lock for `label`, and again while
 /// an item is queued once it lets go. A send whose start found the lock
 /// held just before `work` ended started no worker, so the last holder
 /// looks for its item.
-fn hold(state: &Path, endpoint: &crate::mux::Endpoint, label: &str, work: &mut dyn FnMut()) {
+fn hold(
+    state: &Path,
+    endpoint: &crate::mux::Endpoint,
+    label: &str,
+    work: &mut dyn FnMut() -> bool,
+) {
     if !valid_label(label) {
         return;
     }
@@ -159,9 +179,9 @@ fn hold(state: &Path, endpoint: &crate::mux::Endpoint, label: &str, work: &mut d
     while crate::installed_runtime::retirement::check(state, false).is_ok()
         && lock.try_lock().is_ok()
     {
-        work();
+        let keep_working = work();
         let _ = lock.unlock();
-        if crate::installed_runtime::retirement::check(state, false).is_err() {
+        if !keep_working || crate::installed_runtime::retirement::check(state, false).is_err() {
             return;
         }
         let queued = RelayStore::read(state)

@@ -1,4 +1,5 @@
 use super::snapshot::RepoRef;
+use crate::installed_runtime::{self, ExecutableIdentity};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -207,7 +208,12 @@ pub(crate) fn outdated_runtime(state: &Path) -> Option<(ServerInfo, PathBuf)> {
         dir: state.join("dashboard"),
     };
     let info = files.info()?;
-    if info.executable.as_ref() == Some(&installed) {
+    let identity = ExecutableIdentity::read(&installed).ok()?;
+    if identity.matches(
+        info.executable
+            .as_deref()
+            .and_then(|path| ExecutableIdentity::read(path).ok()),
+    ) {
         return None;
     }
     let token = fs::read_to_string(files.dir.join("token")).ok()?;
@@ -251,14 +257,17 @@ pub(crate) struct ServerFiles {
 pub(crate) struct RunningServerFiles {
     files: ServerFiles,
     startup_executable: Option<PathBuf>,
+    startup_identity: Option<ExecutableIdentity>,
 }
 
 impl RunningServerFiles {
     pub fn at(state: &Path) -> Result<Self, String> {
-        let startup_executable = std::env::current_exe().and_then(fs::canonicalize).ok();
+        let startup_executable = installed_runtime::executable_image().ok();
+        let startup_identity = ExecutableIdentity::running().ok();
         Ok(Self {
             files: ServerFiles::at(state)?,
             startup_executable,
+            startup_identity,
         })
     }
 
@@ -272,7 +281,9 @@ impl RunningServerFiles {
     pub fn runtime_changed(&self) -> bool {
         let runtime = self.state().join("runtime");
         runtime.join("namedrop").exists()
-            && fs::canonicalize(runtime.join("current/namedrop")).ok() != self.startup_executable
+            && self.startup_identity.is_some_and(|image| {
+                !image.matches(ExecutableIdentity::read(&runtime.join("current/namedrop")).ok())
+            })
     }
 
     pub fn restarting(&self) -> bool {

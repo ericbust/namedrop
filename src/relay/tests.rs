@@ -607,3 +607,70 @@ fn a_working_worker_runs_the_selected_runtime_in_its_place() {
         "the worker ran the launcher with its own arguments: {replaced:?}"
     );
 }
+
+#[test]
+fn relay_worker_exits_after_a_refused_handoff_with_queued_work() {
+    use std::{
+        os::unix::fs::{MetadataExt, symlink},
+        process::{Command, Stdio},
+        thread,
+        time::{Duration, Instant},
+    };
+
+    const STATE: &str = "NAMEDROP_RELAY_TEST_REFUSAL_STATE";
+    if let Some(state) = std::env::var_os(STATE).map(PathBuf::from) {
+        let selected = fs::metadata(state.join("runtime/current/namedrop")).unwrap();
+        let attempt = format!(
+            "{}:{}:{}",
+            std::process::id(),
+            selected.dev(),
+            selected.ino()
+        );
+        crate::installed_runtime::remember_reexec_attempt(Some(attempt.into()));
+        super::run_worker(&state, &crate::mux::Endpoint::parse(REX), "devbox");
+        return;
+    }
+
+    let space = Space::new(REX);
+    let store = super::tests_support::store(&space.state);
+    super::tests_support::queue(&store, "devbox", REX);
+    let runtime = space.state.join("runtime");
+    fs::create_dir_all(runtime.join("current")).unwrap();
+    symlink("/usr/bin/true", runtime.join("current/namedrop")).unwrap();
+    symlink("/usr/bin/false", runtime.join("namedrop")).unwrap();
+
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "relay::tests::relay_worker_exits_after_a_refused_handoff_with_queued_work",
+            "--nocapture",
+        ])
+        .env_clear()
+        .env(STATE, &space.state)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let output = child.wait_with_output().unwrap();
+            panic!(
+                "relay worker did not stop within 3 s after handoff refusal: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    let output = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert_eq!(
+        stderr.matches("The launcher did not select").count(),
+        1,
+        "{stderr}"
+    );
+    assert_eq!(store.queued("devbox", REX).unwrap().len(), 1);
+}

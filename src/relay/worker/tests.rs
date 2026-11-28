@@ -2514,11 +2514,82 @@ fn a_worker_works_again_for_an_item_queued_as_it_lets_go() {
                     .unwrap();
             }
         }
+        true
     });
     assert_eq!(runs, 2);
     let mut again = 0;
-    crate::relay::hold(&space.state, &endpoint, "devbox", &mut || again += 1);
+    crate::relay::hold(&space.state, &endpoint, "devbox", &mut || {
+        again += 1;
+        true
+    });
     assert_eq!(again, 1, "with nothing queued it works once");
+}
+
+#[test]
+fn relay_leaves_hold_after_a_refused_handoff_with_items_queued() {
+    let space = Space::new(REX);
+    let endpoint = Endpoint::parse(REX);
+    let store = crate::relay::tests_support::store(&space.state);
+    crate::relay::tests_support::queue(&store, "devbox", REX);
+    let mut runs = 0;
+    crate::relay::hold(&space.state, &endpoint, "devbox", &mut || {
+        runs += 1;
+        assert_eq!(runs, 1, "relay re-entered hold after a refused handoff");
+        false
+    });
+    assert_eq!(runs, 1);
+    assert_eq!(store.queued("devbox", &endpoint.key).unwrap().len(), 1);
+}
+
+#[test]
+fn a_worker_retries_an_unavailable_command_gate() {
+    let space = Space::new(REX);
+    let endpoint = Endpoint::parse(REX);
+    let attempts = std::cell::Cell::new(0);
+    let mut waits = Vec::new();
+    work(&mut Run {
+        state: &space.state,
+        endpoint: &endpoint,
+        label: "devbox",
+        gate: &|| {
+            let attempt = attempts.get() + 1;
+            attempts.set(attempt);
+            if attempt == 1 {
+                Err("activation in progress".to_owned())
+            } else {
+                Ok(None)
+            }
+        },
+        pause: &mut |within| {
+            waits.push(within);
+            waits.len() == 1
+        },
+        woken: &std::cell::RefCell::default(),
+        wake: &mut |_| panic!("no mail is queued"),
+    });
+    assert_eq!(waits, [BACKOFF[0]]);
+    assert!(attempts.get() > 1, "worker did not retry the command gate");
+}
+
+#[test]
+fn a_worker_can_stop_on_a_gate_error_without_opening_its_store() {
+    let space = Space::new(REX);
+    let endpoint = Endpoint::parse(REX);
+    let calls = std::cell::Cell::new(0);
+    work(&mut Run {
+        state: &space.state,
+        endpoint: &endpoint,
+        label: "devbox",
+        gate: &|| {
+            calls.set(calls.get() + 1);
+            Err("command gate unavailable".to_owned())
+        },
+        pause: &mut |_| false,
+        woken: &std::cell::RefCell::default(),
+        wake: &mut |_| panic!("worker woke a pane after a failed runtime check"),
+    });
+    assert_eq!(calls.get(), 1);
+    assert!(!space.state.join("relay.sqlite3").exists());
 }
 
 /// B's `host_id` is read again each round, so an item sent after the

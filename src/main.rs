@@ -39,6 +39,12 @@ use std::{os::unix::fs::PermissionsExt, time::SystemTime};
 type Runtime<'a> = LifecycleRuntime<'a, Arc<dyn Mux>, SystemClock, ProcessIds>;
 
 fn main() -> ExitCode {
+    let attempt = env::var_os(namedrop::RUNTIME_REEXEC_ATTEMPT);
+    if attempt.is_some() {
+        // SAFETY: no threads have started yet.
+        unsafe { env::remove_var(namedrop::RUNTIME_REEXEC_ATTEMPT) };
+    }
+    namedrop::runtime_remember_reexec_attempt(attempt);
     let inherited: &dyn Inherited = &namedrop::mux::home::ThisProcess;
     // The contract query reads no state and makes no Rex call, so an
     // updater can ask it of any runtime, a retired state's included.
@@ -176,8 +182,10 @@ fn main() -> ExitCode {
         if !state.is_absolute()
             || !gate_matches
             || !state.join("runtime/migration.json").is_file()
-            || fs::canonicalize(state.join("runtime/current/namedrop")).ok()
-                != env::current_exe().and_then(fs::canonicalize).ok()
+            || !namedrop::runtime_running_executable_matches(
+                &state.join("runtime/current/namedrop"),
+            )
+            .unwrap_or(false)
         {
             eprintln!(
                 "State migration requires the selected runtime, inherited command gate, and a pending activation."
@@ -427,26 +435,18 @@ fn main() -> ExitCode {
     // started before activation completed or before a failed switch rolled back.
     if let Some(state) = selected_state.as_deref()
         && !cli.dashboard_inherit_claim()
+        && let Err(error) = namedrop::runtime_reexec_if_replaced(state)
     {
-        let launcher = state.join("runtime/namedrop");
-        if launcher.exists() {
-            let selected = fs::canonicalize(state.join("runtime/current/namedrop"));
-            let running = env::current_exe().and_then(fs::canonicalize);
-            if selected.as_ref().ok() != running.as_ref().ok() || selected.is_err() {
-                use std::os::unix::process::CommandExt;
-                let error = Command::new(launcher).args(env::args_os().skip(1)).exec();
-                if cli.rex_action().is_some() {
-                    return rex_action_result(Err(format!(
-                        "Could not run the selected Namedrop runtime: {error}"
-                    )));
-                }
-                eprintln!("Could not run the selected Namedrop runtime: {error}");
-                // A layer may wait long for its key, and an update, the
-                // repair here, needs the gate meanwhile.
-                drop(command_guard);
-                return refuse_before_screen(&cli, inherited, 69);
-            }
+        if cli.rex_action().is_some() {
+            return rex_action_result(Err(format!(
+                "Could not run the selected Namedrop runtime: {error}"
+            )));
         }
+        eprintln!("Could not run the selected Namedrop runtime: {error}");
+        // A layer may wait long for its key, and an update, the
+        // repair here, needs the gate meanwhile.
+        drop(command_guard);
+        return refuse_before_screen(&cli, inherited, 69);
     }
     if let Some((print_config, false)) = cli.install_options() {
         return finish(

@@ -833,7 +833,7 @@
       "file": "src/daemon.rs",
       "reason": "An environment or config name read or set, never printed.",
       "literals": [
-        [61, "NAMEDROP_HERDR_TIMEOUT_MS"]
+        [62, "NAMEDROP_HERDR_TIMEOUT_MS"]
       ]
     },
     {
@@ -1186,7 +1186,7 @@
       "file": "src/reminder/clock.rs",
       "reason": "The reminder clock with neither a socket passed nor one recorded; every caller passes its endpoint and every reminder records one.",
       "literals": [
-        [156, "pending reminders have no Herdr socket"]
+        [157, "pending reminders have no Herdr socket"]
       ]
     },
     {

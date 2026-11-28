@@ -256,7 +256,7 @@ trait Host {
     /// Under the command gate, runs a replaced runtime in this process's
     /// place, as the same command, and hands it the workers. Returns only
     /// when there is none to run.
-    fn reexec_if_replaced(&mut self);
+    fn reexec_if_replaced(&mut self) -> Result<(), String>;
     /// Starts the relay's worker of each label with an item queued or a
     /// thread open, unless it runs.
     fn start_relay_workers(&mut self);
@@ -285,11 +285,15 @@ impl Host for Processes<'_> {
         &self.workers
     }
 
-    fn reexec_if_replaced(&mut self) {
+    fn reexec_if_replaced(&mut self) -> Result<(), String> {
         use std::os::unix::process::CommandExt;
-        if let Some(mut command) = crate::installed_runtime::replacement(self.state) {
-            let _ = command.env(INHERITED_WORKERS, self.workers.live()).exec();
+        if let Some(mut command) = crate::installed_runtime::replacement(self.state)? {
+            return Err(command
+                .env(INHERITED_WORKERS, self.workers.live())
+                .exec()
+                .to_string());
         }
+        Ok(())
     }
 
     fn start_relay_workers(&mut self) {
@@ -448,8 +452,10 @@ fn serve(
                         return;
                     }
                     let now = Instant::now();
-                    if pending.due().is_some_and(|due| due <= now) {
-                        flush(state, endpoint, &mut pending, host, lock);
+                    if pending.due().is_some_and(|due| due <= now)
+                        && !flush(state, endpoint, &mut pending, host, lock)
+                    {
+                        return;
                     }
                     if relay_due <= now {
                         host.start_relay_workers();
@@ -478,7 +484,9 @@ fn serve(
                         Next::Quiet => {}
                         Next::Ended(_) => {
                             relay.abandon();
-                            flush(state, endpoint, &mut pending, host, lock);
+                            if !flush(state, endpoint, &mut pending, host, lock) {
+                                return;
+                            }
                             break;
                         }
                     }
@@ -524,28 +532,34 @@ fn flush(
     pending: &mut Pending,
     host: &mut dyn Host,
     lock: &Lock,
-) {
+) -> bool {
     let batch = pending.take();
     if batch.is_empty() {
-        return;
+        return true;
     }
     if crate::installed_runtime::retirement::check(state, false).is_err() {
-        return;
+        return false;
     }
     let gate = crate::runtime_command_guard(state, None);
     if !lock.held() {
-        return;
+        return false;
     }
     let retry = Instant::now() + RETRY;
-    let Some((_gate, activated)) = gate.ok().and_then(|gate| {
-        host.reexec_if_replaced();
-        Some((gate, activated_spaces(state, endpoint)?))
-    }) else {
+    let activated = if gate.is_ok() {
+        if let Err(error) = host.reexec_if_replaced() {
+            eprintln!("Rex bridge could not hand off its runtime: {error}");
+            return false;
+        }
+        activated_spaces(state, endpoint)
+    } else {
+        None
+    };
+    let Some(activated) = activated else {
         // Which spaces are activated is unknown, so the next try resyncs
         // each one, which recovers every event of the batch.
         pending.resync_every_space(Instant::now());
         pending.wait_until(retry);
-        return;
+        return true;
     };
     for (space, events) in by_space(batch, &activated) {
         if !activated.contains(&space) {
@@ -564,6 +578,7 @@ fn flush(
             host.workers().reap(worker);
         }
     }
+    true
 }
 
 /// `batch`'s events by space, after a `Resync` of each `activated` space
